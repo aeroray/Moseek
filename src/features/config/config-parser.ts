@@ -1,6 +1,10 @@
 import JSON5 from "json5";
 
-import { RawConfigSchema, type RawSite } from "@/features/config/config-schema";
+import {
+  RawConfigSchema,
+  type RawLive,
+  type RawSite,
+} from "@/features/config/config-schema";
 import type { CapabilityStatus, SourceRecord } from "@/types/moseek";
 
 export interface ParseIssue {
@@ -78,9 +82,13 @@ export function parseConfigText(rawText: string): ParseResult {
     };
   }
 
-  const sources = validation.data.sites.map((site, index) =>
+  const siteSources = validation.data.sites.map((site, index) =>
     classifySource(site, index),
   );
+  const liveSources = validation.data.lives.map((live, index) =>
+    classifyLiveSource(live, index),
+  );
+  const sources = [...siteSources, ...liveSources];
   const rootRecord = validation.data as Record<string, unknown>;
   const blockedRootFields = Object.keys(rootRecord).filter(
     (key) =>
@@ -96,7 +104,7 @@ export function parseConfigText(rawText: string): ParseResult {
     line: null,
     column: null,
   }));
-  sources.forEach((source, index) => {
+  siteSources.forEach((source, index) => {
     if (source.capability === "invalid") {
       issues.push({
         severity: "error",
@@ -115,6 +123,25 @@ export function parseConfigText(rawText: string): ParseResult {
       });
     }
   });
+  liveSources.forEach((source, index) => {
+    if (source.capability === "invalid") {
+      issues.push({
+        severity: "error",
+        path: `lives.${index}`,
+        message: source.capabilityNote,
+        line: null,
+        column: null,
+      });
+    } else if (source.capability !== "supported") {
+      issues.push({
+        severity: "warning",
+        path: `lives.${index}`,
+        message: source.capabilityNote,
+        line: null,
+        column: null,
+      });
+    }
+  });
 
   return {
     ok: true,
@@ -123,7 +150,7 @@ export function parseConfigText(rawText: string): ParseResult {
       {
         schemaVersion: "0.1",
         sites: sources,
-        lives: validation.data.lives,
+        lives: liveSources,
         parses: validation.data.parses,
         blockedFields: blockedRootFields,
       },
@@ -181,6 +208,7 @@ function classifySource(site: RawSite, index: number): SourceRecord {
     api,
     ext: site.ext,
     jar: site.jar,
+    epg: site.epg,
     searchable:
       site.searchable ??
       (capability === "supported" || capability === "partial"),
@@ -188,6 +216,48 @@ function classifySource(site: RawSite, index: number): SourceRecord {
     capability,
     capabilityNote,
     enabled: capability === "supported" || capability === "partial",
+    lastCheckedAt: "刚刚",
+    requestCount: 0,
+  };
+}
+
+function classifyLiveSource(live: RawLive, index: number): SourceRecord {
+  const key = live.key ?? `live-${index + 1}`;
+  const name = live.name ?? `直播源 ${index + 1}`;
+  const api = live.url ?? live.source ?? live.api ?? "";
+  const normalizedApi = api.toLowerCase();
+  const hasRequiredFields = Boolean(name && api);
+  const hasDangerousProtocol = /^(javascript|data|file|shell):/i.test(api);
+  const hasPrivateProtocol = !/^https?:\/\//i.test(api);
+
+  let capability: CapabilityStatus;
+  let capabilityNote: string;
+  if (!hasRequiredFields) {
+    capability = "invalid";
+    capabilityNote = "直播源缺少 name 或 url/api 字段。";
+  } else if (hasDangerousProtocol) {
+    capability = "blocked";
+    capabilityNote = "直播源使用危险协议，Moseek 默认阻止执行。";
+  } else if (hasPrivateProtocol || normalizedApi.startsWith("proxy://")) {
+    capability = "needs-adapter";
+    capabilityNote = "直播源使用非 HTTP 协议，需要单独适配器，当前不执行。";
+  } else {
+    capability = "supported";
+    capabilityNote = "支持通过 Rust 网络层解析 M3U、TXT 或 JSON 直播频道。";
+  }
+
+  return {
+    key,
+    name,
+    sourceType: "live",
+    api,
+    ext: live.ext,
+    epg: live.epg,
+    searchable: capability === "supported",
+    filterable: capability === "supported",
+    capability,
+    capabilityNote,
+    enabled: capability === "supported",
     lastCheckedAt: "刚刚",
     requestCount: 0,
   };

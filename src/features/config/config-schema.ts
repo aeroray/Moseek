@@ -13,6 +13,7 @@ export const RawSiteSchema = z
     api: optionalText,
     ext: optionalText,
     jar: optionalText,
+    epg: optionalText,
     searchable: z.boolean().optional(),
     quickSearch: z.boolean().optional(),
     filterable: z.boolean().optional(),
@@ -20,13 +21,26 @@ export const RawSiteSchema = z
   })
   .passthrough();
 
+export const RawLiveSchema = z
+  .object({
+    key: optionalText,
+    name: optionalText,
+    url: optionalText,
+    source: optionalText,
+    api: optionalText,
+    ext: optionalText,
+    epg: optionalText,
+  })
+  .passthrough();
+
 export const RawConfigSchema = z
   .object({
     sites: z.array(RawSiteSchema).default([]),
-    lives: z.array(z.unknown()).default([]),
+    lives: z.array(RawLiveSchema).default([]),
     parses: z.array(z.unknown()).default([]),
   })
   .passthrough();
 
 export type RawSite = z.infer<typeof RawSiteSchema>;
+export type RawLive = z.infer<typeof RawLiveSchema>;
 export type RawConfig = z.infer<typeof RawConfigSchema>;

@@ -8,3 +8,5 @@
 - Vite watcher ignores `src-tauri/**` because Windows file locks in Rust build artifacts can otherwise terminate the frontend dev server with `EBUSY`.
 - Tauri uses the checked-in `src-tauri/icons/icon.svg` as the source for generated platform icons; the current bundle is disabled until installer packaging is configured.
 - Phase 3 ordinary CMS support uses Rust reqwest commands for common `ac=list` and `ac=detail` JSON APIs, normalizing list/detail/play-line fields into the shared `VodItem` model; browser preview falls back to local demo catalog data without bypassing the Rust network boundary.
+- Phase 4 media playback uses Plyr 3.8 with hls.js for HLS and native video for MP4. Progress, movie favorites, and live-channel favorites persist in the frontend store; live M3U/TXT/JSON parsing and XMLTV/JSON EPG parsing remain behind Rust commands with browser demo fallbacks.
+- External playback is user-triggered through `tauri-plugin-opener` and only accepts HTTP/HTTPS URLs. CMS episode URLs and live stream URLs are rejected when they use dangerous, localhost, private-network, or unsupported protocols.

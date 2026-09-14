@@ -24,8 +24,8 @@ import { BrowseView } from "@/features/browse/browse-view";
 import { FavoritesView } from "@/features/browse/favorites-view";
 import { HistoryView } from "@/features/browse/history-view";
 import { ConfigCenter } from "@/features/config/config-center";
+import { LiveView } from "@/features/live/live-view";
 import { HomeView } from "@/features/overview/home-view";
-import { PlaceholderView } from "@/features/placeholder-view";
 import { SettingsView } from "@/features/settings/settings-view";
 import { useAppStore } from "@/stores/app-store";
 import type { ViewKey } from "@/types/moseek";
@@ -134,16 +134,7 @@ function App() {
           <SettingsView theme={theme} onThemeChange={setTheme} />
         )}
         {activeView === "browse" && <BrowseView onNavigate={navigate} />}
-        {activeView === "live" && (
-          <PlaceholderView
-            icon={Radio}
-            title="直播工作区"
-            description="M3U、TXT、JSON 直播源和 EPG 会在播放层接入后显示在这里。"
-            actionLabel="查看配置源"
-            actionView="config"
-            onAction={navigate}
-          />
-        )}
+        {activeView === "live" && <LiveView />}
         {activeView === "favorites" && <FavoritesView onNavigate={navigate} />}
         {activeView === "history" && <HistoryView onNavigate={navigate} />}
       </AppShell>

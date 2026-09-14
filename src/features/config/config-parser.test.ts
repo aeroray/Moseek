@@ -13,16 +13,18 @@ describe("Moseek config parser", () => {
         { key: "clzy", name: "初恋资源", type: 1, api: "https://cms.example/api" },
         { key: "xiaohu", name: "小胡", type: 3, api: "https://cms.example/xiaohu", jar: "https://cdn.example/xiaohu.jar" }
       ],
-      lives: [{ name: "新闻", url: "https://live.example/news.m3u8" }],
+      lives: [{ name: "新闻", url: "https://live.example/news.m3u8", epg: "https://live.example/guide.xml" }],
     }`);
 
     expect(result.ok).toBe(true);
-    expect(result.sources).toHaveLength(2);
+    expect(result.sources).toHaveLength(3);
     expect(result.sources[0]?.capability).toBe("supported");
     expect(result.sources[1]?.capability).toBe("partial");
+    expect(result.sources[2]?.sourceType).toBe("live");
+    expect(result.sources[2]?.epg).toBe("https://live.example/guide.xml");
     expect(result.liveCount).toBe(1);
     expect(countParsedCapabilities(result.sources)).toMatchObject({
-      supported: 1,
+      supported: 2,
       partial: 1,
     });
   });

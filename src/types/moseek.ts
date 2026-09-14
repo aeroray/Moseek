@@ -20,6 +20,8 @@ export type ThemeMode = "system" | "light" | "dark";
 
 export type CatalogViewMode = "grid" | "list";
 
+export type MediaKind = "hls" | "mp4" | "unknown";
+
 export interface VodCategory {
   id: string;
   name: string;
@@ -72,6 +74,41 @@ export interface PlayHistoryRecord {
   updatedAt: string;
 }
 
+export interface LiveGroup {
+  id: string;
+  name: string;
+}
+
+export interface LiveChannel {
+  id: string;
+  name: string;
+  groupId: string;
+  groupName: string;
+  logoUrl: string;
+  streamUrl: string;
+  mediaKind: MediaKind;
+  sourceKey: string;
+  epgId?: string;
+}
+
+export interface LiveCatalog {
+  channels: LiveChannel[];
+  groups: LiveGroup[];
+}
+
+export interface EpgProgram {
+  id: string;
+  channelId: string;
+  title: string;
+  description: string;
+  startAt: string;
+  endAt: string;
+}
+
+export interface EpgCatalog {
+  programs: EpgProgram[];
+}
+
 export interface SourceRecord {
   key: string;
   name: string;
@@ -79,6 +116,7 @@ export interface SourceRecord {
   api: string;
   ext?: string;
   jar?: string;
+  epg?: string;
   searchable: boolean;
   filterable: boolean;
   capability: CapabilityStatus;

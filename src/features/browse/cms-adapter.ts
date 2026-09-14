@@ -66,7 +66,11 @@ export async function getVodDetail(
   return { data: getMockDetail(item.id) ?? item, mode: "demo", error: null };
 }
 
-function emptyCatalog(sourceKey: string, page: number, pageSize: number): CatalogPage {
+function emptyCatalog(
+  sourceKey: string,
+  page: number,
+  pageSize: number,
+): CatalogPage {
   return {
     sourceKey,
     items: [],

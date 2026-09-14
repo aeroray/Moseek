@@ -8,6 +8,7 @@ import type {
   SourceRecord,
   ThemeMode,
   ViewKey,
+  LiveChannel,
   VodItem,
 } from "@/types/moseek";
 
@@ -20,6 +21,8 @@ interface AppStore {
   lastImportedAt: string | null;
   history: PlayHistoryRecord[];
   favorites: VodItem[];
+  playbackProgress: Record<string, number>;
+  liveFavorites: string[];
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
   toggleSource: (key: string) => void;
@@ -32,6 +35,8 @@ interface AppStore {
   addHistory: (record: Omit<PlayHistoryRecord, "id" | "updatedAt">) => void;
   clearHistory: () => void;
   toggleFavorite: (item: VodItem) => void;
+  setPlaybackProgress: (historyId: string, seconds: number) => void;
+  toggleLiveFavorite: (channel: LiveChannel) => void;
 }
 
 export const useAppStore = create<AppStore>()(
@@ -45,6 +50,8 @@ export const useAppStore = create<AppStore>()(
       lastImportedAt: null,
       history: [],
       favorites: [],
+      playbackProgress: {},
+      liveFavorites: [],
       setActiveView: (activeView) => set({ activeView }),
       setTheme: (theme) => set({ theme }),
       toggleSource: (key) => {
@@ -90,6 +97,25 @@ export const useAppStore = create<AppStore>()(
               : [item, ...state.favorites],
           };
         }),
+      setPlaybackProgress: (historyId, seconds) =>
+        set((state) => {
+          const progress = Math.max(0, Math.floor(seconds));
+          return {
+            playbackProgress: {
+              ...state.playbackProgress,
+              [historyId]: progress,
+            },
+            history: state.history.map((record) =>
+              record.id === historyId ? { ...record, progress } : record,
+            ),
+          };
+        }),
+      toggleLiveFavorite: (channel) =>
+        set((state) => ({
+          liveFavorites: state.liveFavorites.includes(channel.id)
+            ? state.liveFavorites.filter((id) => id !== channel.id)
+            : [channel.id, ...state.liveFavorites],
+        })),
     }),
     {
       name: "moseek-app-state",
@@ -102,6 +128,8 @@ export const useAppStore = create<AppStore>()(
         lastImportedAt: state.lastImportedAt,
         history: state.history,
         favorites: state.favorites,
+        playbackProgress: state.playbackProgress,
+        liveFavorites: state.liveFavorites,
       }),
     },
   ),

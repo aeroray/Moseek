@@ -1,7 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type {
   CatalogPage,
+  EpgCatalog,
+  LiveCatalog,
   SourceRecord,
   VodItem,
 } from "@/types/moseek";
@@ -78,6 +81,38 @@ export async function getSourceDetail(
     api,
     vodId,
   });
+}
+
+export async function getLiveChannels(
+  sourceKey: string,
+  sourceUrl: string,
+  format: string,
+) {
+  return invokeCommand<LiveCatalog>("get_live_channels", {
+    sourceKey,
+    sourceUrl,
+    format,
+  });
+}
+
+export async function getEpg(sourceUrl: string, format: string) {
+  return invokeCommand<EpgCatalog>("get_epg", { sourceUrl, format });
+}
+
+export async function openExternalUrl(url: string) {
+  const parsedUrl = new URL(url);
+  if (!matchesHttpProtocol(parsedUrl.protocol)) {
+    throw new Error("只允许打开 HTTP 或 HTTPS 媒体地址");
+  }
+  if (isTauriRuntime()) {
+    await openUrl(url);
+    return;
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+
+function matchesHttpProtocol(protocol: string) {
+  return protocol === "http:" || protocol === "https:";
 }
 
 async function invokeCommand<T>(

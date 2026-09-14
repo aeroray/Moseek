@@ -92,11 +92,7 @@ pub async fn get_source_detail(
     api: String,
     vod_id: String,
 ) -> Result<Option<VodItem>, String> {
-    let payload = request_json(
-        &api,
-        &[("ac", "detail".to_string()), ("ids", vod_id)],
-    )
-    .await?;
+    let payload = request_json(&api, &[("ac", "detail".to_string()), ("ids", vod_id)]).await?;
     let item = payload
         .get("list")
         .and_then(Value::as_array)
@@ -136,10 +132,7 @@ async fn request_json(api: &str, params: &[(&str, String)]) -> Result<Value, Str
     if response.content_length().unwrap_or(0) > 15 * 1024 * 1024 {
         return Err("CMS 响应超过 15 MB 限制".to_string());
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| error.to_string())?;
+    let body = response.bytes().await.map_err(|error| error.to_string())?;
     if body.len() > 15 * 1024 * 1024 {
         return Err("CMS 响应超过 15 MB 限制".to_string());
     }
@@ -279,6 +272,10 @@ fn parse_episodes(value: &str, item_id: &str, line_index: usize) -> Vec<VodEpiso
             if url.is_empty() {
                 return None;
             }
+            let parsed_url = reqwest::Url::parse(url).ok()?;
+            if validate_remote_url(&parsed_url).is_err() {
+                return None;
+            }
             Some(VodEpisode {
                 id: format!("{item_id}-episode-{line_index}-{index}"),
                 name: if name.trim().is_empty() {
@@ -291,6 +288,14 @@ fn parse_episodes(value: &str, item_id: &str, line_index: usize) -> Vec<VodEpiso
         })
         .collect::<Vec<_>>();
     if episodes.is_empty() && !value.trim().is_empty() {
+        let parsed_url = reqwest::Url::parse(value.trim()).ok();
+        if parsed_url
+            .as_ref()
+            .map(|url| validate_remote_url(url).is_ok())
+            != Some(true)
+        {
+            return Vec::new();
+        }
         return vec![VodEpisode {
             id: format!("{item_id}-episode-{line_index}-0"),
             name: "正片".to_string(),
@@ -331,9 +336,11 @@ fn value_text(value: &Value, keys: &[&str]) -> String {
 }
 
 fn value_u64(value: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter().find_map(|key| value.get(*key)).and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
-    })
+    keys.iter()
+        .find_map(|key| value.get(*key))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+        })
 }

@@ -18,12 +18,14 @@ const posters = [
 ];
 
 const category = (id: string, name: string): VodCategory => ({ id, name });
+const demoHlsUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
+const demoMp4Url = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
 
-function episodes(itemId: string, count: number): VodEpisode[] {
+function episodes(itemId: string, count: number, url: string): VodEpisode[] {
   return Array.from({ length: count }, (_, index) => ({
     id: `${itemId}-episode-${index + 1}`,
     name: `第 ${index + 1} 集`,
-    url: `https://media.example.com/${itemId}/${index + 1}.m3u8`,
+    url,
   }));
 }
 
@@ -32,12 +34,12 @@ function lines(itemId: string, count: number): VodPlayLine[] {
     {
       id: `${itemId}-line-main`,
       name: "高清线路",
-      episodes: episodes(itemId, count),
+      episodes: episodes(itemId, count, demoHlsUrl),
     },
     {
       id: `${itemId}-line-backup`,
       name: "备用线路",
-      episodes: episodes(`${itemId}-backup`, count),
+      episodes: episodes(`${itemId}-backup`, count, demoMp4Url),
     },
   ];
 }
@@ -66,7 +68,10 @@ export const mockVodItems: VodItem[] = [
     description: "潜水员在深海记录仪里听见一段不属于这个时代的声音。",
     year: "2024",
     area: "中国大陆",
-    categories: [category("science-fiction", "科幻"), category("mystery", "悬疑")],
+    categories: [
+      category("science-fiction", "科幻"),
+      category("mystery", "悬疑"),
+    ],
     actors: ["许澄", "贺川"],
     directors: ["陆屿"],
     playLines: lines("blue-echo", 8),
@@ -108,7 +113,10 @@ export const mockVodItems: VodItem[] = [
     description: "偏远轨道上的维修站收到一艘失联飞船的求救信号。",
     year: "2024",
     area: "美国",
-    categories: [category("science-fiction", "科幻"), category("adventure", "冒险")],
+    categories: [
+      category("science-fiction", "科幻"),
+      category("adventure", "冒险"),
+    ],
     actors: ["Mara Cole", "Jon Bell"],
     directors: ["A. Hunter"],
     playLines: lines("orbital-repair-station", 6),
@@ -164,7 +172,9 @@ export function getMockCatalog(
   page: number,
   pageSize: number,
 ): CatalogPage {
-  const sourceItems = mockVodItems.filter((item) => item.sourceKey === sourceKey);
+  const sourceItems = mockVodItems.filter(
+    (item) => item.sourceKey === sourceKey,
+  );
   const categories = collectCategories(sourceItems);
   const normalizedQuery = query.trim().toLowerCase();
   const filteredItems = sourceItems.filter((item) => {
@@ -175,7 +185,8 @@ export function getMockCatalog(
         .toLowerCase()
         .includes(normalizedQuery);
     const matchesCategory =
-      categoryId === "all" || item.categories.some((itemCategory) => itemCategory.id === categoryId);
+      categoryId === "all" ||
+      item.categories.some((itemCategory) => itemCategory.id === categoryId);
     return matchesQuery && matchesCategory;
   });
   const pageCount = Math.max(1, Math.ceil(filteredItems.length / pageSize));
@@ -200,7 +211,9 @@ export function getMockDetail(itemId: string) {
 function collectCategories(items: VodItem[]) {
   const categoryMap = new Map<string, VodCategory>();
   items.forEach((item) => {
-    item.categories.forEach((itemCategory) => categoryMap.set(itemCategory.id, itemCategory));
+    item.categories.forEach((itemCategory) =>
+      categoryMap.set(itemCategory.id, itemCategory),
+    );
   });
   return [...categoryMap.values()];
 }

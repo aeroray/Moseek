@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
 mod cms;
+mod live;
 
 struct AppDatabase(Mutex<Connection>);
 
@@ -22,6 +23,7 @@ pub struct SourceRecord {
     pub api: String,
     pub ext: Option<String>,
     pub jar: Option<String>,
+    pub epg: Option<String>,
     pub searchable: bool,
     pub filterable: bool,
     pub capability: String,
@@ -63,10 +65,7 @@ fn save_config_document(
     input: SaveConfigDocumentInput,
     state: State<'_, AppDatabase>,
 ) -> Result<ConfigDocument, String> {
-    let mut connection = state
-        .0
-        .lock()
-        .map_err(|_| "数据库锁定失败".to_string())?;
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -82,7 +81,7 @@ fn save_config_document(
     for source in &input.sources {
         transaction
             .execute(
-                "INSERT OR REPLACE INTO sources (source_key, document_id, name, source_type, api, ext, jar, searchable, filterable, capability, capability_note, enabled, last_checked_at, request_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                "INSERT OR REPLACE INTO sources (source_key, document_id, name, source_type, api, ext, jar, epg, searchable, filterable, capability, capability_note, enabled, last_checked_at, request_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     source.key,
                     document_id,
@@ -91,6 +90,7 @@ fn save_config_document(
                     source.api,
                     source.ext,
                     source.jar,
+                    source.epg,
                     i64::from(source.searchable),
                     i64::from(source.filterable),
                     source.capability,
@@ -125,10 +125,7 @@ fn save_config_document(
 
 #[tauri::command]
 fn load_latest_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocument>, String> {
-    let connection = state
-        .0
-        .lock()
-        .map_err(|_| "数据库锁定失败".to_string())?;
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let document = connection
         .query_row(
             "SELECT id, name, raw_config, normalized_config, live_count, imported_at FROM config_documents ORDER BY id DESC LIMIT 1",
@@ -152,7 +149,7 @@ fn load_latest_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocu
     };
 
     let mut statement = connection
-        .prepare("SELECT source_key, name, source_type, api, ext, jar, searchable, filterable, capability, capability_note, enabled, last_checked_at, request_count FROM sources WHERE document_id = ?1 ORDER BY rowid")
+        .prepare("SELECT source_key, name, source_type, api, ext, jar, epg, searchable, filterable, capability, capability_note, enabled, last_checked_at, request_count FROM sources WHERE document_id = ?1 ORDER BY rowid")
         .map_err(|error| error.to_string())?;
     let sources = statement
         .query_map(params![id], |row| {
@@ -163,13 +160,14 @@ fn load_latest_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocu
                 api: row.get(3)?,
                 ext: row.get(4)?,
                 jar: row.get(5)?,
-                searchable: row.get::<_, i64>(6)? != 0,
-                filterable: row.get::<_, i64>(7)? != 0,
-                capability: row.get(8)?,
-                capability_note: row.get(9)?,
-                enabled: row.get::<_, i64>(10)? != 0,
-                last_checked_at: row.get(11)?,
-                request_count: row.get(12)?,
+                epg: row.get(6)?,
+                searchable: row.get::<_, i64>(7)? != 0,
+                filterable: row.get::<_, i64>(8)? != 0,
+                capability: row.get(9)?,
+                capability_note: row.get(10)?,
+                enabled: row.get::<_, i64>(11)? != 0,
+                last_checked_at: row.get(12)?,
+                request_count: row.get(13)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -193,10 +191,7 @@ fn set_source_enabled(
     enabled: bool,
     state: State<'_, AppDatabase>,
 ) -> Result<(), String> {
-    let connection = state
-        .0
-        .lock()
-        .map_err(|_| "数据库锁定失败".to_string())?;
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     connection
         .execute(
             "UPDATE sources SET enabled = ?1 WHERE source_key = ?2",
@@ -211,10 +206,7 @@ fn export_config(
     document_id: Option<i64>,
     state: State<'_, AppDatabase>,
 ) -> Result<String, String> {
-    let connection = state
-        .0
-        .lock()
-        .map_err(|_| "数据库锁定失败".to_string())?;
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     match document_id {
         Some(id) => connection
             .query_row(
@@ -254,10 +246,7 @@ async fn fetch_config_url(url: String) -> Result<String, String> {
     if response.content_length().unwrap_or(0) > 10 * 1024 * 1024 {
         return Err("配置响应超过 10 MB 限制".to_string());
     }
-    let body = response
-        .bytes()
-        .await
-        .map_err(|error| error.to_string())?;
+    let body = response.bytes().await.map_err(|error| error.to_string())?;
     if body.len() > 10 * 1024 * 1024 {
         return Err("配置响应超过 10 MB 限制".to_string());
     }
@@ -282,9 +271,7 @@ pub(crate) fn validate_remote_url(url: &reqwest::Url) -> Result<(), String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("只允许 HTTP 或 HTTPS 地址".to_string());
     }
-    let host = url
-        .host_str()
-        .ok_or_else(|| "地址缺少主机名".to_string())?;
+    let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
     let port = url.port_or_known_default().unwrap_or(443);
     if is_disallowed_host(host) || resolves_to_disallowed_address(host, port) {
         return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
@@ -339,6 +326,7 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                api TEXT NOT NULL,
                ext TEXT,
                jar TEXT,
+               epg TEXT,
                searchable INTEGER NOT NULL DEFAULT 0,
                filterable INTEGER NOT NULL DEFAULT 0,
                capability TEXT NOT NULL,
@@ -417,14 +405,34 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
              );",
         )
         .map_err(|error| error.to_string())?;
+    ensure_sources_epg_column(&connection)?;
     Ok(connection)
+}
+
+fn ensure_sources_epg_column(connection: &Connection) -> Result<(), String> {
+    let has_epg = connection
+        .prepare("PRAGMA table_info(sources)")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|column| column == "epg");
+    if !has_epg {
+        connection
+            .execute("ALTER TABLE sources ADD COLUMN epg TEXT", [])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let connection = initialize_database(app.handle())
-                .map_err(|error| std::io::Error::other(error))?;
+            let connection =
+                initialize_database(app.handle()).map_err(|error| std::io::Error::other(error))?;
             app.manage(AppDatabase(Mutex::new(connection)));
             Ok(())
         })
@@ -436,7 +444,9 @@ pub fn run() {
             export_config,
             fetch_config_url,
             cms::search_source,
-            cms::get_source_detail
+            cms::get_source_detail,
+            live::get_live_channels,
+            live::get_epg
         ])
         .run(tauri::generate_context!())
         .expect("error while running Moseek");
