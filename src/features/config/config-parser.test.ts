@@ -23,11 +23,13 @@ describe("Moseek config parser", () => {
     expect(result.sources[0]?.capability).toBe("supported");
     expect(result.sources[0]?.siteType).toBe(1);
     expect(result.sources[0]?.siteProtocol).toBe("json-http");
+    expect(result.sources[0]?.testStatus).toBe("untested");
     expect(result.sources[1]?.capability).toBe("blocked");
     expect(result.sources[1]?.sourceType).toBe("cms");
     expect(result.sources[1]?.siteProtocol).toBe("spider");
     expect(result.sources[2]?.sourceType).toBe("live");
     expect(result.sources[2]?.epg).toBe("https://live.example/guide.xml");
+    expect(result.sources[2]?.testStatus).toBe("untested");
     expect(result.normalizedConfig).toContain('"adapterId": "builtin-cms"');
     expect(result.normalizedConfig).toContain('"adapterId": "builtin-live"');
     expect(result.liveCount).toBe(1);

@@ -6,6 +6,7 @@ import type {
   EpgCatalog,
   LiveCatalog,
   SourceRecord,
+  SourceTestResult,
   VodItem,
 } from "@/types/moseek";
 
@@ -86,6 +87,18 @@ export async function setSourceEnabled(
   });
 }
 
+export async function updateSourceTest(
+  documentId: number,
+  sourceKey: string,
+  result: SourceTestResult,
+) {
+  return invokeCommand<StoredConfigDocument>("update_source_test", {
+    documentId,
+    sourceKey,
+    result,
+  });
+}
+
 export async function exportConfig(documentId?: number) {
   return invokeCommand<string>("export_config", {
     documentId: documentId ?? null,
@@ -109,6 +122,13 @@ export async function browseSource(
     categoryId,
     page,
     pageSize,
+  });
+}
+
+export async function testSource(source: SourceRecord) {
+  const command = source.sourceType === "live" ? "test_live_source" : "test_source";
+  return invokeCommand<SourceTestResult>(command, {
+    source,
   });
 }
 

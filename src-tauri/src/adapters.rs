@@ -39,6 +39,16 @@ impl SiteAdapterKind {
             _ => Ok(self),
         }
     }
+
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::XmlHttp => "xml-http",
+            Self::JsonHttp => "json-http",
+            Self::HttpExtension => "http-extension",
+            Self::Spider => "spider-runtime",
+            Self::Unsupported => "unknown",
+        }
+    }
 }
 
 fn site_type_name(site_type: i64) -> &'static str {
@@ -71,6 +81,12 @@ mod tests {
             filterable: true,
             capability: "supported".to_string(),
             capability_note: "ok".to_string(),
+            test_status: None,
+            test_message: None,
+            tested_at: None,
+            test_item_count: None,
+            test_category_count: None,
+            test_duration_ms: None,
             enabled: true,
             last_checked_at: "刚刚".to_string(),
             request_count: 0,

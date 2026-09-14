@@ -57,6 +57,7 @@ import type {
   VodPlayLine,
 } from "@/types/moseek";
 import { getVodDetail, searchVod } from "@/features/browse/cms-adapter";
+import { isMovieLibrarySource } from "@/lib/adapters";
 import {
   PlayerView,
   type VodPlayerRequest,
@@ -71,13 +72,7 @@ const pageSize = 8;
 export function BrowseView({ onNavigate }: BrowseViewProps) {
   const sources = useAppStore((state) => state.sources);
   const browseSources = useMemo(
-    () =>
-      sources.filter(
-        (source) =>
-          source.enabled &&
-          source.sourceType === "cms" &&
-          ["supported", "partial"].includes(source.capability),
-      ),
+    () => sources.filter(isMovieLibrarySource),
     [sources],
   );
   const [sourceKey, setSourceKey] = useState(browseSources[0]?.key ?? "");
@@ -157,7 +152,8 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
               </EmptyMedia>
               <EmptyTitle>还没有可浏览的 CMS 源</EmptyTitle>
               <EmptyDescription>
-                请先在配置中心导入普通 CMS 配置，并启用至少一个可用资源源。
+                请先在配置中心导入配置，测试并通过至少一个普通 CMS
+                源，再启用它。
               </EmptyDescription>
             </EmptyHeader>
             <Button type="button" onClick={() => onNavigate("config")}>

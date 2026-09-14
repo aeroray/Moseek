@@ -9,6 +9,7 @@ import {
 import type {
   PlayHistoryRecord,
   SourceRecord,
+  SourceTestResult,
   ThemeMode,
   ViewKey,
   LiveChannel,
@@ -32,6 +33,7 @@ interface AppStore {
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
   toggleSource: (key: string) => Promise<void>;
+  setSourceTestResult: (key: string, result: SourceTestResult) => void;
   setConfigDocuments: (documents: ConfigDocumentSummary[]) => void;
   setConfigDocument: (document: StoredConfigDocument) => void;
   removeConfigDocument: (documentId: number) => void;
@@ -108,6 +110,25 @@ export const useAppStore = create<AppStore>()(
           throw error;
         }
       },
+      setSourceTestResult: (key, result) =>
+        set((state) => ({
+          sources: state.sources.map((source) =>
+            source.key === key
+              ? {
+                  ...source,
+                  testStatus: result.status,
+                  testMessage: result.message,
+                  testedAt: result.testedAt,
+                  testItemCount: result.itemCount,
+                  testCategoryCount: result.categoryCount,
+                  testDurationMs: result.durationMs,
+                  lastCheckedAt: result.testedAt,
+                  requestCount:
+                    source.requestCount + (result.status === "blocked" ? 0 : 1),
+                }
+              : source,
+          ),
+        })),
       setConfigDocuments: (configDocuments) => set({ configDocuments }),
       setConfigDocument: (document) =>
         set((state) => ({

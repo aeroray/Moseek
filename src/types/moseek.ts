@@ -5,6 +5,13 @@ export type CapabilityStatus =
   | "blocked"
   | "invalid";
 
+export type SourceTestStatus =
+  | "untested"
+  | "passed"
+  | "empty"
+  | "failed"
+  | "blocked";
+
 export type SourceType = "cms" | "live" | "parser";
 
 export type SiteProtocol =
@@ -129,9 +136,26 @@ export interface SourceRecord {
   filterable: boolean;
   capability: CapabilityStatus;
   capabilityNote: string;
+  testStatus?: SourceTestStatus;
+  testMessage?: string;
+  testedAt?: string;
+  testItemCount?: number;
+  testCategoryCount?: number;
+  testDurationMs?: number;
   enabled: boolean;
   lastCheckedAt: string;
   requestCount: number;
+}
+
+export interface SourceTestResult {
+  sourceKey: string;
+  status: Exclude<SourceTestStatus, "untested">;
+  adapterId: string;
+  message: string;
+  itemCount: number;
+  categoryCount: number;
+  durationMs: number;
+  testedAt: string;
 }
 
 export interface RecentPlay {

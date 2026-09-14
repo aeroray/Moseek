@@ -215,3 +215,32 @@ export function adapterMatchesCapability(
     return capability === "needs-adapter";
   return capability === "supported" || capability === "partial";
 }
+
+export function isTestableCmsSource(source: SourceRecord) {
+  if (
+    source.sourceType !== "cms" ||
+    source.capability !== "supported"
+  ) {
+    return false;
+  }
+  return getAdapterProfile(source).execution === "enabled";
+}
+
+export function isTestableLiveSource(source: SourceRecord) {
+  if (source.sourceType !== "live" || source.capability !== "supported") {
+    return false;
+  }
+  return getAdapterProfile(source).execution === "enabled";
+}
+
+export function isTestableSource(source: SourceRecord) {
+  return isTestableCmsSource(source) || isTestableLiveSource(source);
+}
+
+export function isMovieLibrarySource(source: SourceRecord) {
+  return (
+    source.enabled &&
+    isTestableCmsSource(source) &&
+    source.testStatus === "passed"
+  );
+}

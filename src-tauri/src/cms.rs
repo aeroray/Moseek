@@ -1,5 +1,7 @@
+use std::time::Instant;
+
 use quick_xml::{events::Event, Reader};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
@@ -60,6 +62,19 @@ pub struct CatalogPage {
     pub total: u64,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceTestResult {
+    pub source_key: String,
+    pub status: String,
+    pub adapter_id: String,
+    pub message: String,
+    pub item_count: u64,
+    pub category_count: u64,
+    pub duration_ms: u64,
+    pub tested_at: String,
+}
+
 #[tauri::command]
 pub async fn browse_source(
     source: SourceRecord,
@@ -99,6 +114,69 @@ pub async fn browse_source(
 }
 
 #[tauri::command]
+pub async fn test_source(source: SourceRecord) -> Result<SourceTestResult, String> {
+    let adapter = SiteAdapterKind::from_source(&source);
+    let adapter_id = adapter.id().to_string();
+    let source_key = source.key.clone();
+    let tested_at = "刚刚".to_string();
+    let started = Instant::now();
+    if let Err(error) = adapter.ensure_executable(&source) {
+        return Ok(SourceTestResult {
+            source_key,
+            status: "blocked".to_string(),
+            adapter_id,
+            message: error,
+            item_count: 0,
+            category_count: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            tested_at,
+        });
+    }
+
+    match browse_source(source, String::new(), None, 1, 8).await {
+        Ok(catalog) => {
+            let item_count = catalog
+                .items
+                .iter()
+                .filter(|item| !item.name.trim().is_empty())
+                .count() as u64;
+            let category_count = catalog.categories.len() as u64;
+            let (status, message) = if item_count > 0 {
+                (
+                    "passed",
+                    format!("请求成功，识别到 {item_count} 条影视内容和 {category_count} 个分类。"),
+                )
+            } else {
+                (
+                    "empty",
+                    "请求成功，但响应中没有可识别的影视内容。".to_string(),
+                )
+            };
+            Ok(SourceTestResult {
+                source_key,
+                status: status.to_string(),
+                adapter_id,
+                message,
+                item_count,
+                category_count,
+                duration_ms: started.elapsed().as_millis() as u64,
+                tested_at,
+            })
+        }
+        Err(error) => Ok(SourceTestResult {
+            source_key,
+            status: "failed".to_string(),
+            adapter_id,
+            message: error,
+            item_count: 0,
+            category_count: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            tested_at,
+        }),
+    }
+}
+
+#[tauri::command]
 pub async fn get_detail(source: SourceRecord, vod_id: String) -> Result<Option<VodItem>, String> {
     let adapter = SiteAdapterKind::from_source(&source).ensure_executable(&source)?;
     let params = vec![
@@ -117,12 +195,20 @@ pub async fn get_detail(source: SourceRecord, vod_id: String) -> Result<Option<V
     let item = payload
         .get("list")
         .and_then(Value::as_array)
-        .and_then(|items| items.first())
+        .and_then(|items| {
+            items
+                .iter()
+                .find(|value| is_supported_item(&payload, value))
+        })
         .or_else(|| {
             payload
                 .get("data")
                 .and_then(Value::as_array)
-                .and_then(|items| items.first())
+                .and_then(|items| {
+                    items
+                        .iter()
+                        .find(|value| is_supported_item(&payload, value))
+                })
         })
         .map(|value| parse_item(value, &source.key));
     Ok(item)
@@ -279,6 +365,7 @@ fn parse_xml_payload(text: &str) -> Result<Value, String> {
     }
 
     let mut payload = Map::new();
+    payload.insert("_moseek_xml".to_string(), Value::Bool(true));
     payload.insert("list".to_string(), Value::Array(items));
     payload.insert("class".to_string(), Value::Array(categories));
     if let Some(record_count) = record_count {
@@ -323,8 +410,13 @@ fn parse_catalog_page(payload: &Value, source_key: &str, page: u32, page_size: u
         .or_else(|| payload.get("data").and_then(Value::as_array))
         .map(Vec::as_slice)
         .unwrap_or(&[]);
+    let is_xml_payload = payload
+        .get("_moseek_xml")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let items = list
         .iter()
+        .filter(|value| is_xml_payload || is_cms_item(value))
         .map(|value| parse_item(value, source_key))
         .collect::<Vec<_>>();
     let total = value_u64(payload, &["total", "recordcount"]).unwrap_or(items.len() as u64);
@@ -340,6 +432,42 @@ fn parse_catalog_page(payload: &Value, source_key: &str, page: u32, page_size: u
         page_size,
         total,
     }
+}
+
+fn is_cms_item(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    let primary_field_count = [
+        "vod_id",
+        "vod_name",
+        "vod_pic",
+        "vod_play_from",
+        "vod_play_url",
+        "vod_year",
+        "vod_content",
+        "vod_actor",
+        "vod_director",
+        "vod_area",
+        "vod_class",
+    ]
+    .iter()
+    .filter(|field| object.get(**field).is_some())
+    .count();
+    let cms_field_count = primary_field_count
+        + ["type_id", "type_name"]
+            .iter()
+            .filter(|field| object.get(**field).is_some())
+            .count();
+    primary_field_count > 0 && cms_field_count >= 2
+}
+
+fn is_supported_item(payload: &Value, value: &Value) -> bool {
+    payload
+        .get("_moseek_xml")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || is_cms_item(value)
 }
 
 fn parse_item(value: &Value, source_key: &str) -> VodItem {
@@ -527,6 +655,8 @@ fn value_u64(value: &Value, keys: &[&str]) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::{extension_params, parse_catalog_page, parse_xml_payload};
 
     #[test]
@@ -563,5 +693,44 @@ mod tests {
         assert!(!params
             .iter()
             .any(|(key, _)| key == "headers" || key == "nested"));
+    }
+
+    #[test]
+    fn ignores_generic_data_arrays_without_cms_fields() {
+        let page = parse_catalog_page(
+            &json!({
+                "data": [{
+                    "id": "file-1",
+                    "name": "网盘文件",
+                    "downloadUrl": "https://example.com/file"
+                }]
+            }),
+            "generic-api",
+            1,
+            20,
+        );
+
+        assert!(page.items.is_empty());
+    }
+
+    #[test]
+    fn accepts_canonical_cms_vod_fields() {
+        let page = parse_catalog_page(
+            &json!({
+                "data": [{
+                    "vod_id": "movie-1",
+                    "vod_name": "测试影片",
+                    "vod_pic": "https://example.com/poster.jpg",
+                    "vod_play_from": "线路一",
+                    "vod_play_url": "正片$https://example.com/movie.m3u8"
+                }]
+            }),
+            "cms-api",
+            1,
+            20,
+        );
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].name, "测试影片");
     }
 }

@@ -29,6 +29,18 @@ pub struct SourceRecord {
     pub filterable: bool,
     pub capability: String,
     pub capability_note: String,
+    #[serde(default)]
+    pub test_status: Option<String>,
+    #[serde(default)]
+    pub test_message: Option<String>,
+    #[serde(default)]
+    pub tested_at: Option<String>,
+    #[serde(default)]
+    pub test_item_count: Option<u64>,
+    #[serde(default)]
+    pub test_category_count: Option<u64>,
+    #[serde(default)]
+    pub test_duration_ms: Option<u64>,
     pub enabled: bool,
     pub last_checked_at: String,
     pub request_count: i64,
@@ -108,6 +120,12 @@ fn load_legacy_sources(
                 filterable: row.get::<_, i64>(8)? != 0,
                 capability: row.get(9)?,
                 capability_note: row.get(10)?,
+                test_status: None,
+                test_message: None,
+                tested_at: None,
+                test_item_count: None,
+                test_category_count: None,
+                test_duration_ms: None,
                 enabled: row.get::<_, i64>(11)? != 0,
                 last_checked_at: row.get(12)?,
                 request_count: row.get(13)?,
@@ -220,6 +238,62 @@ fn update_normalized_source_enabled(
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
 }
 
+fn update_normalized_source_test(
+    normalized_config: &str,
+    source_key: &str,
+    result: &cms::SourceTestResult,
+    request_count: i64,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            if item.get("key").and_then(Value::as_str) != Some(source_key) {
+                continue;
+            }
+            if let Some(object) = item.as_object_mut() {
+                object.insert(
+                    "testStatus".to_string(),
+                    Value::String(result.status.clone()),
+                );
+                object.insert(
+                    "testMessage".to_string(),
+                    Value::String(result.message.clone()),
+                );
+                object.insert(
+                    "testedAt".to_string(),
+                    Value::String(result.tested_at.clone()),
+                );
+                object.insert(
+                    "testItemCount".to_string(),
+                    Value::Number(result.item_count.into()),
+                );
+                object.insert(
+                    "testCategoryCount".to_string(),
+                    Value::Number(result.category_count.into()),
+                );
+                object.insert(
+                    "testDurationMs".to_string(),
+                    Value::Number(result.duration_ms.into()),
+                );
+                object.insert(
+                    "lastCheckedAt".to_string(),
+                    Value::String(result.tested_at.clone()),
+                );
+                object.insert(
+                    "requestCount".to_string(),
+                    Value::Number(request_count.into()),
+                );
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
 fn set_source_enabled_in_connection(
     connection: &mut Connection,
     document_id: i64,
@@ -248,6 +322,53 @@ fn set_source_enabled_in_connection(
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     load_config_document(connection, document_id)?.ok_or_else(|| "配置更新后无法读取".to_string())
+}
+
+fn set_source_test_in_connection(
+    connection: &mut Connection,
+    document_id: i64,
+    source_key: &str,
+    result: &cms::SourceTestResult,
+) -> Result<ConfigDocument, String> {
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    let request_count = {
+        let source = sources
+            .iter_mut()
+            .find(|source| source.key == source_key)
+            .ok_or_else(|| "配置中找不到该资源源".to_string())?;
+        source.test_status = Some(result.status.clone());
+        source.test_message = Some(result.message.clone());
+        source.tested_at = Some(result.tested_at.clone());
+        source.test_item_count = Some(result.item_count);
+        source.test_category_count = Some(result.category_count);
+        source.test_duration_ms = Some(result.duration_ms);
+        source.last_checked_at = result.tested_at.clone();
+        if result.status != "blocked" {
+            source.request_count += 1;
+        }
+        source.request_count
+    };
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config = update_normalized_source_test(
+        &document.normalized_config,
+        source_key,
+        result,
+        request_count,
+    );
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
+            params![sources_json, normalized_config, document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?
+        .ok_or_else(|| "测试结果保存后无法读取".to_string())
 }
 
 #[tauri::command]
@@ -426,6 +547,17 @@ fn set_source_enabled(
 ) -> Result<ConfigDocument, String> {
     let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     set_source_enabled_in_connection(&mut connection, document_id, &source_key, enabled)
+}
+
+#[tauri::command]
+fn update_source_test(
+    document_id: i64,
+    source_key: String,
+    result: cms::SourceTestResult,
+    state: State<'_, AppDatabase>,
+) -> Result<ConfigDocument, String> {
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    set_source_test_in_connection(&mut connection, document_id, &source_key, &result)
 }
 
 #[tauri::command]
@@ -617,11 +749,14 @@ pub fn run() {
             activate_config_document,
             delete_config_document,
             set_source_enabled,
+            update_source_test,
             export_config,
             fetch_config_url,
             cms::browse_source,
+            cms::test_source,
             cms::get_detail,
             live::load_live_source,
+            live::test_live_source,
             live::get_epg,
             resolver::resolve_playback,
         ])
@@ -664,6 +799,12 @@ mod tests {
             filterable: true,
             capability: "supported".to_string(),
             capability_note: "test".to_string(),
+            test_status: None,
+            test_message: None,
+            tested_at: None,
+            test_item_count: None,
+            test_category_count: None,
+            test_duration_ms: None,
             enabled,
             last_checked_at: "刚刚".to_string(),
             request_count: 0,
@@ -724,5 +865,40 @@ mod tests {
         assert_eq!(updated_value["sites"][0]["enabled"], Value::Bool(false));
         assert!(untouched.sources[0].enabled);
         assert_eq!(untouched_value["sites"][0]["enabled"], Value::Bool(true));
+    }
+
+    #[test]
+    fn source_test_updates_only_the_target_document() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let first_id = insert_test_document(&connection, "主配置", true);
+        let second_id = insert_test_document(&connection, "备用配置", true);
+        let result = cms::SourceTestResult {
+            source_key: "shared-key".to_string(),
+            status: "passed".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "识别到影视内容".to_string(),
+            item_count: 8,
+            category_count: 3,
+            duration_ms: 120,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+
+        let updated =
+            set_source_test_in_connection(&mut connection, first_id, "shared-key", &result)
+                .unwrap();
+        let untouched = load_config_document(&connection, second_id)
+            .unwrap()
+            .unwrap();
+        let updated_value: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+        let untouched_value: Value = serde_json::from_str(&untouched.normalized_config).unwrap();
+
+        assert_eq!(updated.sources[0].test_status.as_deref(), Some("passed"));
+        assert_eq!(updated.sources[0].test_item_count, Some(8));
+        assert_eq!(updated.sources[0].request_count, 1);
+        assert_eq!(updated_value["sites"][0]["testStatus"], "passed");
+        assert_eq!(updated_value["sites"][0]["testItemCount"], 8);
+        assert_eq!(untouched.sources[0].test_status, None);
+        assert_eq!(untouched_value["sites"][0]["testStatus"], Value::Null);
     }
 }

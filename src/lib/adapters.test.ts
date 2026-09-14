@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { getAdapterProfile } from "@/lib/adapters";
+import {
+  getAdapterProfile,
+  isMovieLibrarySource,
+  isTestableCmsSource,
+  isTestableLiveSource,
+  isTestableSource,
+} from "@/lib/adapters";
 import type { SourceRecord } from "@/types/moseek";
 
 function source(overrides: Partial<SourceRecord>): SourceRecord {
@@ -77,5 +83,38 @@ describe("adapter registry", () => {
 
     expect(profile.id).toBe("builtin-live");
     expect(profile.operations).toContain("节目单");
+  });
+
+  it("requires an executable CMS and a passed probe for the movie library", () => {
+    expect(isTestableCmsSource(source({ testStatus: "untested" }))).toBe(true);
+    expect(
+      isTestableCmsSource(
+        source({ capability: "partial", siteProtocol: "http-extension" }),
+      ),
+    ).toBe(false);
+    expect(
+      isTestableCmsSource(source({ sourceType: "live" })),
+    ).toBe(false);
+    expect(isTestableLiveSource(source({ sourceType: "live" }))).toBe(true);
+    expect(isTestableSource(source({ sourceType: "live" }))).toBe(true);
+    expect(
+      isTestableLiveSource(
+        source({ sourceType: "live", capability: "partial" }),
+      ),
+    ).toBe(false);
+    expect(isMovieLibrarySource(source({ testStatus: "untested" }))).toBe(
+      false,
+    );
+    expect(isMovieLibrarySource(source({ testStatus: "empty" }))).toBe(false);
+    expect(isMovieLibrarySource(source({ testStatus: "failed" }))).toBe(false);
+    expect(isMovieLibrarySource(source({ testStatus: "passed" }))).toBe(true);
+    expect(
+      isMovieLibrarySource(
+        source({ capability: "blocked", testStatus: "passed" }),
+      ),
+    ).toBe(false);
+    expect(
+      isMovieLibrarySource(source({ enabled: false, testStatus: "passed" })),
+    ).toBe(false);
   });
 });

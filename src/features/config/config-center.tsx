@@ -12,17 +12,21 @@ import {
   Check,
   ChevronRight,
   Code2,
+  CircleX,
   Download,
   FileJson,
   FileUp,
+  FlaskConical,
   Filter,
   Globe2,
   Info,
   Link2,
   Layers3,
   ListFilter,
+  LoaderCircle,
   Search,
   ShieldAlert,
+  TestTube2,
   SlidersHorizontal,
   Trash2,
   Upload,
@@ -96,6 +100,7 @@ import {
   adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
+  isTestableSource,
   type AdapterExecution,
 } from "@/lib/adapters";
 import { getCapabilityCounts } from "@/lib/capability-stats";
@@ -106,11 +111,17 @@ import {
   exportConfig,
   fetchConfigUrl,
   saveConfigDocument,
+  testSource,
+  updateSourceTest,
   type ConfigDocumentSummary,
   type StoredConfigDocument,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
-import type { CapabilityStatus, SourceRecord } from "@/types/moseek";
+import type {
+  CapabilityStatus,
+  SourceRecord,
+  SourceTestStatus,
+} from "@/types/moseek";
 
 type SourceFilter = "all" | CapabilityStatus;
 type ImportMode = "remote" | "local";
@@ -125,6 +136,7 @@ export function ConfigCenter() {
   const lastImportedAt = useAppStore((state) => state.lastImportedAt);
   const toggleSource = useAppStore((state) => state.toggleSource);
   const setConfigDocument = useAppStore((state) => state.setConfigDocument);
+  const setSourceTestResult = useAppStore((state) => state.setSourceTestResult);
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
   const removeConfigDocument = useAppStore(
     (state) => state.removeConfigDocument,
@@ -151,6 +163,7 @@ export function ConfigCenter() {
   const [selectedFileName, setSelectedFileName] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isFetchingRemote, setIsFetchingRemote] = useState(false);
+  const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set());
   const [deleteCandidate, setDeleteCandidate] =
     useState<ConfigDocumentSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -160,6 +173,16 @@ export function ConfigCenter() {
   const inspectedSource =
     sources.find((source) => source.key === inspectedSourceKey) ?? null;
   const reportCounts = countParsedCapabilities(report?.sources ?? []);
+  const testableSources = useMemo(
+    () => sources.filter(isTestableSource),
+    [sources],
+  );
+  const testedCmsCount = sources.filter(
+    (source) => source.sourceType === "cms" && source.testStatus === "passed",
+  ).length;
+  const testedLiveCount = sources.filter(
+    (source) => source.sourceType === "live" && source.testStatus === "passed",
+  ).length;
   const adapterRows = useMemo(
     () =>
       adapterRegistry.map((adapter) => ({
@@ -265,6 +288,71 @@ export function ConfigCenter() {
       const message = error instanceof Error ? error.message : "源状态保存失败";
       setParseState({ type: "error", message });
     }
+  };
+
+  const handleTestSource = async (source: SourceRecord) => {
+    if (testingKeys.has(source.key)) return;
+    setTestingKeys((current) => new Set(current).add(source.key));
+    try {
+      const result = await testSource(source);
+      if (!result) {
+        throw new Error(
+          "浏览器预览不会直接请求 CMS 或直播源，请在 Tauri 桌面应用中测试资源源。",
+        );
+      }
+      const persistedDocument =
+        activeConfigId === null
+          ? null
+          : await updateSourceTest(activeConfigId, source.key, result);
+      if (persistedDocument) {
+        setConfigDocument(persistedDocument);
+      } else {
+        setSourceTestResult(source.key, result);
+      }
+      setParseState({
+        type: result.status === "passed" ? "success" : "error",
+        title: `${source.sourceType === "live" ? "直播" : "CMS"} 测试完成`,
+        message: `${source.name}：${result.message}`,
+      });
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "源测试失败";
+      setParseState({ type: "error", message });
+      return null;
+    } finally {
+      setTestingKeys((current) => {
+        const next = new Set(current);
+        next.delete(source.key);
+        return next;
+      });
+    }
+  };
+
+  const handleTestAll = async () => {
+    if (testableSources.length === 0) {
+      setParseState({
+        type: "error",
+        message: "当前配置没有可测试的 CMS 或直播源。",
+      });
+      return;
+    }
+    const results = [];
+    for (const source of testableSources) {
+      const result = await handleTestSource(source);
+      if (result) results.push(result);
+    }
+    const passedCount = results.filter(
+      (result) => result.status === "passed",
+    ).length;
+    setParseState({
+      type:
+        results.length === testableSources.length &&
+        passedCount === testableSources.length
+          ? "success"
+          : "error",
+      title: "源测试完成",
+      message: `已完成 ${results.length}/${testableSources.length} 个支持源测试，其中 ${passedCount} 个通过。通过测试的 CMS 可进入影视库，直播源可进入直播。`,
+    });
   };
 
   const handleLocalFile = async (file: File) => {
@@ -482,6 +570,26 @@ export function ConfigCenter() {
               type="button"
               variant="outline"
               className="gap-2"
+                disabled={testableSources.length === 0 || testingKeys.size > 0}
+              onClick={() => void handleTestAll()}
+            >
+              {testingKeys.size > 0 ? (
+                <LoaderCircle
+                  className="animate-spin"
+                  data-icon="inline-start"
+                  aria-hidden="true"
+                />
+              ) : (
+                <FlaskConical data-icon="inline-start" aria-hidden="true" />
+              )}
+              {testingKeys.size > 0
+                  ? `测试中 ${testingKeys.size}/${testableSources.length}`
+                  : `测试支持源（${testableSources.length}）`}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-2"
               onClick={handleExport}
             >
               <Download data-icon="inline-start" aria-hidden="true" />
@@ -660,7 +768,7 @@ export function ConfigCenter() {
                   <div>
                     <CardTitle className="text-base">源能力清单</CardTitle>
                     <CardDescription>
-                      点击任意一行查看标准化字段、依赖地址和执行边界。
+                      只有完全支持的 CMS 和直播源会出现测试入口；CMS 通过后才会进入影视库。
                     </CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
@@ -702,6 +810,16 @@ export function ConfigCenter() {
                     </Select>
                   </div>
                 </div>
+                <div className="mt-4 flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  <span>
+                    影视库：{testedCmsCount} 个 CMS 通过 · 直播：{testedLiveCount} 个通过
+                  </span>
+                  <span>
+                    {testableSources.length > 0
+                      ? `可测试 ${testableSources.length} 个支持源`
+                      : "当前没有可测试的 CMS 或直播源"}
+                  </span>
+                </div>
               </CardHeader>
               <CardContent className="p-0">
                 {filteredSources.length > 0 ? (
@@ -712,9 +830,11 @@ export function ConfigCenter() {
                           <TableHead className="w-[30%] pl-6">资源源</TableHead>
                           <TableHead>能力</TableHead>
                           <TableHead>支持范围</TableHead>
-                          <TableHead>最近检查</TableHead>
+                          <TableHead>连接测试</TableHead>
                           <TableHead className="text-right">启用</TableHead>
-                          <TableHead className="w-10" />
+                          <TableHead className="w-28 pr-6 text-right">
+                            操作
+                          </TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
@@ -760,8 +880,8 @@ export function ConfigCenter() {
                                 {source.capabilityNote}
                               </p>
                             </TableCell>
-                            <TableCell className="text-xs text-muted-foreground">
-                              {source.lastCheckedAt}
+                            <TableCell>
+                              <SourceTestBadge source={source} />
                             </TableCell>
                             <TableCell
                               className="text-right"
@@ -775,12 +895,42 @@ export function ConfigCenter() {
                                 aria-label={`启用 ${source.name}`}
                               />
                             </TableCell>
-                            <TableCell>
-                              <ChevronRight
-                                className="text-muted-foreground"
-                                data-icon="inline-end"
-                                aria-hidden="true"
-                              />
+                            <TableCell
+                              className="pr-6 text-right"
+                              onClick={(event) => event.stopPropagation()}
+                            >
+                              {isTestableSource(source) ? (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="gap-1.5"
+                                  disabled={testingKeys.has(source.key)}
+                                  onClick={() => void handleTestSource(source)}
+                                >
+                                  {testingKeys.has(source.key) ? (
+                                    <LoaderCircle
+                                      className="animate-spin"
+                                      data-icon="inline-start"
+                                      aria-hidden="true"
+                                    />
+                                  ) : (
+                                    <TestTube2
+                                      data-icon="inline-start"
+                                      aria-hidden="true"
+                                    />
+                                  )}
+                                  {testingKeys.has(source.key)
+                                    ? "测试中"
+                                    : "测试"}
+                                </Button>
+                              ) : (
+                                <ChevronRight
+                                  className="text-muted-foreground"
+                                  data-icon="inline-end"
+                                  aria-hidden="true"
+                                />
+                              )}
                             </TableCell>
                           </TableRow>
                         ))}
@@ -944,7 +1094,7 @@ export function ConfigCenter() {
                     />
                     <ReportLine
                       title="远程依赖"
-                      detail={`${reportCounts.partial} 个源含 JAR 字段，已标记为部分支持`}
+                      detail={`${report.sources.filter((source) => Boolean(source.jar)).length} 个源含 JAR 字段，已阻止下载和执行`}
                       status="已隔离"
                       warning
                     />
@@ -1281,6 +1431,24 @@ export function ConfigCenter() {
                       value={String(inspectedSource.requestCount)}
                       mono
                     />
+                    <DetailRow
+                      label="testStatus"
+                      value={inspectedSource.testStatus ?? "untested"}
+                      mono
+                    />
+                    {inspectedSource.testMessage && (
+                      <DetailRow
+                        label="testMessage"
+                        value={inspectedSource.testMessage}
+                      />
+                    )}
+                    {inspectedSource.testDurationMs !== undefined && (
+                      <DetailRow
+                        label="testDurationMs"
+                        value={`${inspectedSource.testDurationMs} ms`}
+                        mono
+                      />
+                    )}
                   </DetailSection>
                   <AdapterDetail source={inspectedSource} />
                   <DetailSection title="远程地址">
@@ -1328,13 +1496,40 @@ export function ConfigCenter() {
                     />
                     {inspectedSource.enabled ? "源已启用" : "源已停用"}
                   </div>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => void handleToggleSource(inspectedSource.key)}
-                  >
-                    {inspectedSource.enabled ? "停用资源源" : "启用资源源"}
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    {isTestableSource(inspectedSource) && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        className="gap-1.5"
+                        disabled={testingKeys.has(inspectedSource.key)}
+                        onClick={() => void handleTestSource(inspectedSource)}
+                      >
+                        {testingKeys.has(inspectedSource.key) ? (
+                          <LoaderCircle
+                            className="animate-spin"
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <TestTube2
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                        )}
+                        测试 {inspectedSource.sourceType === "live" ? "直播" : "CMS"}
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() =>
+                        void handleToggleSource(inspectedSource.key)
+                      }
+                    >
+                      {inspectedSource.enabled ? "停用资源源" : "启用资源源"}
+                    </Button>
+                  </div>
                 </div>
               </SheetFooter>
             </>
@@ -1445,6 +1640,48 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
         </div>
       )}
     </DetailSection>
+  );
+}
+
+function SourceTestBadge({ source }: { source: SourceRecord }) {
+  const status: SourceTestStatus = source.testStatus ?? "untested";
+  const isLiveSource = source.sourceType === "live";
+  const config: Record<
+    SourceTestStatus,
+    { label: string; className: string; icon: typeof Check }
+  > = {
+    untested: {
+      label: "未测试",
+      className: "text-muted-foreground",
+      icon: TestTube2,
+    },
+    passed: {
+      label: `${source.testItemCount ?? 0} ${isLiveSource ? "个频道" : "条内容"}`,
+      className: "text-[color:var(--status-supported)]",
+      icon: Check,
+    },
+    empty: {
+      label: isLiveSource ? "无频道" : "无影视内容",
+      className: "text-[color:var(--status-partial)]",
+      icon: Info,
+    },
+    failed: {
+      label: "请求失败",
+      className: "text-[color:var(--status-blocked)]",
+      icon: CircleX,
+    },
+    blocked: {
+      label: "已阻止",
+      className: "text-[color:var(--status-blocked)]",
+      icon: ShieldAlert,
+    },
+  };
+  const { icon: Icon, ...display } = config[status];
+  return (
+    <div className={cn("flex items-center gap-1.5 text-xs", display.className)}>
+      <Icon data-icon="inline-start" aria-hidden="true" />
+      <span>{display.label}</span>
+    </div>
   );
 }
 

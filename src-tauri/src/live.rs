@@ -1,9 +1,12 @@
+use std::time::Instant;
+
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
+    cms::SourceTestResult,
     policy::{fetch_text, validate_remote_url},
     SourceRecord,
 };
@@ -83,6 +86,63 @@ pub async fn load_live_source(source: SourceRecord) -> Result<LiveCatalog, Strin
     };
     let groups = collect_groups(&channels);
     Ok(LiveCatalog { channels, groups })
+}
+
+#[tauri::command]
+pub async fn test_live_source(source: SourceRecord) -> Result<SourceTestResult, String> {
+    let source_key = source.key.clone();
+    let started = Instant::now();
+    let tested_at = "刚刚".to_string();
+    if source.source_type != "live" || source.capability != "supported" {
+        return Ok(SourceTestResult {
+            source_key,
+            status: "blocked".to_string(),
+            adapter_id: "builtin-live".to_string(),
+            message: "该源不满足可执行的直播适配器条件。".to_string(),
+            item_count: 0,
+            category_count: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            tested_at,
+        });
+    }
+
+    match load_live_source(source).await {
+        Ok(catalog) => {
+            let item_count = catalog.channels.len() as u64;
+            let category_count = catalog.groups.len() as u64;
+            let (status, message) = if item_count > 0 {
+                (
+                    "passed",
+                    format!("请求成功，识别到 {item_count} 个频道和 {category_count} 个分组。"),
+                )
+            } else {
+                (
+                    "empty",
+                    "请求成功，但响应中没有可识别的直播频道。".to_string(),
+                )
+            };
+            Ok(SourceTestResult {
+                source_key,
+                status: status.to_string(),
+                adapter_id: "builtin-live".to_string(),
+                message,
+                item_count,
+                category_count,
+                duration_ms: started.elapsed().as_millis() as u64,
+                tested_at,
+            })
+        }
+        Err(error) => Ok(SourceTestResult {
+            source_key,
+            status: "failed".to_string(),
+            adapter_id: "builtin-live".to_string(),
+            message: error,
+            item_count: 0,
+            category_count: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            tested_at,
+        }),
+    }
 }
 
 #[tauri::command]
