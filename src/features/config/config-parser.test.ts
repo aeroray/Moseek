@@ -21,7 +21,11 @@ describe("Moseek config parser", () => {
     expect(result.ok).toBe(true);
     expect(result.sources).toHaveLength(3);
     expect(result.sources[0]?.capability).toBe("supported");
-    expect(result.sources[1]?.capability).toBe("partial");
+    expect(result.sources[0]?.siteType).toBe(1);
+    expect(result.sources[0]?.siteProtocol).toBe("json-http");
+    expect(result.sources[1]?.capability).toBe("blocked");
+    expect(result.sources[1]?.sourceType).toBe("cms");
+    expect(result.sources[1]?.siteProtocol).toBe("spider");
     expect(result.sources[2]?.sourceType).toBe("live");
     expect(result.sources[2]?.epg).toBe("https://live.example/guide.xml");
     expect(result.normalizedConfig).toContain('"adapterId": "builtin-cms"');
@@ -29,7 +33,7 @@ describe("Moseek config parser", () => {
     expect(result.liveCount).toBe(1);
     expect(countParsedCapabilities(result.sources)).toMatchObject({
       supported: 2,
-      partial: 1,
+      blocked: 1,
     });
   });
 
@@ -77,6 +81,28 @@ describe("Moseek config parser", () => {
     expect(result.sources[0]?.searchable).toBe(false);
     expect(result.sources[0]?.filterable).toBe(false);
     expect(result.sources[0]?.ext).toContain('"headers"');
+  });
+
+  it("routes XML and HTTP extension site types without relabeling them as parsers", () => {
+    const result = parseConfigText(`{
+      sites: [
+        { key: "xml-site", name: "XML", type: 0, api: "https://example.com/xml" },
+        { key: "extension-site", name: "扩展", type: 4, api: "https://example.com/ext" },
+        { key: "spider-site", name: "Spider", type: 3, api: "./demo.js" }
+      ]
+    }`);
+
+    expect(result.sources.map((source) => source.siteProtocol)).toEqual([
+      "xml-http",
+      "http-extension",
+      "spider",
+    ]);
+    expect(result.sources.map((source) => source.sourceType)).toEqual([
+      "cms",
+      "cms",
+      "cms",
+    ]);
+    expect(result.sources[2]?.capability).toBe("blocked");
   });
 
   it("returns line-aware parse errors and schema errors", () => {

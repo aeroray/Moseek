@@ -1,4 +1,4 @@
-import { getSourceDetail, isTauriRuntime, searchSource } from "@/lib/tauri";
+import { browseSource, getDetail, isTauriRuntime } from "@/lib/tauri";
 import type { CatalogPage, SourceRecord, VodItem } from "@/types/moseek";
 
 export interface AdapterResult<T> {
@@ -15,9 +15,8 @@ export async function searchVod(
   pageSize: number,
 ): Promise<AdapterResult<CatalogPage>> {
   try {
-    const remoteResult = await searchSource(
-      source.key,
-      source.api,
+    const remoteResult = await browseSource(
+      source,
       query,
       categoryId,
       page,
@@ -48,7 +47,7 @@ export async function getVodDetail(
   item: VodItem,
 ): Promise<AdapterResult<VodItem | null>> {
   try {
-    const remoteResult = await getSourceDetail(source.key, source.api, item.id);
+    const remoteResult = await getDetail(source, item.id);
     if (remoteResult) {
       return { data: remoteResult, mode: "remote", error: null };
     }

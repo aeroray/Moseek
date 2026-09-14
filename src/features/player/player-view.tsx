@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -24,7 +24,12 @@ import {
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppStore } from "@/stores/app-store";
-import { openExternalUrl } from "@/lib/tauri";
+import {
+  isTauriRuntime,
+  openExternalUrl,
+  resolvePlayback,
+  type PlaybackResolution,
+} from "@/lib/tauri";
 import type {
   MediaKind,
   SourceRecord,
@@ -56,6 +61,16 @@ export function PlayerView({
   const [activeEpisodeId, setActiveEpisodeId] = useState(request.episode.id);
   const [status, setStatus] = useState<MediaStatus>("idle");
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [resolvedPlayback, setResolvedPlayback] =
+    useState<PlaybackResolution | null>(
+      isTauriRuntime()
+        ? null
+        : {
+            url: request.episode.url,
+            mediaKind: inferMediaKind(request.episode.url),
+            adapterId: "browser-preview",
+          },
+    );
 
   const activeLine =
     item.playLines.find((line) => line.id === activeLineId) ??
@@ -71,6 +86,38 @@ export function PlayerView({
   const activeIndex = activeLine.episodes.findIndex(
     (episode) => episode.id === activeEpisode.id,
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    setDiagnostic(null);
+    if (!isTauriRuntime()) {
+      setResolvedPlayback({
+        url: activeEpisode.url,
+        mediaKind: inferMediaKind(activeEpisode.url),
+        adapterId: "browser-preview",
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    setResolvedPlayback(null);
+    setStatus("loading");
+    void resolvePlayback(activeEpisode.url)
+      .then((resolution) => {
+        if (cancelled) return;
+        setResolvedPlayback(resolution);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setDiagnostic(
+          error instanceof Error ? error.message : "播放地址未通过安全检查",
+        );
+        setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeEpisode.url]);
 
   const selectEpisode = (line: VodPlayLine, episode: VodEpisode) => {
     setActiveLineId(line.id);
@@ -100,6 +147,9 @@ export function PlayerView({
       );
     }
   };
+
+  const displayMediaKind = resolvedPlayback?.mediaKind ?? mediaKind;
+  const canRenderPlayer = !isTauriRuntime() || resolvedPlayback !== null;
 
   return (
     <ScrollArea className="h-full">
@@ -173,19 +223,27 @@ export function PlayerView({
 
         <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-5">
           <div className="flex flex-col gap-4">
-            <MediaPlayer
-              key={activeEpisode.url}
-              title={`${item.name} · ${activeEpisode.name}`}
-              url={activeEpisode.url}
-              kind={mediaKind}
-              poster={item.poster}
-              resumeAt={resumeAt}
-              onProgress={(seconds) => setPlaybackProgress(historyId, seconds)}
-              onStatus={(nextStatus, message) => {
-                setStatus(nextStatus);
-                if (message) setDiagnostic(message);
-              }}
-            />
+            {canRenderPlayer ? (
+              <MediaPlayer
+                key={resolvedPlayback?.url ?? activeEpisode.url}
+                title={`${item.name} · ${activeEpisode.name}`}
+                url={resolvedPlayback?.url ?? activeEpisode.url}
+                kind={resolvedPlayback?.mediaKind ?? mediaKind}
+                poster={item.poster}
+                resumeAt={resumeAt}
+                onProgress={(seconds) =>
+                  setPlaybackProgress(historyId, seconds)
+                }
+                onStatus={(nextStatus, message) => {
+                  setStatus(nextStatus);
+                  if (message) setDiagnostic(message);
+                }}
+              />
+            ) : (
+              <div className="flex aspect-video items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
+                正在校验播放地址...
+              </div>
+            )}
             <div className="flex items-center justify-between rounded-md border bg-card px-4 py-3 text-sm">
               <div className="flex items-center gap-2">
                 <span
@@ -194,7 +252,7 @@ export function PlayerView({
                 <span>{statusLabel(status)}</span>
               </div>
               <span className="font-mono text-xs text-muted-foreground">
-                {mediaKind.toUpperCase()} · {formatSeconds(resumeAt)}
+                {displayMediaKind.toUpperCase()} · {formatSeconds(resumeAt)}
               </span>
             </div>
             {diagnostic && (
@@ -230,9 +288,9 @@ export function PlayerView({
                 <div className="rounded-md border bg-muted/25 p-3">
                   <p>地址协议</p>
                   <p className="mt-1 font-medium text-foreground">
-                    {mediaKind === "hls"
+                    {displayMediaKind === "hls"
                       ? "HLS m3u8"
-                      : mediaKind === "mp4"
+                      : displayMediaKind === "mp4"
                         ? "MP4"
                         : "未识别"}
                   </p>

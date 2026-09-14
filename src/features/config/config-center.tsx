@@ -19,10 +19,12 @@ import {
   Globe2,
   Info,
   Link2,
+  Layers3,
   ListFilter,
   Search,
   ShieldAlert,
   SlidersHorizontal,
+  Trash2,
   Upload,
   WandSparkles,
   X,
@@ -99,10 +101,13 @@ import {
 import { getCapabilityCounts } from "@/lib/capability-stats";
 import { cn } from "@/lib/utils";
 import {
+  activateConfigDocument,
+  deleteConfigDocument,
   exportConfig,
   fetchConfigUrl,
-  loadLatestConfig,
   saveConfigDocument,
+  type ConfigDocumentSummary,
+  type StoredConfigDocument,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
 import type { CapabilityStatus, SourceRecord } from "@/types/moseek";
@@ -111,19 +116,27 @@ type SourceFilter = "all" | CapabilityStatus;
 type ImportMode = "remote" | "local";
 
 export function ConfigCenter() {
+  const configDocuments = useAppStore((state) => state.configDocuments);
+  const configDocumentCache = useAppStore((state) => state.configDocumentCache);
+  const activeConfigId = useAppStore((state) => state.activeConfigId);
   const sources = useAppStore((state) => state.sources);
   const rawConfig = useAppStore((state) => state.rawConfig);
   const normalizedConfig = useAppStore((state) => state.normalizedConfig);
   const lastImportedAt = useAppStore((state) => state.lastImportedAt);
   const toggleSource = useAppStore((state) => state.toggleSource);
-  const replaceSources = useAppStore((state) => state.replaceSources);
-  const setConfigSnapshot = useAppStore((state) => state.setConfigSnapshot);
+  const setConfigDocument = useAppStore((state) => state.setConfigDocument);
+  const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
+  const removeConfigDocument = useAppStore(
+    (state) => state.removeConfigDocument,
+  );
+  const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
-  const [inspectedSource, setInspectedSource] = useState<SourceRecord | null>(
+  const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
     null,
   );
   const [importOpen, setImportOpen] = useState(false);
+  const [configName, setConfigName] = useState("");
   const [importText, setImportText] = useState("");
   const [rawDraft, setRawDraft] = useState<string | null>(null);
   const [parseState, setParseState] = useState<{
@@ -138,10 +151,14 @@ export function ConfigCenter() {
   const [selectedFileName, setSelectedFileName] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isFetchingRemote, setIsFetchingRemote] = useState(false);
+  const [deleteCandidate, setDeleteCandidate] =
+    useState<ConfigDocumentSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const counts = getCapabilityCounts(sources);
   const editorText = rawDraft ?? rawConfig;
   const report = parseResult ?? (rawConfig ? parseConfigText(rawConfig) : null);
+  const inspectedSource =
+    sources.find((source) => source.key === inspectedSourceKey) ?? null;
   const reportCounts = countParsedCapabilities(report?.sources ?? []);
   const adapterRows = useMemo(
     () =>
@@ -156,32 +173,9 @@ export function ConfigCenter() {
 
   useEffect(() => {
     setRawDraft(rawConfig);
-  }, [rawConfig]);
-
-  useEffect(() => {
-    let mounted = true;
-    void loadLatestConfig()
-      .then((document) => {
-        if (!mounted || !document) return;
-        replaceSources(document.sources);
-        setConfigSnapshot(
-          document.rawConfig,
-          document.normalizedConfig,
-          document.importedAt,
-        );
-        setImportText(document.rawConfig);
-        setParseResult(parseConfigText(document.rawConfig));
-      })
-      .catch((error) => {
-        if (!mounted) return;
-        const message =
-          error instanceof Error ? error.message : "无法读取本地配置";
-        setParseState({ type: "error", message });
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [replaceSources, setConfigSnapshot]);
+    setImportText(rawConfig);
+    setParseResult(rawConfig ? parseConfigText(rawConfig) : null);
+  }, [activeConfigId, rawConfig]);
 
   const filteredSources = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -197,11 +191,88 @@ export function ConfigCenter() {
     });
   }, [query, sourceFilter, sources]);
 
+  const openImportDialog = () => {
+    setConfigName(`配置 ${configDocuments.length + 1}`);
+    setImportMode("remote");
+    setSourceInput("");
+    setSelectedFileName("");
+    setImportText("");
+    setParseResult(null);
+    setParseState({ type: "idle", message: "" });
+    setImportOpen(true);
+  };
+
+  const handleActivate = async (documentId: number) => {
+    if (documentId === activeConfigId) return;
+    try {
+      const document =
+        configDocumentCache[documentId] ??
+        (await activateConfigDocument(documentId));
+      if (!document) {
+        setParseState({
+          type: "error",
+          message: "无法读取该配置，请重新导入。",
+        });
+        return;
+      }
+      setConfigDocument(document);
+      setParseState({
+        type: "success",
+        message: `已切换到「${document.name}」。影视库和直播将使用这份配置。`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "配置切换失败";
+      setParseState({ type: "error", message });
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!deleteCandidate) return;
+    const documentId = deleteCandidate.id;
+    setDeleteCandidate(null);
+    try {
+      const nextDocument = await deleteConfigDocument(documentId);
+      const remainingDocuments = configDocuments.filter(
+        (document) => document.id !== documentId,
+      );
+      removeConfigDocument(documentId);
+      setConfigDocuments(remainingDocuments);
+      if (nextDocument) {
+        setConfigDocument(nextDocument);
+        return;
+      }
+      if (documentId !== activeConfigId) return;
+      const fallback = remainingDocuments
+        .map((document) => configDocumentCache[document.id])
+        .find((document): document is StoredConfigDocument =>
+          Boolean(document),
+        );
+      if (fallback) {
+        setConfigDocument(fallback);
+      } else {
+        clearConfigDocument();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除配置失败";
+      setParseState({ type: "error", message });
+    }
+  };
+
+  const handleToggleSource = async (sourceKey: string) => {
+    try {
+      await toggleSource(sourceKey);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "源状态保存失败";
+      setParseState({ type: "error", message });
+    }
+  };
+
   const handleLocalFile = async (file: File) => {
     if (!file) return;
     setImportMode("local");
     setSelectedFileName(file.name);
     setIsDraggingFile(false);
+    setConfigName(file.name.replace(/\.(json5?|txt)$/i, "") || file.name);
     setImportText(await file.text());
     setParseState({
       type: "idle",
@@ -317,19 +388,28 @@ export function ConfigCenter() {
       return;
     }
 
-    replaceSources(result.sources);
-    const importedAt = new Date().toISOString();
-    setConfigSnapshot(importText, result.normalizedConfig, importedAt);
     const parsedCounts = countParsedCapabilities(result.sources);
+    const name = configName.trim() || `配置 ${configDocuments.length + 1}`;
 
     try {
-      await saveConfigDocument({
-        name: "Moseek 配置",
+      const savedDocument = await saveConfigDocument({
+        name,
         rawConfig: importText,
         normalizedConfig: result.normalizedConfig,
         sources: result.sources,
         liveCount: result.liveCount,
       });
+      const document: StoredConfigDocument = savedDocument ?? {
+        id: -Date.now(),
+        name,
+        rawConfig: importText,
+        normalizedConfig: result.normalizedConfig,
+        sources: result.sources,
+        sourceCount: result.sources.length,
+        liveCount: result.liveCount,
+        importedAt: new Date().toISOString(),
+      };
+      setConfigDocument(document);
       setParseState({
         type: "success",
         message: `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`,
@@ -350,7 +430,7 @@ export function ConfigCenter() {
   const handleExport = async () => {
     let persistedConfig: string | null = null;
     try {
-      persistedConfig = await exportConfig();
+      persistedConfig = await exportConfig(activeConfigId ?? undefined);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "本地配置导出失败";
@@ -407,25 +487,115 @@ export function ConfigCenter() {
               <Download data-icon="inline-start" aria-hidden="true" />
               导出标准配置
             </Button>
-            <Button
-              type="button"
-              className="gap-2"
-              onClick={() => setImportOpen(true)}
-            >
+            <Button type="button" className="gap-2" onClick={openImportDialog}>
               <Upload data-icon="inline-start" aria-hidden="true" />
               导入配置
             </Button>
           </div>
         </section>
 
-        <Alert className="border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]">
-          <ShieldAlert data-icon="inline-start" aria-hidden="true" />
-          <AlertTitle>远程代码默认不执行</AlertTitle>
-          <AlertDescription className="text-[color:var(--status-blocked)]/80">
-            远程 JAR、spider、Drpy JS、CSP 扩展和 proxy://
-            私有协议会被识别并分类，但不会被静默运行。
-          </AlertDescription>
-        </Alert>
+        <Card>
+          <CardHeader className="border-b pb-4">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Layers3 data-icon="inline-start" aria-hidden="true" />
+                  配置档
+                </CardTitle>
+                <CardDescription>
+                  每份配置独立保存。影视库、直播和源启停只作用于当前配置。
+                </CardDescription>
+              </div>
+              <Badge variant="secondary">{configDocuments.length} 份</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="p-0">
+            {configDocuments.length > 0 ? (
+              <Table>
+                <TableHeader>
+                  <TableRow className="hover:bg-transparent">
+                    <TableHead className="pl-6">配置名称</TableHead>
+                    <TableHead>内容</TableHead>
+                    <TableHead>导入时间</TableHead>
+                    <TableHead>状态</TableHead>
+                    <TableHead className="pr-6 text-right">操作</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {configDocuments.map((document) => {
+                    const isActive = document.id === activeConfigId;
+                    return (
+                      <TableRow key={document.id}>
+                        <TableCell className="pl-6">
+                          <div className="min-w-0">
+                            <p className="font-medium">{document.name}</p>
+                            <p className="mt-1 text-xs text-muted-foreground">
+                              配置 #{document.id}
+                            </p>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {document.sourceCount} 个源 · {document.liveCount}{" "}
+                          个直播源
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {formatImportTime(document.importedAt)}
+                        </TableCell>
+                        <TableCell>
+                          {isActive ? (
+                            <Badge variant="secondary">当前使用</Badge>
+                          ) : (
+                            <Badge variant="outline">已保存</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="pr-6 text-right">
+                          <div className="flex justify-end gap-2">
+                            <Button
+                              type="button"
+                              variant={isActive ? "secondary" : "outline"}
+                              size="sm"
+                              disabled={isActive}
+                              onClick={() => void handleActivate(document.id)}
+                            >
+                              {isActive ? "使用中" : "使用"}
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={`删除配置 ${document.name}`}
+                              onClick={() => setDeleteCandidate(document)}
+                            >
+                              <Trash2
+                                data-icon="inline-start"
+                                aria-hidden="true"
+                              />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            ) : (
+              <Empty className="min-h-56">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <Layers3 data-icon="inline-start" aria-hidden="true" />
+                  </EmptyMedia>
+                  <EmptyTitle>还没有配置档</EmptyTitle>
+                  <EmptyDescription>
+                    导入第一份配置后，它会作为当前工作区保存；后续配置可以随时切换。
+                  </EmptyDescription>
+                </EmptyHeader>
+                <Button type="button" onClick={openImportDialog}>
+                  导入第一份配置
+                </Button>
+              </Empty>
+            )}
+          </CardContent>
+        </Card>
 
         <section className="grid grid-cols-5 gap-3" aria-label="配置解析报告">
           <ReportCard label="已识别源" value={sources.length} icon={FileJson} />
@@ -552,7 +722,7 @@ export function ConfigCenter() {
                           <TableRow
                             key={source.key}
                             className="cursor-pointer"
-                            onClick={() => setInspectedSource(source)}
+                            onClick={() => setInspectedSourceKey(source.key)}
                           >
                             <TableCell className="pl-6">
                               <div className="flex items-center gap-3">
@@ -599,7 +769,9 @@ export function ConfigCenter() {
                             >
                               <Switch
                                 checked={source.enabled}
-                                onCheckedChange={() => toggleSource(source.key)}
+                                onCheckedChange={() =>
+                                  void handleToggleSource(source.key)
+                                }
                                 aria-label={`启用 ${source.name}`}
                               />
                             </TableCell>
@@ -847,6 +1019,12 @@ export function ConfigCenter() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
+            <Input
+              value={configName}
+              onChange={(event) => setConfigName(event.target.value)}
+              placeholder="例如：主用影视源、备用直播源"
+              aria-label="配置名称"
+            />
             <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/50 p-1">
               <Button
                 type="button"
@@ -1026,10 +1204,38 @@ export function ConfigCenter() {
         </DialogContent>
       </Dialog>
 
+      <Dialog
+        open={Boolean(deleteCandidate)}
+        onOpenChange={(open) => {
+          if (!open) setDeleteCandidate(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>删除配置档？</DialogTitle>
+            <DialogDescription>
+              将删除「{deleteCandidate?.name}」及其本地源快照，不能撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setDeleteCandidate(null)}
+            >
+              取消
+            </Button>
+            <Button type="button" variant="destructive" onClick={handleDelete}>
+              删除配置
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       <Sheet
         open={Boolean(inspectedSource)}
         onOpenChange={(open) => {
-          if (!open) setInspectedSource(null);
+          if (!open) setInspectedSourceKey(null);
         }}
       >
         <SheetContent className="w-[480px] sm:max-w-[480px]">
@@ -1125,7 +1331,7 @@ export function ConfigCenter() {
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => toggleSource(inspectedSource.key)}
+                    onClick={() => void handleToggleSource(inspectedSource.key)}
                   >
                     {inspectedSource.enabled ? "停用资源源" : "启用资源源"}
                   </Button>

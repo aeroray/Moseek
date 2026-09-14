@@ -58,6 +58,18 @@ describe("adapter registry", () => {
     ).toBe("remote-jar");
   });
 
+  it("uses explicit site protocols instead of capability to identify sources", () => {
+    const profile = getAdapterProfile(
+      source({
+        siteProtocol: "http-extension",
+        capability: "supported",
+      }),
+    );
+
+    expect(profile.id).toBe("http-extension");
+    expect(profile.execution).toBe("enabled");
+  });
+
   it("uses the live adapter for live sources", () => {
     const profile = getAdapterProfile(
       source({ sourceType: "live", capability: "supported" }),

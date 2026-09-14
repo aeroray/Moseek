@@ -31,6 +31,11 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { loadEpg, loadLiveCatalog } from "@/lib/live-adapter";
+import {
+  isTauriRuntime,
+  resolvePlayback,
+  type PlaybackResolution,
+} from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
@@ -39,6 +44,7 @@ import type { MediaStatus } from "@/features/player/media-player";
 
 export function LiveView() {
   const sources = useAppStore((state) => state.sources);
+  const setActiveView = useAppStore((state) => state.setActiveView);
   const liveFavorites = useAppStore((state) => state.liveFavorites);
   const toggleLiveFavorite = useAppStore((state) => state.toggleLiveFavorite);
   const liveSources = useMemo(
@@ -62,6 +68,8 @@ export function LiveView() {
   const [selectedChannelId, setSelectedChannelId] = useState("");
   const [status, setStatus] = useState<MediaStatus>("idle");
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [resolvedStream, setResolvedStream] =
+    useState<PlaybackResolution | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,6 +122,47 @@ export function LiveView() {
 
   useEffect(() => {
     let cancelled = false;
+    setDiagnostic(null);
+    if (!selectedChannel) {
+      setResolvedStream(null);
+      return () => {
+        cancelled = true;
+      };
+    }
+    if (!isTauriRuntime()) {
+      setResolvedStream({
+        url: selectedChannel.streamUrl,
+        mediaKind: selectedChannel.mediaKind,
+        adapterId: "browser-preview",
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+    setResolvedStream(null);
+    setStatus("loading");
+    void resolvePlayback(selectedChannel.streamUrl)
+      .then((resolution) => {
+        if (cancelled) return;
+        if (!resolution) {
+          throw new Error("播放地址未通过安全检查");
+        }
+        setResolvedStream(resolution);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setDiagnostic(
+          error instanceof Error ? error.message : "播放地址未通过安全检查",
+        );
+        setStatus("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedChannel?.mediaKind, selectedChannel?.streamUrl]);
+
+  useEffect(() => {
+    let cancelled = false;
     void loadEpg(liveSource).then((result) => {
       if (cancelled) return;
       setEpgPrograms(result.data.programs);
@@ -138,8 +187,17 @@ export function LiveView() {
     }
   };
 
+  const canRenderPlayer = !isTauriRuntime() || resolvedStream !== null;
+
   if (!selectedChannel) {
-    return <EmptyLiveState error={loadError ?? epgError} loading={isLoading} />;
+    return (
+      <EmptyLiveState
+        error={loadError ?? epgError}
+        hasSource={Boolean(liveSource)}
+        loading={isLoading}
+        onOpenConfig={() => setActiveView("config")}
+      />
+    );
   }
 
   return (
@@ -358,16 +416,24 @@ export function LiveView() {
                 </div>
               </CardHeader>
               <CardContent className="flex flex-col gap-3">
-                <MediaPlayer
-                  key={selectedChannel.streamUrl}
-                  title={selectedChannel.name}
-                  url={selectedChannel.streamUrl}
-                  kind={selectedChannel.mediaKind}
-                  onStatus={(nextStatus, message) => {
-                    setStatus(nextStatus);
-                    if (message) setDiagnostic(message);
-                  }}
-                />
+                {canRenderPlayer ? (
+                  <MediaPlayer
+                    key={resolvedStream?.url ?? selectedChannel.streamUrl}
+                    title={selectedChannel.name}
+                    url={resolvedStream?.url ?? selectedChannel.streamUrl}
+                    kind={
+                      resolvedStream?.mediaKind ?? selectedChannel.mediaKind
+                    }
+                    onStatus={(nextStatus, message) => {
+                      setStatus(nextStatus);
+                      if (message) setDiagnostic(message);
+                    }}
+                  />
+                ) : (
+                  <div className="flex aspect-video items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
+                    正在校验播放地址...
+                  </div>
+                )}
                 <div className="flex items-center justify-between text-xs text-muted-foreground">
                   <span className="flex items-center gap-2">
                     <span
@@ -472,11 +538,28 @@ export function LiveView() {
 
 function EmptyLiveState({
   error,
+  hasSource,
   loading,
+  onOpenConfig,
 }: {
   error: string | null;
+  hasSource: boolean;
   loading: boolean;
+  onOpenConfig: () => void;
 }) {
+  const title = loading
+    ? "正在读取直播频道"
+    : error
+      ? "直播源加载失败"
+      : hasSource
+        ? "直播源没有可解析频道"
+        : "没有启用的直播源";
+  const description = error
+    ? `${error}。请在配置中心更新直播源地址或停用该源。`
+    : hasSource
+      ? "请检查直播源格式和频道地址。"
+      : "请先导入或启用直播源。";
+
   return (
     <div className="flex h-full items-center justify-center">
       <Empty className="max-w-md border border-dashed">
@@ -484,13 +567,14 @@ function EmptyLiveState({
           <EmptyMedia variant="icon">
             <Radio data-icon="inline-start" aria-hidden="true" />
           </EmptyMedia>
-          <EmptyTitle>
-            {loading ? "正在读取直播频道" : "没有直播频道"}
-          </EmptyTitle>
-          <EmptyDescription>
-            {error ?? "请先导入或启用直播源。"}
-          </EmptyDescription>
+          <EmptyTitle>{title}</EmptyTitle>
+          <EmptyDescription>{description}</EmptyDescription>
         </EmptyHeader>
+        {!loading && (
+          <Button type="button" variant="outline" onClick={onOpenConfig}>
+            更新直播源
+          </Button>
+        )}
       </Empty>
     </div>
   );

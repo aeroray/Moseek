@@ -7,6 +7,13 @@ export type CapabilityStatus =
 
 export type SourceType = "cms" | "live" | "parser";
 
+export type SiteProtocol =
+  | "xml-http"
+  | "json-http"
+  | "spider"
+  | "http-extension"
+  | "unknown";
+
 export type ViewKey =
   | "browse"
   | "live"
@@ -112,6 +119,8 @@ export interface SourceRecord {
   key: string;
   name: string;
   sourceType: SourceType;
+  siteType?: number | null;
+  siteProtocol?: SiteProtocol | null;
   api: string;
   ext?: string;
   jar?: string;

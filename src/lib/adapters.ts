@@ -13,7 +13,9 @@ export type AdapterExecution =
 export type AdapterId =
   | "builtin-cms"
   | "builtin-live"
+  | "http-extension"
   | "http-parser"
+  | "spider-runtime"
   | "remote-jar"
   | "drpy-js"
   | "xbpq"
@@ -45,6 +47,12 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     operations: ["频道", "分组", "节目单", "播放"],
     reason: "M3U、TXT、JSON 直播源通过 Rust 解析器处理。",
   },
+  "http-extension": {
+    label: "HTTP 扩展适配器",
+    execution: "enabled",
+    operations: ["搜索", "分类", "详情", "播放线路", "选集"],
+    reason: "使用受限的 HTTP 字段映射，不执行远程代码。",
+  },
   "http-parser": {
     label: "HTTP 解析适配器",
     execution: "partial",
@@ -62,6 +70,12 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     execution: "blocked",
     operations: [],
     reason: "未提供 JS 沙箱，远程 JavaScript 默认禁止执行。",
+  },
+  "spider-runtime": {
+    label: "Spider 运行时",
+    execution: "blocked",
+    operations: [],
+    reason: "Spider 需要隔离运行时，当前只记录和展示配置字段。",
   },
   xbpq: {
     label: "XBPQ 适配器",
@@ -104,7 +118,9 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
 export const adapterRegistry: AdapterProfile[] = [
   createProfile("builtin-cms", "cms"),
   createProfile("builtin-live", "live"),
+  createProfile("http-extension", "cms"),
   createProfile("http-parser", "parser"),
+  createProfile("spider-runtime", "cms"),
   createProfile("remote-jar", "cms"),
   createProfile("drpy-js", "parser"),
   createProfile("xbpq", "parser"),
@@ -118,7 +134,7 @@ export const adapterRegistry: AdapterProfile[] = [
 export function getAdapterProfile(
   source: Pick<
     SourceRecord,
-    "key" | "api" | "jar" | "sourceType" | "capability"
+    "key" | "api" | "jar" | "sourceType" | "siteProtocol" | "capability"
   >,
 ): AdapterProfile {
   const key = source.key.toLowerCase();
@@ -127,6 +143,24 @@ export function getAdapterProfile(
 
   if (source.sourceType === "live") {
     id = "builtin-live";
+  } else if (source.siteProtocol === "http-extension") {
+    id = "http-extension";
+  } else if (source.siteProtocol === "spider") {
+    if (key.startsWith("drpy_js_") || key.includes("drpy")) {
+      id = "drpy-js";
+    } else if (key.includes("xbpq")) {
+      id = "xbpq";
+    } else if (key.includes("appmao")) {
+      id = "csp-appmao";
+    } else if (key.includes("panda")) {
+      id = "csp-panda";
+    } else if (key.includes("xyqhiker")) {
+      id = "csp-xyqhiker";
+    } else if (source.jar) {
+      id = "remote-jar";
+    } else {
+      id = "spider-runtime";
+    }
   } else if (key.startsWith("drpy_js_") || key.includes("drpy")) {
     id = "drpy-js";
   } else if (key.includes("xbpq")) {

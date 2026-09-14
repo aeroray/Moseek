@@ -1,4 +1,4 @@
-import { getLiveChannels, isTauriRuntime } from "@/lib/tauri";
+import { isTauriRuntime, loadLiveSource } from "@/lib/tauri";
 import { getEpg } from "@/lib/tauri";
 import type { EpgCatalog, SourceRecord, LiveCatalog } from "@/types/moseek";
 
@@ -13,17 +13,13 @@ export async function loadLiveCatalog(
 ): Promise<LiveAdapterResult> {
   if (source) {
     try {
-      const remote = await getLiveChannels(
-        source.key,
-        source.api,
-        source.ext ?? "auto",
-      );
+      const remote = await loadLiveSource(source);
       if (remote) return { data: remote, mode: "remote", error: null };
     } catch (error) {
       return {
         data: { channels: [], groups: [] },
         mode: "remote",
-        error: error instanceof Error ? error.message : "直播源请求失败",
+        error: getErrorMessage(error, "直播源请求失败"),
       };
     }
   }
@@ -55,9 +51,24 @@ export async function loadEpg(
       return {
         data: { programs: [] },
         mode: "remote",
-        error: error instanceof Error ? error.message : "EPG 请求失败",
+        error: getErrorMessage(error, "EPG 请求失败"),
       };
     }
   }
   return { data: { programs: [] }, mode: "empty", error: null };
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    error.message.trim()
+  ) {
+    return error.message;
+  }
+  return fallback;
 }

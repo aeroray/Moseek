@@ -308,6 +308,7 @@ function classifySource(site: RawSite, index: number): SourceRecord {
   const key = site.key ?? `invalid-${index + 1}`;
   const name = site.name ?? `未命名源 ${index + 1}`;
   const api = site.api ?? "";
+  const siteType = normalizeSiteType(site.type);
   const keyLower = key.toLowerCase();
   const apiLower = api.toLowerCase();
   const serializedSite = JSON.stringify(site).toLowerCase();
@@ -320,6 +321,14 @@ function classifySource(site: RawSite, index: number): SourceRecord {
   const hasDangerousProtocol = /^(javascript|data|file|shell):/i.test(api);
   const hasPrivateProtocol = !/^https?:\/\//i.test(api);
   const hasJar = Boolean(site.jar);
+  const hasSpiderAdapter =
+    siteType === 3 ||
+    hasJar ||
+    keyLower.startsWith("csp_") ||
+    keyLower.startsWith("drpy_js_") ||
+    serializedSite.includes('"spider"') ||
+    serializedSite.includes('"script"');
+  const siteProtocol = getSiteProtocol(siteType, hasSpiderAdapter);
 
   let capability: CapabilityStatus;
   let capabilityNote: string;
@@ -328,12 +337,19 @@ function classifySource(site: RawSite, index: number): SourceRecord {
     capability = "invalid";
     capabilityNote =
       "缺少 key、name 或 api 必填字段，无法建立安全的资源源记录。";
-  } else if (hasDangerousProtocol || hasRemoteScript) {
+  } else if (
+    siteType === 3 ||
+    hasJar ||
+    hasDangerousProtocol ||
+    hasRemoteScript
+  ) {
     capability = "blocked";
-    capabilityNote = "检测到远程脚本或危险协议，Moseek 默认阻止执行。";
-  } else if (hasJar) {
-    capability = "partial";
-    capabilityNote = "API 部分可用；存在远程 JAR 依赖，Moseek 不会下载或执行。";
+    capabilityNote =
+      siteType === 3
+        ? "检测到 TVBox type=3 Spider 运行时，Moseek 只记录和展示，不会执行。"
+        : hasJar
+          ? "检测到远程 JAR 依赖，Moseek 只记录和展示，不会下载或执行。"
+          : "检测到远程脚本或危险协议，Moseek 默认阻止执行。";
   } else if (apiLower.startsWith("proxy://") || hasPrivateProtocol) {
     capability = "needs-adapter";
     capabilityNote = "检测到私有或非 HTTP 协议，需要单独适配器，当前不执行。";
@@ -345,22 +361,38 @@ function classifySource(site: RawSite, index: number): SourceRecord {
   return {
     key,
     name,
-    sourceType:
-      capability === "supported" || capability === "partial" ? "cms" : "parser",
+    sourceType: "cms",
+    siteType,
+    siteProtocol,
     api,
     ext: site.ext,
     jar: site.jar,
     epg: site.epg,
-    searchable:
-      site.searchable ??
-      (capability === "supported" || capability === "partial"),
+    searchable: site.searchable ?? capability === "supported",
     filterable: site.filterable ?? capability === "supported",
     capability,
     capabilityNote,
-    enabled: capability === "supported" || capability === "partial",
+    enabled: capability === "supported",
     lastCheckedAt: "刚刚",
     requestCount: 0,
   };
+}
+
+function normalizeSiteType(value: RawSite["type"]): number | null {
+  if (value === undefined) return null;
+  const parsed = typeof value === "string" ? Number(value.trim()) : value;
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function getSiteProtocol(
+  siteType: number | null,
+  hasSpiderAdapter: boolean,
+): SourceRecord["siteProtocol"] {
+  if (hasSpiderAdapter || siteType === 3) return "spider";
+  if (siteType === 0) return "xml-http";
+  if (siteType === 4) return "http-extension";
+  if (siteType === 1 || siteType === null) return "json-http";
+  return "unknown";
 }
 
 function classifyLiveSource(live: RawLive, index: number): SourceRecord {

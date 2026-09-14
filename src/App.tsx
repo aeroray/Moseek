@@ -7,6 +7,11 @@ import { HistoryView } from "@/features/browse/history-view";
 import { ConfigCenter } from "@/features/config/config-center";
 import { LiveView } from "@/features/live/live-view";
 import { SettingsView } from "@/features/settings/settings-view";
+import {
+  isTauriRuntime,
+  listConfigDocuments,
+  loadActiveConfig,
+} from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
 import type { ViewKey } from "@/types/moseek";
 
@@ -15,6 +20,9 @@ function App() {
   const theme = useAppStore((state) => state.theme);
   const setActiveView = useAppStore((state) => state.setActiveView);
   const setTheme = useAppStore((state) => state.setTheme);
+  const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
+  const setConfigDocument = useAppStore((state) => state.setConfigDocument);
+  const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -31,6 +39,27 @@ function App() {
       return () => mediaQuery.removeEventListener("change", syncTheme);
     }
   }, [theme]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    void Promise.all([listConfigDocuments(), loadActiveConfig()])
+      .then(([documents, document]) => {
+        if (cancelled) return;
+        setConfigDocuments(documents ?? []);
+        if (document) {
+          setConfigDocument(document);
+        } else {
+          clearConfigDocument();
+        }
+      })
+      .catch(() => {
+        // Keep the persisted frontend snapshot available if the database is temporarily unavailable.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [clearConfigDocument, setConfigDocument, setConfigDocuments]);
 
   const navigate = (view: ViewKey) => {
     setActiveView(view);

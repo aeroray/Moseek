@@ -1,7 +1,11 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import { setSourceEnabled } from "@/lib/tauri";
+import {
+  setSourceEnabled,
+  type ConfigDocumentSummary,
+  type StoredConfigDocument,
+} from "@/lib/tauri";
 import type {
   PlayHistoryRecord,
   SourceRecord,
@@ -14,6 +18,9 @@ import type {
 interface AppStore {
   activeView: ViewKey;
   theme: ThemeMode;
+  configDocuments: ConfigDocumentSummary[];
+  configDocumentCache: Record<number, StoredConfigDocument>;
+  activeConfigId: number | null;
   sources: SourceRecord[];
   rawConfig: string;
   normalizedConfig: string;
@@ -24,7 +31,11 @@ interface AppStore {
   liveFavorites: string[];
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
-  toggleSource: (key: string) => void;
+  toggleSource: (key: string) => Promise<void>;
+  setConfigDocuments: (documents: ConfigDocumentSummary[]) => void;
+  setConfigDocument: (document: StoredConfigDocument) => void;
+  removeConfigDocument: (documentId: number) => void;
+  clearConfigDocument: () => void;
   replaceSources: (sources: SourceRecord[]) => void;
   setConfigSnapshot: (
     rawConfig: string,
@@ -40,9 +51,12 @@ interface AppStore {
 
 export const useAppStore = create<AppStore>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       activeView: "browse",
       theme: "system",
+      configDocuments: [],
+      configDocumentCache: {},
+      activeConfigId: null,
       sources: [],
       rawConfig: "",
       normalizedConfig: "",
@@ -53,19 +67,98 @@ export const useAppStore = create<AppStore>()(
       liveFavorites: [],
       setActiveView: (activeView) => set({ activeView }),
       setTheme: (theme) => set({ theme }),
-      toggleSource: (key) => {
-        let nextEnabled: boolean | undefined;
+      toggleSource: async (key) => {
+        const currentState = get();
+        const currentSource = currentState.sources.find(
+          (source) => source.key === key,
+        );
+        if (!currentSource) return;
+        const nextEnabled = !currentSource.enabled;
         set((state) => ({
-          sources: state.sources.map((source) => {
-            if (source.key !== key) return source;
-            nextEnabled = !source.enabled;
-            return { ...source, enabled: nextEnabled };
-          }),
+          sources: state.sources.map((source) =>
+            source.key === key ? { ...source, enabled: nextEnabled } : source,
+          ),
+          normalizedConfig: updateNormalizedConfigEnabled(
+            state.normalizedConfig,
+            key,
+            nextEnabled,
+          ),
         }));
-        if (nextEnabled !== undefined) {
-          void setSourceEnabled(key, nextEnabled);
+        if (currentState.activeConfigId === null) return;
+        try {
+          const document = await setSourceEnabled(
+            currentState.activeConfigId,
+            key,
+            nextEnabled,
+          );
+          if (document) get().setConfigDocument(document);
+        } catch (error) {
+          set((state) => ({
+            sources: state.sources.map((source) =>
+              source.key === key
+                ? { ...source, enabled: currentSource.enabled }
+                : source,
+            ),
+            normalizedConfig: updateNormalizedConfigEnabled(
+              state.normalizedConfig,
+              key,
+              currentSource.enabled,
+            ),
+          }));
+          throw error;
         }
       },
+      setConfigDocuments: (configDocuments) => set({ configDocuments }),
+      setConfigDocument: (document) =>
+        set((state) => ({
+          activeConfigId: document.id,
+          configDocumentCache: {
+            ...state.configDocumentCache,
+            [document.id]: document,
+          },
+          sources: document.sources.map((source) => ({ ...source })),
+          rawConfig: document.rawConfig,
+          normalizedConfig: document.normalizedConfig,
+          lastImportedAt: document.importedAt,
+          configDocuments: [
+            {
+              id: document.id,
+              name: document.name,
+              sourceCount: document.sourceCount,
+              liveCount: document.liveCount,
+              importedAt: document.importedAt,
+            },
+            ...state.configDocuments.filter((item) => item.id !== document.id),
+          ],
+        })),
+      removeConfigDocument: (documentId) =>
+        set((state) => {
+          const { [documentId]: _removed, ...configDocumentCache } =
+            state.configDocumentCache;
+          return {
+            configDocuments: state.configDocuments.filter(
+              (document) => document.id !== documentId,
+            ),
+            configDocumentCache,
+            ...(state.activeConfigId === documentId
+              ? {
+                  activeConfigId: null,
+                  sources: [],
+                  rawConfig: "",
+                  normalizedConfig: "",
+                  lastImportedAt: null,
+                }
+              : {}),
+          };
+        }),
+      clearConfigDocument: () =>
+        set({
+          activeConfigId: null,
+          sources: [],
+          rawConfig: "",
+          normalizedConfig: "",
+          lastImportedAt: null,
+        }),
       replaceSources: (sources) =>
         set({ sources: sources.map((source) => ({ ...source })) }),
       setConfigSnapshot: (rawConfig, normalizedConfig, lastImportedAt) =>
@@ -121,14 +214,17 @@ export const useAppStore = create<AppStore>()(
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<AppStore> | undefined;
         const hasImportedConfig = Boolean(persisted?.rawConfig?.trim());
-        const hasSources = Boolean(persisted?.sources?.length);
-        const keepUserContent = hasImportedConfig && hasSources;
+        const hasConfigDocuments = Boolean(persisted?.configDocuments?.length);
+        const keepUserContent = hasImportedConfig || hasConfigDocuments;
         const persistedActiveView = (
           persisted as { activeView?: string } | undefined
         )?.activeView;
         return {
           ...currentState,
           ...persisted,
+          configDocuments: persisted?.configDocuments ?? [],
+          configDocumentCache: persisted?.configDocumentCache ?? {},
+          activeConfigId: persisted?.activeConfigId ?? null,
           activeView:
             persistedActiveView === "home"
               ? "browse"
@@ -147,6 +243,9 @@ export const useAppStore = create<AppStore>()(
       partialize: (state) => ({
         activeView: state.activeView,
         theme: state.theme,
+        configDocuments: state.configDocuments,
+        configDocumentCache: state.configDocumentCache,
+        activeConfigId: state.activeConfigId,
         sources: state.sources,
         rawConfig: state.rawConfig,
         normalizedConfig: state.normalizedConfig,
@@ -159,3 +258,31 @@ export const useAppStore = create<AppStore>()(
     },
   ),
 );
+
+function updateNormalizedConfigEnabled(
+  normalizedConfig: string,
+  sourceKey: string,
+  enabled: boolean,
+) {
+  if (!normalizedConfig.trim()) return normalizedConfig;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(normalizedConfig);
+  } catch {
+    return normalizedConfig;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return normalizedConfig;
+  }
+  const config = parsed as Record<string, unknown>;
+  for (const section of ["sites", "lives"]) {
+    const items = config[section];
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const source = item as Record<string, unknown>;
+      if (source.key === sourceKey) source.enabled = enabled;
+    }
+  }
+  return JSON.stringify(parsed, null, 2);
+}

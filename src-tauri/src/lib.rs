@@ -1,16 +1,15 @@
-use std::{
-    fs,
-    net::{IpAddr, ToSocketAddrs},
-    sync::Mutex,
-    time::Duration,
-};
+use std::{fs, sync::Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::{Manager, State};
 
+mod adapters;
 mod cms;
 mod live;
+mod policy;
+mod resolver;
 
 struct AppDatabase(Mutex<Connection>);
 
@@ -20,6 +19,8 @@ pub struct SourceRecord {
     pub key: String,
     pub name: String,
     pub source_type: String,
+    pub site_type: Option<i64>,
+    pub site_protocol: Option<String>,
     pub api: String,
     pub ext: Option<String>,
     pub jar: Option<String>,
@@ -43,6 +44,16 @@ pub struct SaveConfigDocumentInput {
     pub live_count: i64,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDocumentSummary {
+    pub id: i64,
+    pub name: String,
+    pub source_count: i64,
+    pub live_count: i64,
+    pub imported_at: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDocument {
@@ -51,6 +62,7 @@ pub struct ConfigDocument {
     pub raw_config: String,
     pub normalized_config: String,
     pub sources: Vec<SourceRecord>,
+    pub source_count: i64,
     pub live_count: i64,
     pub imported_at: String,
 }
@@ -60,103 +72,34 @@ fn healthcheck() -> &'static str {
     "ready"
 }
 
-#[tauri::command]
-fn save_config_document(
-    input: SaveConfigDocumentInput,
-    state: State<'_, AppDatabase>,
-) -> Result<ConfigDocument, String> {
-    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-
-    transaction
-        .execute(
-            "INSERT INTO config_documents (name, raw_config, normalized_config, live_count) VALUES (?1, ?2, ?3, ?4)",
-            params![input.name, input.raw_config, input.normalized_config, input.live_count],
-        )
-        .map_err(|error| error.to_string())?;
-    let document_id = transaction.last_insert_rowid();
-
-    for source in &input.sources {
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO sources (source_key, document_id, name, source_type, api, ext, jar, epg, searchable, filterable, capability, capability_note, enabled, last_checked_at, request_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-                params![
-                    source.key,
-                    document_id,
-                    source.name,
-                    source.source_type,
-                    source.api,
-                    source.ext,
-                    source.jar,
-                    source.epg,
-                    i64::from(source.searchable),
-                    i64::from(source.filterable),
-                    source.capability,
-                    source.capability_note,
-                    i64::from(source.enabled),
-                    source.last_checked_at,
-                    source.request_count,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-    }
-
-    transaction.commit().map_err(|error| error.to_string())?;
-    let imported_at = connection
-        .query_row(
-            "SELECT imported_at FROM config_documents WHERE id = ?1",
-            params![document_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| error.to_string())?;
-
-    Ok(ConfigDocument {
-        id: document_id,
-        name: input.name,
-        raw_config: input.raw_config,
-        normalized_config: input.normalized_config,
-        sources: input.sources,
-        live_count: input.live_count,
-        imported_at,
-    })
+fn serialize_sources(sources: &[SourceRecord]) -> Result<String, String> {
+    serde_json::to_string(sources).map_err(|error| format!("配置源快照序列化失败：{error}"))
 }
 
-#[tauri::command]
-fn load_latest_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocument>, String> {
-    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    let document = connection
-        .query_row(
-            "SELECT id, name, raw_config, normalized_config, live_count, imported_at FROM config_documents ORDER BY id DESC LIMIT 1",
-            [],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-
-    let Some((id, name, raw_config, normalized_config, live_count, imported_at)) = document else {
+fn deserialize_sources(value: Option<String>) -> Result<Option<Vec<SourceRecord>>, String> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
+    serde_json::from_str(&value)
+        .map(Some)
+        .map_err(|error| format!("配置源快照解析失败：{error}"))
+}
 
+fn load_legacy_sources(
+    connection: &Connection,
+    document_id: i64,
+) -> Result<Vec<SourceRecord>, String> {
     let mut statement = connection
         .prepare("SELECT source_key, name, source_type, api, ext, jar, epg, searchable, filterable, capability, capability_note, enabled, last_checked_at, request_count FROM sources WHERE document_id = ?1 ORDER BY rowid")
         .map_err(|error| error.to_string())?;
-    let sources = statement
-        .query_map(params![id], |row| {
+    let rows = statement
+        .query_map(params![document_id], |row| {
             Ok(SourceRecord {
                 key: row.get(0)?,
                 name: row.get(1)?,
                 source_type: row.get(2)?,
+                site_type: None,
+                site_protocol: None,
                 api: row.get(3)?,
                 ext: row.get(4)?,
                 jar: row.get(5)?,
@@ -170,35 +113,319 @@ fn load_latest_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocu
                 request_count: row.get(13)?,
             })
         })
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn load_config_document(
+    connection: &Connection,
+    document_id: i64,
+) -> Result<Option<ConfigDocument>, String> {
+    let document = connection
+        .query_row(
+            "SELECT id, name, raw_config, normalized_config, sources_json, live_count, imported_at FROM config_documents WHERE id = ?1",
+            params![document_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
         .map_err(|error| error.to_string())?;
 
+    let Some((id, name, raw_config, normalized_config, sources_json, live_count, imported_at)) =
+        document
+    else {
+        return Ok(None);
+    };
+    let sources = deserialize_sources(sources_json)?
+        .map_or_else(|| load_legacy_sources(connection, id), Ok)?;
     Ok(Some(ConfigDocument {
         id,
         name,
         raw_config,
         normalized_config,
+        source_count: sources.len() as i64,
         sources,
         live_count,
         imported_at,
     }))
 }
 
+fn load_latest_document(connection: &Connection) -> Result<Option<ConfigDocument>, String> {
+    let document_id = connection
+        .query_row(
+            "SELECT id FROM config_documents ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    document_id
+        .map(|id| load_config_document(connection, id))
+        .transpose()
+        .map(|document| document.flatten())
+}
+
+fn active_config_id(connection: &Connection) -> Result<Option<i64>, String> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'active_config_document_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    Ok(value.and_then(|value| value.parse::<i64>().ok()))
+}
+
+fn load_active_document(connection: &Connection) -> Result<Option<ConfigDocument>, String> {
+    if let Some(document_id) = active_config_id(connection)? {
+        if let Some(document) = load_config_document(connection, document_id)? {
+            return Ok(Some(document));
+        }
+    }
+    load_latest_document(connection)
+}
+
+fn update_normalized_source_enabled(
+    normalized_config: &str,
+    source_key: &str,
+    enabled: bool,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            if item.get("key").and_then(Value::as_str) != Some(source_key) {
+                continue;
+            }
+            if let Some(object) = item.as_object_mut() {
+                object.insert("enabled".to_string(), Value::Bool(enabled));
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
+fn set_source_enabled_in_connection(
+    connection: &mut Connection,
+    document_id: i64,
+    source_key: &str,
+    enabled: bool,
+) -> Result<ConfigDocument, String> {
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    let source = sources
+        .iter_mut()
+        .find(|source| source.key == source_key)
+        .ok_or_else(|| "配置中找不到该资源源".to_string())?;
+    source.enabled = enabled;
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config =
+        update_normalized_source_enabled(&document.normalized_config, source_key, enabled);
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
+            params![sources_json, normalized_config, document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?.ok_or_else(|| "配置更新后无法读取".to_string())
+}
+
+#[tauri::command]
+fn save_config_document(
+    input: SaveConfigDocumentInput,
+    state: State<'_, AppDatabase>,
+) -> Result<ConfigDocument, String> {
+    let name = if input.name.trim().is_empty() {
+        "未命名配置".to_string()
+    } else {
+        input.name.trim().to_string()
+    };
+    let sources_json = serialize_sources(&input.sources)?;
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                name,
+                input.raw_config,
+                input.normalized_config,
+                sources_json,
+                input.live_count
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let document_id = transaction.last_insert_rowid();
+
+    transaction
+        .execute(
+            "INSERT INTO app_settings (key, value) VALUES ('active_config_document_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            params![document_id.to_string()],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(&connection, document_id)?.ok_or_else(|| "配置保存后无法读取".to_string())
+}
+
+#[tauri::command]
+fn load_latest_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocument>, String> {
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    load_latest_document(&connection)
+}
+
+#[tauri::command]
+fn load_active_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocument>, String> {
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    load_active_document(&connection)
+}
+
+#[tauri::command]
+fn list_config_documents(
+    state: State<'_, AppDatabase>,
+) -> Result<Vec<ConfigDocumentSummary>, String> {
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let rows = connection
+        .prepare(
+            "SELECT id, name, sources_json, live_count, imported_at FROM config_documents ORDER BY id DESC",
+        )
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    rows.into_iter()
+        .map(|(id, name, sources_json, live_count, imported_at)| {
+            let source_count = match deserialize_sources(sources_json)? {
+                Some(sources) => sources.len() as i64,
+                None => connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM sources WHERE document_id = ?1",
+                        params![id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())?,
+            };
+            Ok(ConfigDocumentSummary {
+                id,
+                name,
+                source_count,
+                live_count,
+                imported_at,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn activate_config_document(
+    document_id: i64,
+    state: State<'_, AppDatabase>,
+) -> Result<ConfigDocument, String> {
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let document = load_config_document(&connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    connection
+        .execute(
+            "INSERT INTO app_settings (key, value) VALUES ('active_config_document_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            params![document_id.to_string()],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(document)
+}
+
+#[tauri::command]
+fn delete_config_document(
+    document_id: i64,
+    state: State<'_, AppDatabase>,
+) -> Result<Option<ConfigDocument>, String> {
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let was_active = active_config_id(&connection)? == Some(document_id);
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let deleted = transaction
+        .execute(
+            "DELETE FROM config_documents WHERE id = ?1",
+            params![document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if deleted == 0 {
+        return Err("配置不存在或已被删除".to_string());
+    }
+    if was_active {
+        let next_id = transaction
+            .query_row(
+                "SELECT id FROM config_documents ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        match next_id {
+            Some(next_id) => {
+                transaction
+                    .execute(
+                        "INSERT INTO app_settings (key, value) VALUES ('active_config_document_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+                        params![next_id.to_string()],
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            None => {
+                transaction
+                    .execute(
+                        "DELETE FROM app_settings WHERE key = 'active_config_document_id'",
+                        [],
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_active_document(&connection)
+}
+
 #[tauri::command]
 fn set_source_enabled(
+    document_id: i64,
     source_key: String,
     enabled: bool,
     state: State<'_, AppDatabase>,
-) -> Result<(), String> {
-    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    connection
-        .execute(
-            "UPDATE sources SET enabled = ?1 WHERE source_key = ?2",
-            params![i64::from(enabled), source_key],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
+) -> Result<ConfigDocument, String> {
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    set_source_enabled_in_connection(&mut connection, document_id, &source_key, enabled)
 }
 
 #[tauri::command]
@@ -207,96 +434,18 @@ fn export_config(
     state: State<'_, AppDatabase>,
 ) -> Result<String, String> {
     let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    match document_id {
-        Some(id) => connection
-            .query_row(
-                "SELECT normalized_config FROM config_documents WHERE id = ?1",
-                params![id],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string()),
-        None => connection
-            .query_row(
-                "SELECT normalized_config FROM config_documents ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|error| error.to_string()),
+    let document = match document_id {
+        Some(id) => load_config_document(&connection, id)?,
+        None => load_active_document(&connection)?,
     }
+    .ok_or_else(|| "没有可导出的配置".to_string())?;
+    Ok(document.normalized_config)
 }
 
 #[tauri::command]
 async fn fetch_config_url(url: String) -> Result<String, String> {
     let parsed_url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
-    validate_remote_url(&parsed_url)?;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("Moseek/0.1")
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = client
-        .get(parsed_url)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    if response.content_length().unwrap_or(0) > 10 * 1024 * 1024 {
-        return Err("配置响应超过 10 MB 限制".to_string());
-    }
-    let body = response.bytes().await.map_err(|error| error.to_string())?;
-    if body.len() > 10 * 1024 * 1024 {
-        return Err("配置响应超过 10 MB 限制".to_string());
-    }
-    String::from_utf8(body.to_vec()).map_err(|_| "配置响应不是有效的 UTF-8 文本".to_string())
-}
-
-fn is_disallowed_host(host: &str) -> bool {
-    let normalized_host = host.trim_end_matches('.').to_ascii_lowercase();
-    if normalized_host == "localhost"
-        || normalized_host.ends_with(".localhost")
-        || normalized_host.ends_with(".local")
-    {
-        return true;
-    }
-    match normalized_host.parse::<IpAddr>() {
-        Ok(address) => is_disallowed_ip(address),
-        Err(_) => false,
-    }
-}
-
-pub(crate) fn validate_remote_url(url: &reqwest::Url) -> Result<(), String> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err("只允许 HTTP 或 HTTPS 地址".to_string());
-    }
-    let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
-    let port = url.port_or_known_default().unwrap_or(443);
-    if is_disallowed_host(host) || resolves_to_disallowed_address(host, port) {
-        return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
-    }
-    Ok(())
-}
-
-fn resolves_to_disallowed_address(host: &str, port: u16) -> bool {
-    match (host, port).to_socket_addrs() {
-        Ok(mut addresses) => addresses.any(|address| is_disallowed_ip(address.ip())),
-        Err(_) => false,
-    }
-}
-
-fn is_disallowed_ip(address: IpAddr) -> bool {
-    match address {
-        IpAddr::V4(address) => {
-            address.is_loopback() || address.is_private() || address.is_link_local()
-        }
-        IpAddr::V6(address) => {
-            address.is_loopback()
-                || address.is_unspecified()
-                || (address.segments()[0] & 0xfe00 == 0xfc00)
-        }
-    }
+    policy::fetch_text(parsed_url, 10 * 1024 * 1024, "配置响应").await
 }
 
 fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
@@ -315,6 +464,7 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                name TEXT NOT NULL,
                raw_config TEXT NOT NULL,
                normalized_config TEXT NOT NULL,
+                             sources_json TEXT,
                live_count INTEGER NOT NULL DEFAULT 0,
                imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
@@ -405,8 +555,30 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
              );",
         )
         .map_err(|error| error.to_string())?;
+    ensure_config_sources_column(&connection)?;
     ensure_sources_epg_column(&connection)?;
     Ok(connection)
+}
+
+fn ensure_config_sources_column(connection: &Connection) -> Result<(), String> {
+    let has_sources_json = connection
+        .prepare("PRAGMA table_info(config_documents)")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|column| column == "sources_json");
+    if !has_sources_json {
+        connection
+            .execute(
+                "ALTER TABLE config_documents ADD COLUMN sources_json TEXT",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 fn ensure_sources_epg_column(connection: &Connection) -> Result<(), String> {
@@ -440,14 +612,117 @@ pub fn run() {
             healthcheck,
             save_config_document,
             load_latest_config,
+            load_active_config,
+            list_config_documents,
+            activate_config_document,
+            delete_config_document,
             set_source_enabled,
             export_config,
             fetch_config_url,
-            cms::search_source,
-            cms::get_source_detail,
-            live::get_live_channels,
-            live::get_epg
+            cms::browse_source,
+            cms::get_detail,
+            live::load_live_source,
+            live::get_epg,
+            resolver::resolve_playback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Moseek");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE config_documents (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name TEXT NOT NULL,
+                   raw_config TEXT NOT NULL,
+                   normalized_config TEXT NOT NULL,
+                   sources_json TEXT,
+                   live_count INTEGER NOT NULL DEFAULT 0,
+                   imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );",
+            )
+            .unwrap();
+    }
+
+    fn test_source(enabled: bool) -> SourceRecord {
+        SourceRecord {
+            key: "shared-key".to_string(),
+            name: "同名源".to_string(),
+            source_type: "cms".to_string(),
+            site_type: Some(1),
+            site_protocol: Some("json-http".to_string()),
+            api: "https://example.com/api".to_string(),
+            ext: None,
+            jar: None,
+            epg: None,
+            searchable: true,
+            filterable: true,
+            capability: "supported".to_string(),
+            capability_note: "test".to_string(),
+            enabled,
+            last_checked_at: "刚刚".to_string(),
+            request_count: 0,
+        }
+    }
+
+    fn insert_test_document(connection: &Connection, name: &str, enabled: bool) -> i64 {
+        let sources_json = serialize_sources(&[test_source(enabled)]).unwrap();
+        let normalized_config = serde_json::json!({
+            "sites": [{ "key": "shared-key", "enabled": enabled }]
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 0)",
+                params![name, "{}", normalized_config, sources_json],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn documents_can_store_the_same_source_key_independently() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let first_id = insert_test_document(&connection, "主配置", true);
+        let second_id = insert_test_document(&connection, "备用配置", false);
+
+        let first = load_config_document(&connection, first_id)
+            .unwrap()
+            .unwrap();
+        let second = load_config_document(&connection, second_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.sources[0].key, second.sources[0].key);
+        assert!(first.sources[0].enabled);
+        assert!(!second.sources[0].enabled);
+    }
+
+    #[test]
+    fn source_enablement_updates_only_the_target_document() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let first_id = insert_test_document(&connection, "主配置", true);
+        let second_id = insert_test_document(&connection, "备用配置", true);
+
+        let updated =
+            set_source_enabled_in_connection(&mut connection, first_id, "shared-key", false)
+                .unwrap();
+        let untouched = load_config_document(&connection, second_id)
+            .unwrap()
+            .unwrap();
+        let updated_value: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+        let untouched_value: Value = serde_json::from_str(&untouched.normalized_config).unwrap();
+
+        assert!(!updated.sources[0].enabled);
+        assert_eq!(updated_value["sites"][0]["enabled"], Value::Bool(false));
+        assert!(untouched.sources[0].enabled);
+        assert_eq!(untouched_value["sites"][0]["enabled"], Value::Bool(true));
+    }
 }

@@ -106,28 +106,6 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
             </div>
           ))}
         </nav>
-
-        <div className="flex flex-col gap-3 rounded-lg border border-sidebar-border bg-sidebar-accent/50 p-3">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-sidebar-foreground">
-              本地工作区
-            </span>
-            <span className="size-2 rounded-full bg-[color:var(--status-supported)]" />
-          </div>
-          <p className="text-xs leading-5 text-muted-foreground">
-            数据保存在本机。远程脚本与 JAR 默认不执行。
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="w-full justify-between border-sidebar-border bg-sidebar"
-            onClick={() => onNavigate("settings")}
-          >
-            工作区设置
-            <Settings2 data-icon="inline-end" aria-hidden="true" />
-          </Button>
-        </div>
       </aside>
 
       <section className="flex min-w-0 flex-1 flex-col">

@@ -3,7 +3,10 @@ use quick_xml::Reader;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::validate_remote_url;
+use crate::{
+    policy::{fetch_text, validate_remote_url},
+    SourceRecord,
+};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,36 +54,19 @@ pub struct EpgCatalog {
 }
 
 #[tauri::command]
-pub async fn get_live_channels(
-    source_key: String,
-    source_url: String,
-    format: String,
-) -> Result<LiveCatalog, String> {
+pub async fn load_live_source(source: SourceRecord) -> Result<LiveCatalog, String> {
+    if source.source_type != "live" {
+        return Err("该源不是直播适配器支持的 live 类型。".to_string());
+    }
+    if source.capability == "blocked" || source.capability == "invalid" {
+        return Err(source.capability_note);
+    }
+    let source_key = source.key;
+    let source_url = source.api;
+    let format = source.ext.unwrap_or_else(|| "auto".to_string());
     let url = reqwest::Url::parse(&source_url).map_err(|error| error.to_string())?;
-    validate_remote_url(&url)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("Moseek/0.1")
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    if response.content_length().unwrap_or(0) > 20 * 1024 * 1024 {
-        return Err("直播源响应超过 20 MB 限制".to_string());
-    }
-    let body = response.bytes().await.map_err(|error| error.to_string())?;
-    if body.len() > 20 * 1024 * 1024 {
-        return Err("直播源响应超过 20 MB 限制".to_string());
-    }
     let format = format.to_ascii_lowercase();
-    let text =
-        String::from_utf8(body.to_vec()).map_err(|_| "直播源不是有效的 UTF-8 文本".to_string())?;
+    let text = fetch_text(url, 20 * 1024 * 1024, "直播源响应").await?;
     let channels = if format == "json"
         || text.trim_start().starts_with('{')
         || text.trim_start().starts_with('[')
@@ -102,29 +88,7 @@ pub async fn get_live_channels(
 #[tauri::command]
 pub async fn get_epg(source_url: String, format: String) -> Result<EpgCatalog, String> {
     let url = reqwest::Url::parse(&source_url).map_err(|error| error.to_string())?;
-    validate_remote_url(&url)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("Moseek/0.1")
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    if response.content_length().unwrap_or(0) > 20 * 1024 * 1024 {
-        return Err("EPG 响应超过 20 MB 限制".to_string());
-    }
-    let body = response.bytes().await.map_err(|error| error.to_string())?;
-    if body.len() > 20 * 1024 * 1024 {
-        return Err("EPG 响应超过 20 MB 限制".to_string());
-    }
-    let text =
-        String::from_utf8(body.to_vec()).map_err(|_| "EPG 不是有效的 UTF-8 文本".to_string())?;
+    let text = fetch_text(url, 20 * 1024 * 1024, "EPG 响应").await?;
     let normalized_format = format.to_ascii_lowercase();
     let programs = if normalized_format == "json"
         || text.trim_start().starts_with('{')
