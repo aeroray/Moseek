@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 
-import type { SourceRecord } from "@/types/moseek";
+import type {
+  CatalogPage,
+  SourceRecord,
+  VodItem,
+} from "@/types/moseek";
 
 export interface StoredConfigDocument {
   id: number;
@@ -37,14 +41,49 @@ export async function setSourceEnabled(sourceKey: string, enabled: boolean) {
 }
 
 export async function exportConfig(documentId?: number) {
-  return invokeCommand<string>("export_config", { documentId: documentId ?? null });
+  return invokeCommand<string>("export_config", {
+    documentId: documentId ?? null,
+  });
 }
 
 export async function fetchConfigUrl(url: string) {
   return invokeCommand<string>("fetch_config_url", { url });
 }
 
-async function invokeCommand<T>(command: string, args?: Record<string, unknown>) {
+export async function searchSource(
+  sourceKey: string,
+  api: string,
+  query: string,
+  categoryId: string,
+  page: number,
+  pageSize: number,
+) {
+  return invokeCommand<CatalogPage>("search_source", {
+    sourceKey,
+    api,
+    query,
+    categoryId,
+    page,
+    pageSize,
+  });
+}
+
+export async function getSourceDetail(
+  sourceKey: string,
+  api: string,
+  vodId: string,
+) {
+  return invokeCommand<VodItem | null>("get_source_detail", {
+    sourceKey,
+    api,
+    vodId,
+  });
+}
+
+async function invokeCommand<T>(
+  command: string,
+  args?: Record<string, unknown>,
+) {
   if (!isTauriRuntime()) return null;
   return invoke<T>(command, args);
 }

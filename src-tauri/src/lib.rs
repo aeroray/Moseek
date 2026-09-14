@@ -9,6 +9,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
+mod cms;
+
 struct AppDatabase(Mutex<Connection>);
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -234,16 +236,7 @@ fn export_config(
 #[tauri::command]
 async fn fetch_config_url(url: String) -> Result<String, String> {
     let parsed_url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
-    if !matches!(parsed_url.scheme(), "http" | "https") {
-        return Err("只允许 HTTP 或 HTTPS 配置地址".to_string());
-    }
-    let host = parsed_url
-        .host_str()
-        .ok_or_else(|| "配置地址缺少主机名".to_string())?;
-    let port = parsed_url.port_or_known_default().unwrap_or(443);
-    if is_disallowed_host(host) || resolves_to_disallowed_address(host, port) {
-        return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
-    }
+    validate_remote_url(&parsed_url)?;
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -283,6 +276,20 @@ fn is_disallowed_host(host: &str) -> bool {
         Ok(address) => is_disallowed_ip(address),
         Err(_) => false,
     }
+}
+
+pub(crate) fn validate_remote_url(url: &reqwest::Url) -> Result<(), String> {
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("只允许 HTTP 或 HTTPS 地址".to_string());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| "地址缺少主机名".to_string())?;
+    let port = url.port_or_known_default().unwrap_or(443);
+    if is_disallowed_host(host) || resolves_to_disallowed_address(host, port) {
+        return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
+    }
+    Ok(())
 }
 
 fn resolves_to_disallowed_address(host: &str, port: u16) -> bool {
@@ -427,7 +434,9 @@ pub fn run() {
             load_latest_config,
             set_source_enabled,
             export_config,
-            fetch_config_url
+            fetch_config_url,
+            cms::search_source,
+            cms::get_source_detail
         ])
         .run(tauri::generate_context!())
         .expect("error while running Moseek");

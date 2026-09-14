@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { countParsedCapabilities, parseConfigText } from "@/features/config/config-parser";
+import {
+  countParsedCapabilities,
+  parseConfigText,
+} from "@/features/config/config-parser";
 
 describe("Moseek config parser", () => {
   it("normalizes ordinary CMS sources and preserves live counts", () => {

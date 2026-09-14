@@ -3,7 +3,13 @@ import { persist } from "zustand/middleware";
 
 import { initialSources } from "@/lib/mock-data";
 import { setSourceEnabled } from "@/lib/tauri";
-import type { SourceRecord, ThemeMode, ViewKey } from "@/types/moseek";
+import type {
+  PlayHistoryRecord,
+  SourceRecord,
+  ThemeMode,
+  ViewKey,
+  VodItem,
+} from "@/types/moseek";
 
 interface AppStore {
   activeView: ViewKey;
@@ -12,11 +18,20 @@ interface AppStore {
   rawConfig: string;
   normalizedConfig: string;
   lastImportedAt: string | null;
+  history: PlayHistoryRecord[];
+  favorites: VodItem[];
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
   toggleSource: (key: string) => void;
   replaceSources: (sources: SourceRecord[]) => void;
-  setConfigSnapshot: (rawConfig: string, normalizedConfig: string, importedAt: string) => void;
+  setConfigSnapshot: (
+    rawConfig: string,
+    normalizedConfig: string,
+    importedAt: string,
+  ) => void;
+  addHistory: (record: Omit<PlayHistoryRecord, "id" | "updatedAt">) => void;
+  clearHistory: () => void;
+  toggleFavorite: (item: VodItem) => void;
 }
 
 export const useAppStore = create<AppStore>()(
@@ -28,6 +43,8 @@ export const useAppStore = create<AppStore>()(
       rawConfig: "",
       normalizedConfig: "",
       lastImportedAt: null,
+      history: [],
+      favorites: [],
       setActiveView: (activeView) => set({ activeView }),
       setTheme: (theme) => set({ theme }),
       toggleSource: (key) => {
@@ -47,6 +64,32 @@ export const useAppStore = create<AppStore>()(
         set({ sources: sources.map((source) => ({ ...source })) }),
       setConfigSnapshot: (rawConfig, normalizedConfig, lastImportedAt) =>
         set({ rawConfig, normalizedConfig, lastImportedAt }),
+      addHistory: (record) =>
+        set((state) => {
+          const historyRecord: PlayHistoryRecord = {
+            ...record,
+            id: `${record.item.id}:${record.episodeId}`,
+            updatedAt: new Date().toISOString(),
+          };
+          return {
+            history: [
+              historyRecord,
+              ...state.history.filter((item) => item.id !== historyRecord.id),
+            ].slice(0, 100),
+          };
+        }),
+      clearHistory: () => set({ history: [] }),
+      toggleFavorite: (item) =>
+        set((state) => {
+          const isFavorite = state.favorites.some(
+            (favorite) => favorite.id === item.id,
+          );
+          return {
+            favorites: isFavorite
+              ? state.favorites.filter((favorite) => favorite.id !== item.id)
+              : [item, ...state.favorites],
+          };
+        }),
     }),
     {
       name: "moseek-app-state",
@@ -57,6 +100,8 @@ export const useAppStore = create<AppStore>()(
         rawConfig: state.rawConfig,
         normalizedConfig: state.normalizedConfig,
         lastImportedAt: state.lastImportedAt,
+        history: state.history,
+        favorites: state.favorites,
       }),
     },
   ),

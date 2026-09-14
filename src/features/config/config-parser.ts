@@ -78,7 +78,9 @@ export function parseConfigText(rawText: string): ParseResult {
     };
   }
 
-  const sources = validation.data.sites.map((site, index) => classifySource(site, index));
+  const sources = validation.data.sites.map((site, index) =>
+    classifySource(site, index),
+  );
   const rootRecord = validation.data as Record<string, unknown>;
   const blockedRootFields = Object.keys(rootRecord).filter(
     (key) =>
@@ -155,7 +157,8 @@ function classifySource(site: RawSite, index: number): SourceRecord {
 
   if (!hasRequiredFields) {
     capability = "invalid";
-    capabilityNote = "缺少 key、name 或 api 必填字段，无法建立安全的资源源记录。";
+    capabilityNote =
+      "缺少 key、name 或 api 必填字段，无法建立安全的资源源记录。";
   } else if (hasDangerousProtocol || hasRemoteScript) {
     capability = "blocked";
     capabilityNote = "检测到远程脚本或危险协议，Moseek 默认阻止执行。";
@@ -173,7 +176,8 @@ function classifySource(site: RawSite, index: number): SourceRecord {
   return {
     key,
     name,
-    sourceType: capability === "supported" || capability === "partial" ? "cms" : "parser",
+    sourceType:
+      capability === "supported" || capability === "partial" ? "cms" : "parser",
     api,
     ext: site.ext,
     jar: site.jar,

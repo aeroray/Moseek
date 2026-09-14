@@ -1,10 +1,4 @@
-import {
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ChangeEvent,
-} from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import {
   AlertTriangle,
   Check,
@@ -153,7 +147,8 @@ export function ConfigCenter() {
       })
       .catch((error) => {
         if (!mounted) return;
-        const message = error instanceof Error ? error.message : "无法读取本地配置";
+        const message =
+          error instanceof Error ? error.message : "无法读取本地配置";
         setParseState({ type: "error", message });
       });
     return () => {
@@ -196,7 +191,8 @@ export function ConfigCenter() {
       if (!text) {
         setParseState({
           type: "error",
-          message: "浏览器预览不会直接请求远程配置，请在 Tauri 桌面应用中使用此功能。",
+          message:
+            "浏览器预览不会直接请求远程配置，请在 Tauri 桌面应用中使用此功能。",
         });
         return;
       }
@@ -207,7 +203,8 @@ export function ConfigCenter() {
         message: "远程配置已载入，请点击解析配置生成报告。",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "远程配置请求失败";
+      const message =
+        error instanceof Error ? error.message : "远程配置请求失败";
       setParseState({ type: "error", message });
     } finally {
       setIsFetchingRemote(false);
@@ -250,7 +247,8 @@ export function ConfigCenter() {
         message: `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`,
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "本地数据库写入失败";
+      const message =
+        error instanceof Error ? error.message : "本地数据库写入失败";
       setParseState({
         type: "error",
         message: `解析成功，但保存失败：${message}`,
@@ -265,12 +263,14 @@ export function ConfigCenter() {
     try {
       persistedConfig = await exportConfig();
     } catch (error) {
-      const message = error instanceof Error ? error.message : "本地配置导出失败";
+      const message =
+        error instanceof Error ? error.message : "本地配置导出失败";
       setParseState({ type: "error", message });
     }
     const exportText =
       persistedConfig ??
-      (normalizedConfig || JSON.stringify({ sites: sources, lives: [] }, null, 2));
+      (normalizedConfig ||
+        JSON.stringify({ sites: sources, lives: [] }, null, 2));
     const blob = new Blob([exportText], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -587,7 +587,7 @@ export function ConfigCenter() {
                   detail={
                     report.ok
                       ? "JSON5 兼容，允许注释和尾逗号"
-                      : report.issues[0]?.message ?? "配置结构无法解析"
+                      : (report.issues[0]?.message ?? "配置结构无法解析")
                   }
                   status={report.ok ? "通过" : "失败"}
                   danger={!report.ok}
@@ -628,9 +628,16 @@ export function ConfigCenter() {
                     </p>
                     <div className="mt-3 flex flex-col gap-2">
                       {report.issues.slice(0, 5).map((issue) => (
-                        <p key={`${issue.path}-${issue.message}`} className="text-sm text-muted-foreground">
-                          <span className="font-mono text-xs text-foreground">{issue.path}</span>
-                          {issue.line ? ` · 第 ${issue.line} 行，第 ${issue.column ?? 0} 列` : ""}
+                        <p
+                          key={`${issue.path}-${issue.message}`}
+                          className="text-sm text-muted-foreground"
+                        >
+                          <span className="font-mono text-xs text-foreground">
+                            {issue.path}
+                          </span>
+                          {issue.line
+                            ? ` · 第 ${issue.line} 行，第 ${issue.column ?? 0} 列`
+                            : ""}
                           {` · ${issue.message}`}
                         </p>
                       ))}

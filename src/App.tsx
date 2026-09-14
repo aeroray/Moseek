@@ -20,6 +20,9 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { DialogDescription, DialogTitle } from "@/components/ui/dialog";
+import { BrowseView } from "@/features/browse/browse-view";
+import { FavoritesView } from "@/features/browse/favorites-view";
+import { HistoryView } from "@/features/browse/history-view";
 import { ConfigCenter } from "@/features/config/config-center";
 import { HomeView } from "@/features/overview/home-view";
 import { PlaceholderView } from "@/features/placeholder-view";
@@ -130,16 +133,7 @@ function App() {
         {activeView === "settings" && (
           <SettingsView theme={theme} onThemeChange={setTheme} />
         )}
-        {activeView === "browse" && (
-          <PlaceholderView
-            icon={Library}
-            title="影视库准备就绪"
-            description="普通 CMS 源的搜索、分类、详情与播放线路会在下一阶段接入。配置中心已经可以先审查资源源能力。"
-            actionLabel="去配置中心"
-            actionView="config"
-            onAction={navigate}
-          />
-        )}
+        {activeView === "browse" && <BrowseView onNavigate={navigate} />}
         {activeView === "live" && (
           <PlaceholderView
             icon={Radio}
@@ -150,26 +144,8 @@ function App() {
             onAction={navigate}
           />
         )}
-        {activeView === "favorites" && (
-          <PlaceholderView
-            icon={Clapperboard}
-            title="还没有收藏内容"
-            description="浏览影视或直播频道后，收藏的内容会集中出现在这里。"
-            actionLabel="浏览影视库"
-            actionView="browse"
-            onAction={navigate}
-          />
-        )}
-        {activeView === "history" && (
-          <PlaceholderView
-            icon={History}
-            title="播放历史会显示在这里"
-            description="播放器接入进度记忆后，你可以从上次离开的位置继续播放。"
-            actionLabel="回到总览"
-            actionView="home"
-            onAction={navigate}
-          />
-        )}
+        {activeView === "favorites" && <FavoritesView onNavigate={navigate} />}
+        {activeView === "history" && <HistoryView onNavigate={navigate} />}
       </AppShell>
 
       <CommandDialog open={commandOpen} onOpenChange={setCommandOpen}>

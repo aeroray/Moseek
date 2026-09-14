@@ -18,6 +18,60 @@ export type ViewKey =
 
 export type ThemeMode = "system" | "light" | "dark";
 
+export type CatalogViewMode = "grid" | "list";
+
+export interface VodCategory {
+  id: string;
+  name: string;
+}
+
+export interface VodEpisode {
+  id: string;
+  name: string;
+  url: string;
+}
+
+export interface VodPlayLine {
+  id: string;
+  name: string;
+  episodes: VodEpisode[];
+}
+
+export interface VodItem {
+  id: string;
+  sourceKey: string;
+  sourceName: string;
+  name: string;
+  poster: string;
+  description: string;
+  year: string;
+  area: string;
+  categories: VodCategory[];
+  actors: string[];
+  directors: string[];
+  playLines: VodPlayLine[];
+}
+
+export interface CatalogPage {
+  sourceKey: string;
+  items: VodItem[];
+  categories: VodCategory[];
+  page: number;
+  pageCount: number;
+  pageSize: number;
+  total: number;
+}
+
+export interface PlayHistoryRecord {
+  id: string;
+  item: VodItem;
+  lineId: string;
+  episodeId: string;
+  episodeName: string;
+  progress: number;
+  updatedAt: string;
+}
+
 export interface SourceRecord {
   key: string;
   name: string;
