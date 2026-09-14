@@ -25,6 +25,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { useAppStore } from "@/stores/app-store";
 import type { ThemeMode, ViewKey } from "@/types/moseek";
 
 interface AppShellProps {
@@ -85,6 +86,8 @@ export function AppShell({
   onOpenCommand,
   onToggleTheme,
 }: AppShellProps) {
+  const sourceCount = useAppStore((state) => state.sources.length);
+
   return (
     <TooltipProvider delayDuration={180}>
       <div className="flex h-screen min-h-[720px] min-w-[1200px] bg-background text-foreground">
@@ -133,7 +136,7 @@ export function AppShell({
                         <span>{item.label}</span>
                         {item.key === "config" && (
                           <span className="ml-auto rounded-full bg-sidebar-accent px-2 py-0.5 text-[10px] font-semibold text-sidebar-accent-foreground">
-                            12
+                            {sourceCount}
                           </span>
                         )}
                       </Button>

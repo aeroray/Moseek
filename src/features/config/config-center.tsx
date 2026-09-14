@@ -1,5 +1,10 @@
-import { useMemo, useRef, useState, type ChangeEvent } from "react";
-import JSON5 from "json5";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from "react";
 import {
   AlertTriangle,
   Check,
@@ -76,8 +81,19 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  countParsedCapabilities,
+  parseConfigText,
+  type ParseResult,
+} from "@/features/config/config-parser";
 import { cn } from "@/lib/utils";
 import { getCapabilityCounts } from "@/lib/mock-data";
+import {
+  exportConfig,
+  fetchConfigUrl,
+  loadLatestConfig,
+  saveConfigDocument,
+} from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
 import type { CapabilityStatus, SourceRecord } from "@/types/moseek";
 
@@ -94,7 +110,12 @@ type SourceFilter = "all" | CapabilityStatus;
 
 export function ConfigCenter() {
   const sources = useAppStore((state) => state.sources);
+  const rawConfig = useAppStore((state) => state.rawConfig);
+  const normalizedConfig = useAppStore((state) => state.normalizedConfig);
+  const lastImportedAt = useAppStore((state) => state.lastImportedAt);
   const toggleSource = useAppStore((state) => state.toggleSource);
+  const replaceSources = useAppStore((state) => state.replaceSources);
+  const setConfigSnapshot = useAppStore((state) => state.setConfigSnapshot);
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
   const [inspectedSource, setInspectedSource] = useState<SourceRecord | null>(
@@ -106,8 +127,39 @@ export function ConfigCenter() {
     type: "idle" | "success" | "error";
     message: string;
   }>({ type: "idle", message: "" });
+  const [parseResult, setParseResult] = useState<ParseResult | null>(null);
+  const [isParsing, setIsParsing] = useState(false);
+  const [remoteUrl, setRemoteUrl] = useState("");
+  const [remoteUrlOpen, setRemoteUrlOpen] = useState(false);
+  const [isFetchingRemote, setIsFetchingRemote] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const counts = getCapabilityCounts(sources);
+  const report = parseResult ?? parseConfigText(rawConfig || defaultConfigText);
+  const reportCounts = countParsedCapabilities(report.sources);
+
+  useEffect(() => {
+    let mounted = true;
+    void loadLatestConfig()
+      .then((document) => {
+        if (!mounted || !document) return;
+        replaceSources(document.sources);
+        setConfigSnapshot(
+          document.rawConfig,
+          document.normalizedConfig,
+          document.importedAt,
+        );
+        setImportText(document.rawConfig);
+        setParseResult(parseConfigText(document.rawConfig));
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        const message = error instanceof Error ? error.message : "无法读取本地配置";
+        setParseState({ type: "error", message });
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [replaceSources, setConfigSnapshot]);
 
   const filteredSources = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -133,30 +185,93 @@ export function ConfigCenter() {
     });
   };
 
-  const handleParse = () => {
+  const handleFetchRemote = async () => {
+    if (!remoteUrl.trim()) {
+      setParseState({ type: "error", message: "请输入配置 URL。" });
+      return;
+    }
+    setIsFetchingRemote(true);
     try {
-      const parsed: unknown = JSON5.parse(importText);
-      const record =
-        parsed && typeof parsed === "object"
-          ? (parsed as Record<string, unknown>)
-          : {};
-      const siteCount = Array.isArray(record.sites) ? record.sites.length : 0;
-      const liveCount = Array.isArray(record.lives) ? record.lives.length : 0;
+      const text = await fetchConfigUrl(remoteUrl.trim());
+      if (!text) {
+        setParseState({
+          type: "error",
+          message: "浏览器预览不会直接请求远程配置，请在 Tauri 桌面应用中使用此功能。",
+        });
+        return;
+      }
+      setImportText(text);
+      setRemoteUrlOpen(false);
       setParseState({
         type: "success",
-        message: `解析成功：识别到 ${siteCount} 个影视源、${liveCount} 个直播源。`,
+        message: "远程配置已载入，请点击解析配置生成报告。",
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : "未知解析错误";
-      setParseState({ type: "error", message: `解析失败：${message}` });
+      const message = error instanceof Error ? error.message : "远程配置请求失败";
+      setParseState({ type: "error", message });
+    } finally {
+      setIsFetchingRemote(false);
     }
   };
 
-  const handleExport = () => {
-    const blob = new Blob(
-      [JSON.stringify({ sites: sources, lives: [] }, null, 2)],
-      { type: "application/json" },
-    );
+  const handleParse = async () => {
+    setIsParsing(true);
+    const result = parseConfigText(importText);
+    setParseResult(result);
+
+    if (!result.ok) {
+      const issue = result.issues[0];
+      const position = issue?.line
+        ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
+        : "";
+      setParseState({
+        type: "error",
+        message: `解析失败${position}：${issue?.message ?? "未知解析错误"}`,
+      });
+      setIsParsing(false);
+      return;
+    }
+
+    replaceSources(result.sources);
+    const importedAt = new Date().toISOString();
+    setConfigSnapshot(importText, result.normalizedConfig, importedAt);
+    const parsedCounts = countParsedCapabilities(result.sources);
+
+    try {
+      await saveConfigDocument({
+        name: "Moseek 配置",
+        rawConfig: importText,
+        normalizedConfig: result.normalizedConfig,
+        sources: result.sources,
+        liveCount: result.liveCount,
+      });
+      setParseState({
+        type: "success",
+        message: `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "本地数据库写入失败";
+      setParseState({
+        type: "error",
+        message: `解析成功，但保存失败：${message}`,
+      });
+    } finally {
+      setIsParsing(false);
+    }
+  };
+
+  const handleExport = async () => {
+    let persistedConfig: string | null = null;
+    try {
+      persistedConfig = await exportConfig();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "本地配置导出失败";
+      setParseState({ type: "error", message });
+    }
+    const exportText =
+      persistedConfig ??
+      (normalizedConfig || JSON.stringify({ sites: sources, lives: [] }, null, 2));
+    const blob = new Blob([exportText], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
@@ -269,7 +384,9 @@ export function ConfigCenter() {
             </TabsList>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span className="size-2 rounded-full bg-[color:var(--status-supported)]" />
-              最后解析：今天 09:42
+              {lastImportedAt
+                ? `最后解析：${formatImportTime(lastImportedAt)}`
+                : "当前显示演示数据"}
             </div>
           </div>
 
@@ -447,7 +564,7 @@ export function ConfigCenter() {
               </CardHeader>
               <CardContent>
                 <pre className="max-h-[520px] overflow-auto rounded-md border bg-muted/30 p-5 font-mono text-xs leading-6 text-muted-foreground">
-                  {defaultConfigText}
+                  {rawConfig || defaultConfigText}
                 </pre>
               </CardContent>
             </Card>
@@ -467,38 +584,59 @@ export function ConfigCenter() {
               <CardContent className="grid grid-cols-2 gap-4">
                 <ReportLine
                   title="结构解析"
-                  detail="JSON5 兼容，允许注释和尾逗号"
-                  status="通过"
+                  detail={
+                    report.ok
+                      ? "JSON5 兼容，允许注释和尾逗号"
+                      : report.issues[0]?.message ?? "配置结构无法解析"
+                  }
+                  status={report.ok ? "通过" : "失败"}
+                  danger={!report.ok}
                 />
                 <ReportLine
                   title="普通 CMS"
-                  detail={`${counts.supported} 个源可以直接进入搜索与详情流程`}
+                  detail={`${reportCounts.supported} 个源可以直接进入搜索与详情流程`}
                   status="通过"
                 />
                 <ReportLine
                   title="远程依赖"
-                  detail={`${counts.partial} 个源含 JAR 字段，已标记为部分支持`}
+                  detail={`${reportCounts.partial} 个源含 JAR 字段，已标记为部分支持`}
                   status="已隔离"
                   warning
                 />
                 <ReportLine
                   title="私有协议"
-                  detail={`${counts["needs-adapter"]} 个源需要 adapter，当前不执行`}
+                  detail={`${reportCounts["needs-adapter"]} 个源需要 adapter，当前不执行`}
                   status="待适配"
                   warning
                 />
                 <ReportLine
                   title="危险执行路径"
-                  detail={`${counts.blocked} 个远程脚本或扩展被默认阻止`}
+                  detail={`${reportCounts.blocked} 个远程脚本或扩展被默认阻止`}
                   status="已阻止"
                   danger
                 />
                 <ReportLine
-                  title="本机地址"
-                  detail="当前工作区未授权 localhost 或局域网访问"
-                  status="未授权"
-                  warning
+                  title="字段校验"
+                  detail={`${report.issues.length} 个字段或能力问题已记录，可在源详情中查看原因`}
+                  status={report.issues.length > 0 ? "需关注" : "通过"}
+                  warning={report.issues.length > 0}
                 />
+                {report.issues.length > 0 && (
+                  <div className="col-span-2 rounded-md border bg-muted/20 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                      诊断明细
+                    </p>
+                    <div className="mt-3 flex flex-col gap-2">
+                      {report.issues.slice(0, 5).map((issue) => (
+                        <p key={`${issue.path}-${issue.message}`} className="text-sm text-muted-foreground">
+                          <span className="font-mono text-xs text-foreground">{issue.path}</span>
+                          {issue.line ? ` · 第 ${issue.line} 行，第 ${issue.column ?? 0} 列` : ""}
+                          {` · ${issue.message}`}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -534,13 +672,7 @@ export function ConfigCenter() {
                 type="button"
                 variant="outline"
                 className="h-auto justify-start gap-3 p-4"
-                onClick={() =>
-                  setParseState({
-                    type: "idle",
-                    message:
-                      "远程 URL 将通过 Rust 网络层请求，当前仅保留入口。",
-                  })
-                }
+                onClick={() => setRemoteUrlOpen(true)}
               >
                 <Globe2 data-icon="inline-start" aria-hidden="true" />
                 <span className="flex flex-col items-start gap-1">
@@ -565,6 +697,25 @@ export function ConfigCenter() {
                 </span>
               </Button>
             </div>
+            {remoteUrlOpen && (
+              <div className="flex items-center gap-2 rounded-md border bg-muted/20 p-3">
+                <Input
+                  type="url"
+                  value={remoteUrl}
+                  onChange={(event) => setRemoteUrl(event.target.value)}
+                  placeholder="https://example.com/config.json5"
+                  aria-label="远程配置 URL"
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={handleFetchRemote}
+                  disabled={isFetchingRemote}
+                >
+                  {isFetchingRemote ? "请求中..." : "获取配置"}
+                </Button>
+              </div>
+            )}
             <input
               ref={fileInputRef}
               type="file"
@@ -604,9 +755,14 @@ export function ConfigCenter() {
             >
               取消
             </Button>
-            <Button type="button" className="gap-2" onClick={handleParse}>
+            <Button
+              type="button"
+              className="gap-2"
+              onClick={handleParse}
+              disabled={isParsing}
+            >
               <FileJson data-icon="inline-start" aria-hidden="true" />
-              解析配置
+              {isParsing ? "解析中..." : "解析配置"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -857,4 +1013,15 @@ function ReportLine({
       </div>
     </div>
   );
+}
+
+function formatImportTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
