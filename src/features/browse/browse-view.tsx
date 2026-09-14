@@ -57,7 +57,10 @@ import type {
   VodPlayLine,
 } from "@/types/moseek";
 import { getVodDetail, searchVod } from "@/features/browse/cms-adapter";
-import { PlayerView, type VodPlayerRequest } from "@/features/player/player-view";
+import {
+  PlayerView,
+  type VodPlayerRequest,
+} from "@/features/player/player-view";
 
 interface BrowseViewProps {
   onNavigate: (view: ViewKey) => void;
@@ -90,7 +93,9 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedItem, setSelectedItem] = useState<VodItem | null>(null);
-  const [playerRequest, setPlayerRequest] = useState<VodPlayerRequest | null>(null);
+  const [playerRequest, setPlayerRequest] = useState<VodPlayerRequest | null>(
+    null,
+  );
 
   const selectedSource =
     browseSources.find((source) => source.key === sourceKey) ??
@@ -123,7 +128,12 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
   }, [categoryId, page, query, selectedSource]);
 
   if (playerRequest) {
-    return <PlayerView request={playerRequest} onBack={() => setPlayerRequest(null)} />;
+    return (
+      <PlayerView
+        request={playerRequest}
+        onBack={() => setPlayerRequest(null)}
+      />
+    );
   }
 
   if (selectedItem && selectedSource) {
@@ -605,7 +615,9 @@ function DetailView({
       episodeName,
       progress: 0,
     });
-    const episode = line.episodes.find((candidate) => candidate.id === episodeId);
+    const episode = line.episodes.find(
+      (candidate) => candidate.id === episodeId,
+    );
     if (episode) onPlay({ item: detail, source, line, episode });
   };
 

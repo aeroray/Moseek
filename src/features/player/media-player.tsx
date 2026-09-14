@@ -5,7 +5,14 @@ import "plyr/dist/plyr.css";
 
 import type { MediaKind } from "@/types/moseek";
 
-export type MediaStatus = "idle" | "loading" | "ready" | "playing" | "paused" | "ended" | "error";
+export type MediaStatus =
+  | "idle"
+  | "loading"
+  | "ready"
+  | "playing"
+  | "paused"
+  | "ended"
+  | "error";
 
 interface MediaPlayerProps {
   title: string;
@@ -68,7 +75,11 @@ export function MediaPlayer({
       playerRef.current = player;
       player.on("ready", () => {
         const resume = resumeRef.current;
-        if (resume > 5 && Number.isFinite(player.duration) && player.duration > resume) {
+        if (
+          resume > 5 &&
+          Number.isFinite(player.duration) &&
+          player.duration > resume
+        ) {
           player.currentTime = resume;
         }
         report("ready");

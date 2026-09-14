@@ -19,7 +19,8 @@ const posters = [
 
 const category = (id: string, name: string): VodCategory => ({ id, name });
 const demoHlsUrl = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
-const demoMp4Url = "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
+const demoMp4Url =
+  "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4";
 
 function episodes(itemId: string, count: number, url: string): VodEpisode[] {
   return Array.from({ length: count }, (_, index) => ({

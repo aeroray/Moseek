@@ -22,6 +22,8 @@ describe("Moseek config parser", () => {
     expect(result.sources[1]?.capability).toBe("partial");
     expect(result.sources[2]?.sourceType).toBe("live");
     expect(result.sources[2]?.epg).toBe("https://live.example/guide.xml");
+    expect(result.normalizedConfig).toContain('"adapterId": "builtin-cms"');
+    expect(result.normalizedConfig).toContain('"adapterId": "builtin-live"');
     expect(result.liveCount).toBe(1);
     expect(countParsedCapabilities(result.sources)).toMatchObject({
       supported: 2,

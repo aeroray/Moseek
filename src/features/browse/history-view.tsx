@@ -88,7 +88,8 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
                         </span>
                       </div>
                       <p className="mt-1 text-sm text-muted-foreground">
-                        {record.episodeName} · 已记忆 {formatSeconds(record.progress)}
+                        {record.episodeName} · 已记忆{" "}
+                        {formatSeconds(record.progress)}
                       </p>
                       <p className="mt-2 text-xs text-muted-foreground">
                         {formatHistoryDate(record.updatedAt)}

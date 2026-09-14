@@ -5,6 +5,7 @@ import {
   type RawLive,
   type RawSite,
 } from "@/features/config/config-schema";
+import { getAdapterProfile } from "@/lib/adapters";
 import type { CapabilityStatus, SourceRecord } from "@/types/moseek";
 
 export interface ParseIssue {
@@ -89,6 +90,16 @@ export function parseConfigText(rawText: string): ParseResult {
     classifyLiveSource(live, index),
   );
   const sources = [...siteSources, ...liveSources];
+  const normalizedSources = sources.map((source) => {
+    const adapter = getAdapterProfile(source);
+    return {
+      ...source,
+      adapterId: adapter.id,
+      adapterName: adapter.label,
+      adapterExecution: adapter.execution,
+      adapterOperations: adapter.operations,
+    };
+  });
   const rootRecord = validation.data as Record<string, unknown>;
   const blockedRootFields = Object.keys(rootRecord).filter(
     (key) =>
@@ -149,8 +160,8 @@ export function parseConfigText(rawText: string): ParseResult {
     normalizedConfig: JSON.stringify(
       {
         schemaVersion: "0.1",
-        sites: sources,
-        lives: liveSources,
+        sites: normalizedSources.filter((source) => source.sourceType !== "live"),
+        lives: normalizedSources.filter((source) => source.sourceType === "live"),
         parses: validation.data.parses,
         blockedFields: blockedRootFields,
       },

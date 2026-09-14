@@ -80,6 +80,12 @@ import {
   parseConfigText,
   type ParseResult,
 } from "@/features/config/config-parser";
+import {
+  adapterRegistry,
+  adapterStatusLabel,
+  getAdapterProfile,
+  type AdapterExecution,
+} from "@/lib/adapters";
 import { cn } from "@/lib/utils";
 import { getCapabilityCounts } from "@/lib/mock-data";
 import {
@@ -130,6 +136,16 @@ export function ConfigCenter() {
   const counts = getCapabilityCounts(sources);
   const report = parseResult ?? parseConfigText(rawConfig || defaultConfigText);
   const reportCounts = countParsedCapabilities(report.sources);
+  const adapterRows = useMemo(
+    () =>
+      adapterRegistry.map((adapter) => ({
+        adapter,
+        sources: sources.filter(
+          (source) => getAdapterProfile(source).id === adapter.id,
+        ),
+      })),
+    [sources],
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -294,10 +310,10 @@ export function ConfigCenter() {
                   data-icon="inline-start"
                   aria-hidden="true"
                 />
-                Phase 2
+                Phase 5
               </Badge>
               <span className="text-xs text-muted-foreground">
-                导入、分类、审查
+                适配器、安全边界
               </span>
             </div>
             <h1 className="font-display text-3xl font-semibold tracking-tight">
@@ -372,6 +388,10 @@ export function ConfigCenter() {
               <TabsTrigger value="sources" className="gap-2">
                 <ListFilter data-icon="inline-start" aria-hidden="true" />
                 资源源
+              </TabsTrigger>
+              <TabsTrigger value="adapters" className="gap-2">
+                <Link2 data-icon="inline-start" aria-hidden="true" />
+                适配器矩阵
               </TabsTrigger>
               <TabsTrigger value="raw" className="gap-2">
                 <Code2 data-icon="inline-start" aria-hidden="true" />
@@ -547,6 +567,69 @@ export function ConfigCenter() {
                     </Button>
                   </Empty>
                 )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="adapters">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Link2 data-icon="inline-start" aria-hidden="true" />
+                  适配器能力矩阵
+                </CardTitle>
+                <CardDescription>
+                  只有内置 CMS 和直播适配器会执行网络请求，其余扩展只做识别和诊断。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead className="pl-6">适配器</TableHead>
+                      <TableHead>执行状态</TableHead>
+                      <TableHead>支持操作</TableHead>
+                      <TableHead>当前源</TableHead>
+                      <TableHead className="pr-6">边界说明</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {adapterRows.map(({ adapter, sources: matchedSources }) => (
+                      <TableRow key={adapter.id}>
+                        <TableCell className="pl-6">
+                          <div>
+                            <p className="font-medium">{adapter.label}</p>
+                            <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                              {adapter.id}
+                            </p>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <AdapterStatusBadge execution={adapter.execution} />
+                        </TableCell>
+                        <TableCell>
+                          {adapter.operations.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {adapter.operations.map((operation) => (
+                                <Badge key={operation} variant="secondary" className="text-[10px]">
+                                  {operation}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">无执行操作</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {matchedSources.length > 0 ? `${matchedSources.length} 个` : "未使用"}
+                        </TableCell>
+                        <TableCell className="max-w-[360px] pr-6 text-sm text-muted-foreground">
+                          {adapter.reason}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
               </CardContent>
             </Card>
           </TabsContent>
@@ -825,6 +908,7 @@ export function ConfigCenter() {
                       mono
                     />
                   </DetailSection>
+                  <AdapterDetail source={inspectedSource} />
                   <DetailSection title="远程地址">
                     <DetailRow label="api" value={inspectedSource.api} mono />
                     {inspectedSource.ext && (
@@ -926,6 +1010,24 @@ function ReportCard({
   );
 }
 
+function AdapterStatusBadge({ execution }: { execution: AdapterExecution }) {
+  const toneClass = {
+    enabled:
+      "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
+    partial:
+      "border-[color:var(--status-partial-border)] bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]",
+    "needs-adapter":
+      "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] text-[color:var(--status-adapter)]",
+    blocked:
+      "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",
+  }[execution];
+  return (
+    <Badge variant="outline" className={toneClass}>
+      {adapterStatusLabel(execution)}
+    </Badge>
+  );
+}
+
 function DetailSection({
   title,
   children,
@@ -940,6 +1042,35 @@ function DetailSection({
       </h3>
       <div className="flex flex-col gap-2">{children}</div>
     </section>
+  );
+}
+
+function AdapterDetail({ source }: { source: SourceRecord }) {
+  const adapter = getAdapterProfile(source);
+  return (
+    <DetailSection title="适配器边界">
+      <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 p-3">
+        <div>
+          <p className="font-medium">{adapter.label}</p>
+          <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+            {adapter.id}
+          </p>
+        </div>
+        <AdapterStatusBadge execution={adapter.execution} />
+      </div>
+      <div className="rounded-md border bg-muted/20 p-3 text-sm leading-6 text-muted-foreground">
+        {adapter.reason}
+      </div>
+      {adapter.operations.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {adapter.operations.map((operation) => (
+            <Badge key={operation} variant="secondary" className="text-[10px]">
+              {operation}
+            </Badge>
+          ))}
+        </div>
+      )}
+    </DetailSection>
   );
 }
 
