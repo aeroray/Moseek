@@ -24,6 +24,13 @@ export interface ParseResult {
   issues: ParseIssue[];
 }
 
+export interface ConfigTextTransformResult {
+  ok: boolean;
+  text: string;
+  changes: string[];
+  issue: ParseIssue | null;
+}
+
 const emptyCounts = {
   supported: 0,
   partial: 0,
@@ -160,8 +167,12 @@ export function parseConfigText(rawText: string): ParseResult {
     normalizedConfig: JSON.stringify(
       {
         schemaVersion: "0.1",
-        sites: normalizedSources.filter((source) => source.sourceType !== "live"),
-        lives: normalizedSources.filter((source) => source.sourceType === "live"),
+        sites: normalizedSources.filter(
+          (source) => source.sourceType !== "live",
+        ),
+        lives: normalizedSources.filter(
+          (source) => source.sourceType === "live",
+        ),
         parses: validation.data.parses,
         blockedFields: blockedRootFields,
       },
@@ -171,6 +182,126 @@ export function parseConfigText(rawText: string): ParseResult {
     liveCount: validation.data.lives.length,
     issues,
   };
+}
+
+export function formatConfigText(rawText: string): ConfigTextTransformResult {
+  try {
+    const parsed = JSON5.parse(rawText);
+    return {
+      ok: true,
+      text: JSON.stringify(parsed, null, 2),
+      changes: ["已按 JSON 结构重新排版"],
+      issue: null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      text: rawText,
+      changes: [],
+      issue: createParseIssue(error),
+    };
+  }
+}
+
+export function repairConfigText(rawText: string): ConfigTextTransformResult {
+  let repairedText = rawText;
+  const changes: string[] = [];
+
+  if (repairedText.startsWith("\uFEFF")) {
+    repairedText = repairedText.slice(1);
+    changes.push("移除文件 BOM");
+  }
+
+  const trimmedText = repairedText.trim();
+  if (trimmedText !== repairedText) {
+    repairedText = trimmedText;
+    changes.push("清理首尾空白");
+  }
+
+  const fencedText = repairedText.match(
+    /^```(?:json5?|javascript)?\s*\r?\n([\s\S]*?)\r?\n```$/i,
+  )?.[1];
+  if (fencedText !== undefined) {
+    repairedText = fencedText.trim();
+    changes.push("移除 Markdown 代码围栏");
+  }
+
+  if (repairedText.endsWith(";")) {
+    repairedText = repairedText.slice(0, -1).trimEnd();
+    changes.push("移除根配置末尾分号");
+  }
+
+  const escapedText = escapeNewlinesInsideStrings(repairedText);
+  if (escapedText !== repairedText) {
+    repairedText = escapedText;
+    changes.push("转义字符串中的换行");
+  }
+
+  try {
+    JSON5.parse(repairedText);
+    return {
+      ok: true,
+      text: repairedText,
+      changes: changes.length > 0 ? changes : ["未发现可自动修正的问题"],
+      issue: null,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      text: rawText,
+      changes,
+      issue: createParseIssue(error),
+    };
+  }
+}
+
+function createParseIssue(error: unknown): ParseIssue {
+  const message = error instanceof Error ? error.message : "无法解析配置文本";
+  const position = extractPosition(message);
+  return {
+    severity: "error",
+    path: "$",
+    message,
+    line: position.line,
+    column: position.column,
+  };
+}
+
+function escapeNewlinesInsideStrings(text: string) {
+  let result = "";
+  let quote: '"' | "'" | null = null;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+
+    if (quote) {
+      if (character === "\\") {
+        result += character;
+        const nextCharacter = text[index + 1];
+        if (nextCharacter !== undefined) {
+          result += nextCharacter;
+          index += 1;
+        }
+      } else if (character === quote) {
+        result += character;
+        quote = null;
+      } else if (character === "\r" || character === "\n") {
+        result += "\\n";
+        if (character === "\r" && text[index + 1] === "\n") {
+          index += 1;
+        }
+      } else {
+        result += character;
+      }
+    } else if (character === '"' || character === "'") {
+      quote = character;
+      result += character;
+    } else {
+      result += character;
+    }
+  }
+
+  return result;
 }
 
 function classifySource(site: RawSite, index: number): SourceRecord {

@@ -30,13 +30,38 @@ describe("adapter registry", () => {
   });
 
   it("keeps remote code and JAR paths outside the executable adapter set", () => {
-    expect(getAdapterProfile(source({ key: "drpy_js_demo", sourceType: "parser", capability: "blocked" })).execution).toBe("blocked");
-    expect(getAdapterProfile(source({ key: "csp_XBPQ_demo", sourceType: "parser", capability: "needs-adapter" })).id).toBe("xbpq");
-    expect(getAdapterProfile(source({ jar: "https://example.com/adapter.jar", capability: "partial" })).id).toBe("remote-jar");
+    expect(
+      getAdapterProfile(
+        source({
+          key: "drpy_js_demo",
+          sourceType: "parser",
+          capability: "blocked",
+        }),
+      ).execution,
+    ).toBe("blocked");
+    expect(
+      getAdapterProfile(
+        source({
+          key: "csp_XBPQ_demo",
+          sourceType: "parser",
+          capability: "needs-adapter",
+        }),
+      ).id,
+    ).toBe("xbpq");
+    expect(
+      getAdapterProfile(
+        source({
+          jar: "https://example.com/adapter.jar",
+          capability: "partial",
+        }),
+      ).id,
+    ).toBe("remote-jar");
   });
 
   it("uses the live adapter for live sources", () => {
-    const profile = getAdapterProfile(source({ sourceType: "live", capability: "supported" }));
+    const profile = getAdapterProfile(
+      source({ sourceType: "live", capability: "supported" }),
+    );
 
     expect(profile.id).toBe("builtin-live");
     expect(profile.operations).toContain("节目单");

@@ -1,6 +1,7 @@
 import { ArrowUpRight, Clock3, History, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { MediaPoster } from "@/components/media-poster";
 import {
   Card,
   CardContent,
@@ -73,10 +74,10 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
               <div className="px-6">
                 {history.map((record) => (
                   <div key={record.id} className="flex items-center gap-4 py-4">
-                    <img
+                    <MediaPoster
                       src={record.item.poster}
                       alt={`${record.item.name} 海报`}
-                      className="h-20 w-14 shrink-0 rounded-md object-cover"
+                      className="h-20 w-36 shrink-0 rounded-md"
                     />
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">

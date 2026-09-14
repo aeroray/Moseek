@@ -1,9 +1,16 @@
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type DragEvent,
+} from "react";
 import {
   AlertTriangle,
+  Braces,
   Check,
   ChevronRight,
-  ClipboardPaste,
   Code2,
   Download,
   FileJson,
@@ -17,10 +24,12 @@ import {
   ShieldAlert,
   SlidersHorizontal,
   Upload,
+  WandSparkles,
   X,
 } from "lucide-react";
 
 import { CapabilityBadge } from "@/components/capability-badge";
+import { JsonEditor } from "@/components/json-editor";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -74,10 +83,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
 import {
   countParsedCapabilities,
+  formatConfigText,
   parseConfigText,
+  repairConfigText,
   type ParseResult,
 } from "@/features/config/config-parser";
 import {
@@ -86,8 +96,8 @@ import {
   getAdapterProfile,
   type AdapterExecution,
 } from "@/lib/adapters";
+import { getCapabilityCounts } from "@/lib/capability-stats";
 import { cn } from "@/lib/utils";
-import { getCapabilityCounts } from "@/lib/mock-data";
 import {
   exportConfig,
   fetchConfigUrl,
@@ -97,16 +107,8 @@ import {
 import { useAppStore } from "@/stores/app-store";
 import type { CapabilityStatus, SourceRecord } from "@/types/moseek";
 
-const defaultConfigText = `{
-  // Moseek 保留原始文本，不会自动篡改导入内容
-  "sites": [
-    { "key": "clzy", "name": "初恋资源", "type": 1, "api": "https://..." },
-    { "key": "xiaohu", "name": "小胡", "type": 3, "api": "https://...", "jar": "https://..." }
-  ],
-  "lives": []
-}`;
-
 type SourceFilter = "all" | CapabilityStatus;
+type ImportMode = "remote" | "local";
 
 export function ConfigCenter() {
   const sources = useAppStore((state) => state.sources);
@@ -122,20 +124,25 @@ export function ConfigCenter() {
     null,
   );
   const [importOpen, setImportOpen] = useState(false);
-  const [importText, setImportText] = useState(defaultConfigText);
+  const [importText, setImportText] = useState("");
+  const [rawDraft, setRawDraft] = useState<string | null>(null);
   const [parseState, setParseState] = useState<{
     type: "idle" | "success" | "error";
     message: string;
+    title?: string;
   }>({ type: "idle", message: "" });
   const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [isParsing, setIsParsing] = useState(false);
-  const [remoteUrl, setRemoteUrl] = useState("");
-  const [remoteUrlOpen, setRemoteUrlOpen] = useState(false);
+  const [importMode, setImportMode] = useState<ImportMode>("remote");
+  const [sourceInput, setSourceInput] = useState("");
+  const [selectedFileName, setSelectedFileName] = useState("");
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isFetchingRemote, setIsFetchingRemote] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const counts = getCapabilityCounts(sources);
-  const report = parseResult ?? parseConfigText(rawConfig || defaultConfigText);
-  const reportCounts = countParsedCapabilities(report.sources);
+  const editorText = rawDraft ?? rawConfig;
+  const report = parseResult ?? (rawConfig ? parseConfigText(rawConfig) : null);
+  const reportCounts = countParsedCapabilities(report?.sources ?? []);
   const adapterRows = useMemo(
     () =>
       adapterRegistry.map((adapter) => ({
@@ -146,6 +153,10 @@ export function ConfigCenter() {
       })),
     [sources],
   );
+
+  useEffect(() => {
+    setRawDraft(rawConfig);
+  }, [rawConfig]);
 
   useEffect(() => {
     let mounted = true;
@@ -186,24 +197,41 @@ export function ConfigCenter() {
     });
   }, [query, sourceFilter, sources]);
 
-  const handleFilePick = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const handleLocalFile = async (file: File) => {
     if (!file) return;
+    setImportMode("local");
+    setSelectedFileName(file.name);
+    setIsDraggingFile(false);
     setImportText(await file.text());
     setParseState({
       type: "idle",
-      message: `已载入 ${file.name}，点击解析以生成报告。`,
+      message: "",
     });
   };
 
+  const handleFilePick = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    await handleLocalFile(file);
+    event.target.value = "";
+  };
+
+  const handleFileDrop = async (event: DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsDraggingFile(false);
+    const file = event.dataTransfer.files?.[0];
+    if (!file) return;
+    await handleLocalFile(file);
+  };
+
   const handleFetchRemote = async () => {
-    if (!remoteUrl.trim()) {
+    if (!sourceInput.trim()) {
       setParseState({ type: "error", message: "请输入配置 URL。" });
       return;
     }
     setIsFetchingRemote(true);
     try {
-      const text = await fetchConfigUrl(remoteUrl.trim());
+      const text = await fetchConfigUrl(sourceInput.trim());
       if (!text) {
         setParseState({
           type: "error",
@@ -213,7 +241,7 @@ export function ConfigCenter() {
         return;
       }
       setImportText(text);
-      setRemoteUrlOpen(false);
+      setSelectedFileName("");
       setParseState({
         type: "success",
         message: "远程配置已载入，请点击解析配置生成报告。",
@@ -225,6 +253,50 @@ export function ConfigCenter() {
     } finally {
       setIsFetchingRemote(false);
     }
+  };
+
+  const handleFormatConfig = () => {
+    if (!importText.trim()) return;
+    const result = formatConfigText(importText);
+    if (!result.ok) {
+      const issue = result.issue;
+      const position = issue?.line
+        ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
+        : "";
+      setParseState({
+        type: "error",
+        message: `格式化失败${position}：${issue?.message ?? "未知解析错误"}`,
+      });
+      return;
+    }
+    setImportText(result.text);
+    setParseState({
+      type: "success",
+      title: "格式化完成",
+      message: "配置已按 JSON5 结构重新排版，请点击解析配置生成报告。",
+    });
+  };
+
+  const handleRepairConfig = () => {
+    if (!importText.trim()) return;
+    const result = repairConfigText(importText);
+    if (!result.ok) {
+      const issue = result.issue;
+      const position = issue?.line
+        ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
+        : "";
+      setParseState({
+        type: "error",
+        message: `修正失败${position}：${issue?.message ?? "未找到安全的自动修正方式"}`,
+      });
+      return;
+    }
+    setImportText(result.text);
+    setParseState({
+      type: "success",
+      title: "修正完成",
+      message: `${result.changes.join("、")}。请点击解析配置生成报告。`,
+    });
   };
 
   const handleParse = async () => {
@@ -262,6 +334,7 @@ export function ConfigCenter() {
         type: "success",
         message: `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`,
       });
+      setImportOpen(false);
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "本地数据库写入失败";
@@ -406,7 +479,7 @@ export function ConfigCenter() {
               <span className="size-2 rounded-full bg-[color:var(--status-supported)]" />
               {lastImportedAt
                 ? `最后解析：${formatImportTime(lastImportedAt)}`
-                : "当前显示演示数据"}
+                : "尚未导入配置"}
             </div>
           </div>
 
@@ -579,7 +652,8 @@ export function ConfigCenter() {
                   适配器能力矩阵
                 </CardTitle>
                 <CardDescription>
-                  只有内置 CMS 和直播适配器会执行网络请求，其余扩展只做识别和诊断。
+                  只有内置 CMS
+                  和直播适配器会执行网络请求，其余扩展只做识别和诊断。
                 </CardDescription>
               </CardHeader>
               <CardContent className="p-0">
@@ -611,17 +685,25 @@ export function ConfigCenter() {
                           {adapter.operations.length > 0 ? (
                             <div className="flex flex-wrap gap-1.5">
                               {adapter.operations.map((operation) => (
-                                <Badge key={operation} variant="secondary" className="text-[10px]">
+                                <Badge
+                                  key={operation}
+                                  variant="secondary"
+                                  className="text-[10px]"
+                                >
                                   {operation}
                                 </Badge>
                               ))}
                             </div>
                           ) : (
-                            <span className="text-xs text-muted-foreground">无执行操作</span>
+                            <span className="text-xs text-muted-foreground">
+                              无执行操作
+                            </span>
                           )}
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
-                          {matchedSources.length > 0 ? `${matchedSources.length} 个` : "未使用"}
+                          {matchedSources.length > 0
+                            ? `${matchedSources.length} 个`
+                            : "未使用"}
                         </TableCell>
                         <TableCell className="max-w-[360px] pr-6 text-sm text-muted-foreground">
                           {adapter.reason}
@@ -642,13 +724,19 @@ export function ConfigCenter() {
                   原始配置文本
                 </CardTitle>
                 <CardDescription>
-                  只读预览。Moseek 会保留原文，解析失败时不会自动改写。
+                  可直接编辑原始配置；确认后使用导入流程解析并保存。
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <pre className="max-h-[520px] overflow-auto rounded-md border bg-muted/30 p-5 font-mono text-xs leading-6 text-muted-foreground">
-                  {rawConfig || defaultConfigText}
-                </pre>
+                <JsonEditor
+                  value={editorText}
+                  onChange={(value) => {
+                    setRawDraft(value);
+                    setImportText(value);
+                  }}
+                  aria-label="原始配置文本"
+                  className="h-[min(680px,calc(100vh-12rem))] min-h-[520px] w-full"
+                />
               </CardContent>
             </Card>
           </TabsContent>
@@ -664,68 +752,84 @@ export function ConfigCenter() {
                   按字段和执行边界整理的导入结果。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid grid-cols-2 gap-4">
-                <ReportLine
-                  title="结构解析"
-                  detail={
-                    report.ok
-                      ? "JSON5 兼容，允许注释和尾逗号"
-                      : (report.issues[0]?.message ?? "配置结构无法解析")
-                  }
-                  status={report.ok ? "通过" : "失败"}
-                  danger={!report.ok}
-                />
-                <ReportLine
-                  title="普通 CMS"
-                  detail={`${reportCounts.supported} 个源可以直接进入搜索与详情流程`}
-                  status="通过"
-                />
-                <ReportLine
-                  title="远程依赖"
-                  detail={`${reportCounts.partial} 个源含 JAR 字段，已标记为部分支持`}
-                  status="已隔离"
-                  warning
-                />
-                <ReportLine
-                  title="私有协议"
-                  detail={`${reportCounts["needs-adapter"]} 个源需要 adapter，当前不执行`}
-                  status="待适配"
-                  warning
-                />
-                <ReportLine
-                  title="危险执行路径"
-                  detail={`${reportCounts.blocked} 个远程脚本或扩展被默认阻止`}
-                  status="已阻止"
-                  danger
-                />
-                <ReportLine
-                  title="字段校验"
-                  detail={`${report.issues.length} 个字段或能力问题已记录，可在源详情中查看原因`}
-                  status={report.issues.length > 0 ? "需关注" : "通过"}
-                  warning={report.issues.length > 0}
-                />
-                {report.issues.length > 0 && (
-                  <div className="col-span-2 rounded-md border bg-muted/20 p-4">
-                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                      诊断明细
-                    </p>
-                    <div className="mt-3 flex flex-col gap-2">
-                      {report.issues.slice(0, 5).map((issue) => (
-                        <p
-                          key={`${issue.path}-${issue.message}`}
-                          className="text-sm text-muted-foreground"
-                        >
-                          <span className="font-mono text-xs text-foreground">
-                            {issue.path}
-                          </span>
-                          {issue.line
-                            ? ` · 第 ${issue.line} 行，第 ${issue.column ?? 0} 列`
-                            : ""}
-                          {` · ${issue.message}`}
+              <CardContent className={report ? "grid grid-cols-2 gap-4" : ""}>
+                {report ? (
+                  <>
+                    <ReportLine
+                      title="结构解析"
+                      detail={
+                        report.ok
+                          ? "JSON5 兼容，允许注释和尾逗号"
+                          : (report.issues[0]?.message ?? "配置结构无法解析")
+                      }
+                      status={report.ok ? "通过" : "失败"}
+                      danger={!report.ok}
+                    />
+                    <ReportLine
+                      title="普通 CMS"
+                      detail={`${reportCounts.supported} 个源可以直接进入搜索与详情流程`}
+                      status="通过"
+                    />
+                    <ReportLine
+                      title="远程依赖"
+                      detail={`${reportCounts.partial} 个源含 JAR 字段，已标记为部分支持`}
+                      status="已隔离"
+                      warning
+                    />
+                    <ReportLine
+                      title="私有协议"
+                      detail={`${reportCounts["needs-adapter"]} 个源需要 adapter，当前不执行`}
+                      status="待适配"
+                      warning
+                    />
+                    <ReportLine
+                      title="危险执行路径"
+                      detail={`${reportCounts.blocked} 个远程脚本或扩展被默认阻止`}
+                      status="已阻止"
+                      danger
+                    />
+                    <ReportLine
+                      title="字段校验"
+                      detail={`${report.issues.length} 个字段或能力问题已记录，可在源详情中查看原因`}
+                      status={report.issues.length > 0 ? "需关注" : "通过"}
+                      warning={report.issues.length > 0}
+                    />
+                    {report.issues.length > 0 && (
+                      <div className="col-span-2 rounded-md border bg-muted/20 p-4">
+                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                          诊断明细
                         </p>
-                      ))}
-                    </div>
-                  </div>
+                        <div className="mt-3 flex flex-col gap-2">
+                          {report.issues.slice(0, 5).map((issue) => (
+                            <p
+                              key={`${issue.path}-${issue.message}`}
+                              className="text-sm text-muted-foreground"
+                            >
+                              <span className="font-mono text-xs text-foreground">
+                                {issue.path}
+                              </span>
+                              {issue.line
+                                ? ` · 第 ${issue.line} 行，第 ${issue.column ?? 0} 列`
+                                : ""}
+                              {` · ${issue.message}`}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <Empty className="min-h-64 border border-dashed bg-card/40">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <FileJson data-icon="inline-start" aria-hidden="true" />
+                      </EmptyMedia>
+                      <EmptyTitle>还没有解析报告</EmptyTitle>
+                      <EmptyDescription>
+                        导入并解析配置后，这里会显示结构、能力和安全边界报告。
+                      </EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
                 )}
               </CardContent>
             </Card>
@@ -734,78 +838,109 @@ export function ConfigCenter() {
       </div>
 
       <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="max-w-3xl">
-          <DialogHeader>
+        <DialogContent className="flex h-[min(46rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)] max-w-4xl flex-col overflow-hidden sm:max-w-4xl">
+          <DialogHeader className="shrink-0">
             <DialogTitle>导入配置</DialogTitle>
             <DialogDescription>
-              支持本地文件、远程 URL
-              和粘贴配置文本。当前只解析和分类，不执行远程依赖。
+              选择本地文件、获取远程
+              URL，或直接粘贴配置文本。当前只解析和分类，不执行远程依赖。
             </DialogDescription>
           </DialogHeader>
-          <div className="flex flex-col gap-4">
-            <div className="grid grid-cols-3 gap-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
+            <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/50 p-1">
               <Button
                 type="button"
-                variant="outline"
-                className="h-auto justify-start gap-3 p-4"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <FileUp data-icon="inline-start" aria-hidden="true" />
-                <span className="flex flex-col items-start gap-1">
-                  <span className="font-medium">本地文件</span>
-                  <span className="text-xs text-muted-foreground">
-                    JSON / JSON5
-                  </span>
-                </span>
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                className="h-auto justify-start gap-3 p-4"
-                onClick={() => setRemoteUrlOpen(true)}
+                variant={importMode === "remote" ? "secondary" : "ghost"}
+                className="gap-2"
+                onClick={() => {
+                  setImportMode("remote");
+                  setIsDraggingFile(false);
+                  setParseState({ type: "idle", message: "" });
+                }}
               >
                 <Globe2 data-icon="inline-start" aria-hidden="true" />
-                <span className="flex flex-col items-start gap-1">
-                  <span className="font-medium">远程 URL</span>
-                  <span className="text-xs text-muted-foreground">
-                    Rust 请求层
-                  </span>
-                </span>
+                远程 URL
               </Button>
               <Button
                 type="button"
-                variant="outline"
-                className="h-auto justify-start gap-3 p-4"
-                onClick={() => setImportText(defaultConfigText)}
+                variant={importMode === "local" ? "secondary" : "ghost"}
+                className="gap-2"
+                onClick={() => {
+                  setImportMode("local");
+                  setIsDraggingFile(false);
+                  setParseState({ type: "idle", message: "" });
+                }}
               >
-                <ClipboardPaste data-icon="inline-start" aria-hidden="true" />
-                <span className="flex flex-col items-start gap-1">
-                  <span className="font-medium">示例文本</span>
-                  <span className="text-xs text-muted-foreground">
-                    载入演示配置
-                  </span>
-                </span>
+                <FileUp data-icon="inline-start" aria-hidden="true" />
+                本地文件
               </Button>
             </div>
-            {remoteUrlOpen && (
-              <div className="flex items-center gap-2 rounded-md border bg-muted/20 p-3">
+            {importMode === "remote" ? (
+              <div className="flex h-20 shrink-0 items-center gap-2 rounded-md border bg-muted/20 p-3">
                 <Input
                   type="url"
-                  value={remoteUrl}
-                  onChange={(event) => setRemoteUrl(event.target.value)}
+                  value={sourceInput}
+                  onChange={(event) => setSourceInput(event.target.value)}
                   placeholder="https://example.com/config.json5"
                   aria-label="远程配置 URL"
+                  className="min-w-0 flex-1 bg-background"
                 />
                 <Button
                   type="button"
                   variant="secondary"
+                  className="shrink-0 gap-2"
                   onClick={handleFetchRemote}
-                  disabled={isFetchingRemote}
+                  disabled={isFetchingRemote || !sourceInput.trim()}
                 >
+                  <Globe2 data-icon="inline-start" aria-hidden="true" />
                   {isFetchingRemote ? "请求中..." : "获取配置"}
                 </Button>
               </div>
+            ) : (
+              <div
+                className={cn(
+                  "flex h-20 shrink-0 items-center justify-between gap-4 rounded-md border border-dashed bg-muted/20 p-4 transition-colors",
+                  isDraggingFile && "border-primary bg-accent/40",
+                )}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "copy";
+                  setIsDraggingFile(true);
+                }}
+                onDragLeave={() => setIsDraggingFile(false)}
+                onDrop={handleFileDrop}
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground">
+                    <FileUp data-icon="inline-start" aria-hidden="true" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">
+                      {selectedFileName || "拖拽 JSON / JSON5 文件到这里"}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {selectedFileName
+                        ? "文件内容已载入编辑区"
+                        : "也可以点击右侧选择文件"}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="shrink-0 gap-2"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <FileUp data-icon="inline-start" aria-hidden="true" />
+                  选择文件
+                </Button>
+              </div>
             )}
+            <p className="-mt-2 shrink-0 text-xs text-muted-foreground">
+              {importMode === "remote"
+                ? "远程请求由 Rust 请求层执行。"
+                : "支持拖入或选择本地 JSON / JSON5 文件，内容会自动载入。"}
+            </p>
             <input
               ref={fileInputRef}
               type="file"
@@ -813,12 +948,43 @@ export function ConfigCenter() {
               className="hidden"
               onChange={handleFilePick}
             />
-            <Textarea
-              value={importText}
-              onChange={(event) => setImportText(event.target.value)}
-              className="min-h-64 resize-none font-mono text-xs leading-5"
-              aria-label="配置文本"
-            />
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+              <div className="flex shrink-0 items-center justify-between gap-3 rounded-t-md border border-b-0 bg-muted/20 px-3 py-2">
+                <span className="text-xs font-medium text-muted-foreground">
+                  JSON 配置
+                </span>
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="gap-2"
+                    onClick={handleFormatConfig}
+                    disabled={!importText.trim()}
+                  >
+                    <Braces data-icon="inline-start" aria-hidden="true" />
+                    格式化
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="gap-2"
+                    onClick={handleRepairConfig}
+                    disabled={!importText.trim()}
+                  >
+                    <WandSparkles data-icon="inline-start" aria-hidden="true" />
+                    修正配置
+                  </Button>
+                </div>
+              </div>
+              <JsonEditor
+                value={importText}
+                onChange={setImportText}
+                className="min-h-0 min-w-0 flex-1 w-full rounded-t-none border-t-0"
+                aria-label="配置文本"
+              />
+            </div>
             {parseState.type !== "idle" && (
               <Alert
                 variant={
@@ -831,13 +997,15 @@ export function ConfigCenter() {
                   <AlertTriangle data-icon="inline-start" aria-hidden="true" />
                 )}
                 <AlertTitle>
-                  {parseState.type === "success" ? "解析完成" : "需要修正配置"}
+                  {parseState.type === "success"
+                    ? (parseState.title ?? "解析完成")
+                    : "需要修正配置"}
                 </AlertTitle>
                 <AlertDescription>{parseState.message}</AlertDescription>
               </Alert>
             )}
           </div>
-          <DialogFooter>
+          <DialogFooter className="shrink-0">
             <Button
               type="button"
               variant="outline"
@@ -849,7 +1017,7 @@ export function ConfigCenter() {
               type="button"
               className="gap-2"
               onClick={handleParse}
-              disabled={isParsing}
+              disabled={isParsing || !importText.trim()}
             >
               <FileJson data-icon="inline-start" aria-hidden="true" />
               {isParsing ? "解析中..." : "解析配置"}

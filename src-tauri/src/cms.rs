@@ -177,7 +177,10 @@ fn parse_item(value: &Value, source_key: &str) -> VodItem {
         source_key: source_key.to_string(),
         source_name: source_key.to_string(),
         name: value_text(value, &["vod_name", "name", "title"]),
-        poster: value_text(value, &["vod_pic", "pic", "poster"]),
+        poster: value_text(
+            value,
+            &["vod_pic", "vod_pic_thumb", "vod_pic_slide", "pic", "poster"],
+        ),
         description: value_text(
             value,
             &["vod_content", "vod_blurb", "content", "description"],

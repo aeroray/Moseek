@@ -32,11 +32,6 @@ import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { loadEpg, loadLiveCatalog } from "@/lib/live-adapter";
 import { cn } from "@/lib/utils";
-import {
-  mockEpgPrograms,
-  mockLiveChannels,
-  mockLiveGroups,
-} from "@/lib/mock-live-data";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
 import { MediaPlayer } from "@/features/player/media-player";
@@ -55,18 +50,16 @@ export function LiveView() {
   );
   const liveSource = liveSources[0];
   const [catalog, setCatalog] = useState<LiveCatalog>({
-    channels: mockLiveChannels,
-    groups: mockLiveGroups,
+    channels: [],
+    groups: [],
   });
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [epgPrograms, setEpgPrograms] = useState<EpgProgram[]>(mockEpgPrograms);
+  const [epgPrograms, setEpgPrograms] = useState<EpgProgram[]>([]);
   const [epgError, setEpgError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [groupId, setGroupId] = useState(mockLiveGroups[0]?.id ?? "");
+  const [groupId, setGroupId] = useState("");
   const [query, setQuery] = useState("");
-  const [selectedChannelId, setSelectedChannelId] = useState(
-    mockLiveChannels[0]?.id ?? "",
-  );
+  const [selectedChannelId, setSelectedChannelId] = useState("");
   const [status, setStatus] = useState<MediaStatus>("idle");
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
 
@@ -146,7 +139,7 @@ export function LiveView() {
   };
 
   if (!selectedChannel) {
-    return <EmptyLiveState />;
+    return <EmptyLiveState error={loadError ?? epgError} loading={isLoading} />;
   }
 
   return (
@@ -182,7 +175,7 @@ export function LiveView() {
             <CircleAlert data-icon="inline-start" aria-hidden="true" />
             <AlertTitle>直播数据请求失败</AlertTitle>
             <AlertDescription>
-              {loadError ?? epgError}。当前显示可用的本地演示数据。
+              {loadError ?? epgError}。未使用本地数据掩盖请求错误。
             </AlertDescription>
           </Alert>
         )}
@@ -477,7 +470,13 @@ export function LiveView() {
   );
 }
 
-function EmptyLiveState() {
+function EmptyLiveState({
+  error,
+  loading,
+}: {
+  error: string | null;
+  loading: boolean;
+}) {
   return (
     <div className="flex h-full items-center justify-center">
       <Empty className="max-w-md border border-dashed">
@@ -485,8 +484,12 @@ function EmptyLiveState() {
           <EmptyMedia variant="icon">
             <Radio data-icon="inline-start" aria-hidden="true" />
           </EmptyMedia>
-          <EmptyTitle>没有直播频道</EmptyTitle>
-          <EmptyDescription>请先导入或启用直播源。</EmptyDescription>
+          <EmptyTitle>
+            {loading ? "正在读取直播频道" : "没有直播频道"}
+          </EmptyTitle>
+          <EmptyDescription>
+            {error ?? "请先导入或启用直播源。"}
+          </EmptyDescription>
         </EmptyHeader>
       </Empty>
     </div>

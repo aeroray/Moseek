@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   countParsedCapabilities,
+  formatConfigText,
   parseConfigText,
+  repairConfigText,
 } from "@/features/config/config-parser";
 
 describe("Moseek config parser", () => {
@@ -58,6 +60,25 @@ describe("Moseek config parser", () => {
     expect(result.issues[0]?.path).toBe("sites.0");
   });
 
+  it("accepts numeric TVBox boolean flags and normalizes them", () => {
+    const result = parseConfigText(`{
+      sites: [{
+        key: "numeric-flags",
+        name: "数字开关",
+        api: "https://cms.example/api",
+        ext: { headers: { "User-Agent": "Moseek" } },
+        searchable: 0,
+        quickSearch: 1,
+        filterable: "0",
+      }],
+    }`);
+
+    expect(result.ok).toBe(true);
+    expect(result.sources[0]?.searchable).toBe(false);
+    expect(result.sources[0]?.filterable).toBe(false);
+    expect(result.sources[0]?.ext).toContain('"headers"');
+  });
+
   it("returns line-aware parse errors and schema errors", () => {
     const malformed = parseConfigText(`{
       sites: [
@@ -68,5 +89,28 @@ describe("Moseek config parser", () => {
     expect(malformed.issues[0]?.severity).toBe("error");
     expect(wrongShape.ok).toBe(false);
     expect(wrongShape.issues[0]?.path).toBe("sites");
+  });
+
+  it("formats valid JSON5 and repairs unescaped string newlines", () => {
+    const formatted = formatConfigText("{sites: [], lives: [],}");
+    const repaired = repairConfigText(
+      '{"sites": [{"name": "line\nbreak", "api": "https://example.com"}]}',
+    );
+
+    expect(formatted.ok).toBe(true);
+    expect(formatted.text).toContain('"sites": []');
+    expect(parseConfigText(formatted.text).ok).toBe(true);
+    expect(repaired.ok).toBe(true);
+    expect(repaired.changes).toContain("转义字符串中的换行");
+    expect(parseConfigText(repaired.text).ok).toBe(true);
+  });
+
+  it("does not rewrite text when repair cannot validate it", () => {
+    const malformed = '{"sites": [{"name": "missing}]}';
+    const repaired = repairConfigText(malformed);
+
+    expect(repaired.ok).toBe(false);
+    expect(repaired.text).toBe(malformed);
+    expect(repaired.issue?.line).not.toBeNull();
   });
 });

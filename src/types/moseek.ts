@@ -8,7 +8,6 @@ export type CapabilityStatus =
 export type SourceType = "cms" | "live" | "parser";
 
 export type ViewKey =
-  | "home"
   | "browse"
   | "live"
   | "favorites"

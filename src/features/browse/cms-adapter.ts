@@ -1,10 +1,9 @@
 import { getSourceDetail, isTauriRuntime, searchSource } from "@/lib/tauri";
-import { getMockCatalog, getMockDetail } from "@/lib/mock-vod-data";
 import type { CatalogPage, SourceRecord, VodItem } from "@/types/moseek";
 
 export interface AdapterResult<T> {
   data: T;
-  mode: "remote" | "demo";
+  mode: "remote" | "empty";
   error: string | null;
 }
 
@@ -28,19 +27,19 @@ export async function searchVod(
       return { data: remoteResult, mode: "remote", error: null };
     }
   } catch (error) {
-    if (isTauriRuntime()) {
-      return {
-        data: emptyCatalog(source.key, page, pageSize),
-        mode: "remote",
-        error: error instanceof Error ? error.message : "CMS 请求失败",
-      };
-    }
+    return {
+      data: emptyCatalog(source.key, page, pageSize),
+      mode: "remote",
+      error: getErrorMessage(error, "CMS 请求失败"),
+    };
   }
 
   return {
-    data: getMockCatalog(source.key, query, categoryId, page, pageSize),
-    mode: "demo",
-    error: null,
+    data: emptyCatalog(source.key, page, pageSize),
+    mode: "empty",
+    error: isTauriRuntime()
+      ? "CMS 请求未返回可解析数据"
+      : "浏览器预览不会直接请求 CMS 数据，请在 Tauri 桌面应用中使用此功能。",
   };
 }
 
@@ -54,16 +53,35 @@ export async function getVodDetail(
       return { data: remoteResult, mode: "remote", error: null };
     }
   } catch (error) {
-    if (isTauriRuntime()) {
-      return {
-        data: item,
-        mode: "remote",
-        error: error instanceof Error ? error.message : "详情请求失败",
-      };
-    }
+    return {
+      data: null,
+      mode: "remote",
+      error: getErrorMessage(error, "详情请求失败"),
+    };
   }
 
-  return { data: getMockDetail(item.id) ?? item, mode: "demo", error: null };
+  return {
+    data: null,
+    mode: "empty",
+    error: isTauriRuntime()
+      ? "详情请求未返回可解析数据"
+      : "浏览器预览不会直接请求 CMS 详情，请在 Tauri 桌面应用中使用此功能。",
+  };
+}
+
+function getErrorMessage(error: unknown, fallback: string) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  if (
+    error &&
+    typeof error === "object" &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    error.message.trim()
+  ) {
+    return error.message;
+  }
+  return fallback;
 }
 
 function emptyCatalog(

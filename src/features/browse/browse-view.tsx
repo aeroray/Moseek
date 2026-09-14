@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { CapabilityBadge } from "@/components/capability-badge";
+import { MediaPoster } from "@/components/media-poster";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,7 +48,6 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type {
   CatalogViewMode,
@@ -86,7 +86,6 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
   const [categoryId, setCategoryId] = useState("all");
   const [page, setPage] = useState(1);
   const [viewMode, setViewMode] = useState<CatalogViewMode>("grid");
-  const [posterShape, setPosterShape] = useState("portrait");
   const [catalog, setCatalog] = useState<
     Awaited<ReturnType<typeof searchVod>>["data"] | null
   >(null);
@@ -279,17 +278,6 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
                 </SelectGroup>
               </SelectContent>
             </Select>
-            <Select value={posterShape} onValueChange={setPosterShape}>
-              <SelectTrigger className="w-36">
-                <SelectValue placeholder="海报比例" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="portrait">竖版海报</SelectItem>
-                  <SelectItem value="wide">宽幅海报</SelectItem>
-                </SelectGroup>
-              </SelectContent>
-            </Select>
             <div className="flex items-center gap-1 rounded-md border bg-muted/30 p-1">
               <Button
                 type="button"
@@ -320,7 +308,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
             <CircleAlert data-icon="inline-start" aria-hidden="true" />
             <AlertTitle>资源请求失败</AlertTitle>
             <AlertDescription>
-              {loadError}。当前没有使用演示数据掩盖这个错误。
+              {loadError}。当前不会使用本地数据掩盖这个错误。
             </AlertDescription>
           </Alert>
         )}
@@ -337,7 +325,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
         </div>
 
         {isLoading ? (
-          <CatalogSkeleton viewMode={viewMode} posterShape={posterShape} />
+          <CatalogSkeleton viewMode={viewMode} />
         ) : catalog?.items.length ? (
           viewMode === "grid" ? (
             <div className="grid grid-cols-4 gap-4">
@@ -345,7 +333,6 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
                 <CatalogCard
                   key={item.id}
                   item={item}
-                  posterShape={posterShape}
                   onOpen={() => setSelectedItem(item)}
                 />
               ))}
@@ -413,34 +400,19 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
   );
 }
 
-function CatalogCard({
-  item,
-  posterShape,
-  onOpen,
-}: {
-  item: VodItem;
-  posterShape: string;
-  onOpen: () => void;
-}) {
+function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
   const isFavorite = useAppStore((state) =>
     state.favorites.some((favorite) => favorite.id === item.id),
   );
   return (
     <Card className="group overflow-hidden transition-colors hover:border-primary/50">
       <button type="button" className="block w-full text-left" onClick={onOpen}>
-        <div
-          className={cn(
-            "overflow-hidden bg-muted",
-            posterShape === "wide" ? "aspect-[16/10]" : "aspect-[2/3]",
-          )}
-        >
-          <img
-            src={item.poster}
-            alt={`${item.name} 海报`}
-            loading="lazy"
-            className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
-          />
-        </div>
+        <MediaPoster
+          src={item.poster}
+          alt={`${item.name} 海报`}
+          className="aspect-video"
+          imageClassName="transition-transform duration-200 group-hover:scale-[1.03]"
+        />
         <CardContent className="p-4">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
@@ -488,11 +460,10 @@ function CatalogListItem({
         className="flex w-full items-center gap-4 p-3 text-left"
         onClick={onOpen}
       >
-        <img
+        <MediaPoster
           src={item.poster}
           alt={`${item.name} 海报`}
-          loading="lazy"
-          className="size-16 shrink-0 rounded-md object-cover"
+          className="h-20 w-36 shrink-0 rounded-md"
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -522,19 +493,13 @@ function CatalogListItem({
   );
 }
 
-function CatalogSkeleton({
-  viewMode,
-  posterShape,
-}: {
-  viewMode: CatalogViewMode;
-  posterShape: string;
-}) {
+function CatalogSkeleton({ viewMode }: { viewMode: CatalogViewMode }) {
   if (viewMode === "list")
     return (
       <div className="flex flex-col gap-3">
         {Array.from({ length: 5 }, (_, index) => (
           <Card key={index} className="flex items-center gap-4 p-3">
-            <Skeleton className="size-16 rounded-md" />
+            <Skeleton className="h-20 w-36 rounded-md" />
             <div className="flex flex-1 flex-col gap-2">
               <Skeleton className="h-4 w-48" />
               <Skeleton className="h-3 w-3/4" />
@@ -547,11 +512,7 @@ function CatalogSkeleton({
     <div className="grid grid-cols-4 gap-4">
       {Array.from({ length: 8 }, (_, index) => (
         <Card key={index} className="overflow-hidden">
-          <Skeleton
-            className={cn(
-              posterShape === "wide" ? "aspect-[16/10]" : "aspect-[2/3]",
-            )}
-          />
+          <Skeleton className="aspect-video" />
           <CardContent className="flex flex-col gap-2 p-4">
             <Skeleton className="h-4 w-2/3" />
             <Skeleton className="h-3 w-1/2" />
@@ -640,14 +601,12 @@ function DetailView({
             <AlertDescription>{detailError}</AlertDescription>
           </Alert>
         )}
-        <section className="grid grid-cols-[280px_1fr] gap-8">
-          <div className="overflow-hidden rounded-lg border bg-muted">
-            <img
-              src={detail.poster}
-              alt={`${detail.name} 海报`}
-              className="aspect-[2/3] size-full object-cover"
-            />
-          </div>
+        <section className="grid grid-cols-[minmax(360px,42%)_1fr] gap-8">
+          <MediaPoster
+            src={detail.poster}
+            alt={`${detail.name} 海报`}
+            className="aspect-video rounded-lg border"
+          />
           <div className="flex flex-col gap-5">
             <div className="flex items-start justify-between gap-6">
               <div>

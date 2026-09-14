@@ -1,6 +1,14 @@
-import type { CapabilityStatus, SourceRecord, SourceType } from "@/types/moseek";
+import type {
+  CapabilityStatus,
+  SourceRecord,
+  SourceType,
+} from "@/types/moseek";
 
-export type AdapterExecution = "enabled" | "partial" | "needs-adapter" | "blocked";
+export type AdapterExecution =
+  | "enabled"
+  | "partial"
+  | "needs-adapter"
+  | "blocked";
 
 export type AdapterId =
   | "builtin-cms"
@@ -107,7 +115,12 @@ export const adapterRegistry: AdapterProfile[] = [
   createProfile("unknown", "parser"),
 ];
 
-export function getAdapterProfile(source: Pick<SourceRecord, "key" | "api" | "jar" | "sourceType" | "capability">): AdapterProfile {
+export function getAdapterProfile(
+  source: Pick<
+    SourceRecord,
+    "key" | "api" | "jar" | "sourceType" | "capability"
+  >,
+): AdapterProfile {
   const key = source.key.toLowerCase();
   const api = source.api.toLowerCase();
   let id: AdapterId;
@@ -126,11 +139,17 @@ export function getAdapterProfile(source: Pick<SourceRecord, "key" | "api" | "ja
     id = "csp-xyqhiker";
   } else if (source.jar) {
     id = "remote-jar";
-  } else if (api.startsWith("proxy://") || source.capability === "needs-adapter") {
+  } else if (
+    api.startsWith("proxy://") ||
+    source.capability === "needs-adapter"
+  ) {
     id = "private-protocol";
   } else if (source.sourceType === "cms" && /^https?:\/\//i.test(source.api)) {
     id = "builtin-cms";
-  } else if (source.sourceType === "parser" && /^https?:\/\//i.test(source.api)) {
+  } else if (
+    source.sourceType === "parser" &&
+    /^https?:\/\//i.test(source.api)
+  ) {
     id = "http-parser";
   } else {
     id = "unknown";
@@ -152,8 +171,13 @@ function createProfile(id: AdapterId, sourceType: SourceType): AdapterProfile {
   return { id, sourceType, ...profiles[id] };
 }
 
-export function adapterMatchesCapability(profile: AdapterProfile, capability: CapabilityStatus) {
-  if (profile.execution === "blocked") return capability === "blocked" || capability === "partial";
-  if (profile.execution === "needs-adapter") return capability === "needs-adapter";
+export function adapterMatchesCapability(
+  profile: AdapterProfile,
+  capability: CapabilityStatus,
+) {
+  if (profile.execution === "blocked")
+    return capability === "blocked" || capability === "partial";
+  if (profile.execution === "needs-adapter")
+    return capability === "needs-adapter";
   return capability === "supported" || capability === "partial";
 }

@@ -1,6 +1,7 @@
 import { Bookmark, Heart } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { MediaPoster } from "@/components/media-poster";
 import {
   Card,
   CardContent,
@@ -72,13 +73,12 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
                   key={item.id}
                   className="group overflow-hidden rounded-md border bg-card"
                 >
-                  <div className="aspect-[2/3] overflow-hidden bg-muted">
-                    <img
-                      src={item.poster}
-                      alt={`${item.name} 海报`}
-                      className="size-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
-                    />
-                  </div>
+                  <MediaPoster
+                    src={item.poster}
+                    alt={`${item.name} 海报`}
+                    className="aspect-video"
+                    imageClassName="transition-transform duration-200 group-hover:scale-[1.03]"
+                  />
                   <div className="flex items-center justify-between gap-2 p-3">
                     <div className="min-w-0">
                       <p className="truncate text-sm font-medium">

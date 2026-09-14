@@ -5,18 +5,32 @@ const optionalText = z.preprocess(
   z.string().min(1).optional(),
 );
 
+const optionalConfigText = z.preprocess((value) => {
+  if (typeof value === "string") return value.trim();
+  if (value !== null && typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return value;
+}, z.string().min(1).optional());
+
+const optionalBoolean = z.preprocess((value) => {
+  if (value === 0 || value === "0") return false;
+  if (value === 1 || value === "1") return true;
+  return value;
+}, z.boolean().optional());
+
 export const RawSiteSchema = z
   .object({
     key: optionalText,
     name: optionalText,
     type: z.union([z.number().int(), z.string()]).optional(),
     api: optionalText,
-    ext: optionalText,
+    ext: optionalConfigText,
     jar: optionalText,
     epg: optionalText,
-    searchable: z.boolean().optional(),
-    quickSearch: z.boolean().optional(),
-    filterable: z.boolean().optional(),
+    searchable: optionalBoolean,
+    quickSearch: optionalBoolean,
+    filterable: optionalBoolean,
     categories: z.unknown().optional(),
   })
   .passthrough();

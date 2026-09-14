@@ -1,7 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import { initialSources } from "@/lib/mock-data";
 import { setSourceEnabled } from "@/lib/tauri";
 import type {
   PlayHistoryRecord,
@@ -42,9 +41,9 @@ interface AppStore {
 export const useAppStore = create<AppStore>()(
   persist(
     (set) => ({
-      activeView: "home",
+      activeView: "browse",
       theme: "system",
-      sources: initialSources.map((source) => ({ ...source })),
+      sources: [],
       rawConfig: "",
       normalizedConfig: "",
       lastImportedAt: null,
@@ -119,6 +118,32 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: "moseek-app-state",
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<AppStore> | undefined;
+        const hasImportedConfig = Boolean(persisted?.rawConfig?.trim());
+        const hasSources = Boolean(persisted?.sources?.length);
+        const keepUserContent = hasImportedConfig && hasSources;
+        const persistedActiveView = (
+          persisted as { activeView?: string } | undefined
+        )?.activeView;
+        return {
+          ...currentState,
+          ...persisted,
+          activeView:
+            persistedActiveView === "home"
+              ? "browse"
+              : (persisted?.activeView ?? currentState.activeView),
+          sources: keepUserContent ? (persisted?.sources ?? []) : [],
+          history: keepUserContent ? (persisted?.history ?? []) : [],
+          favorites: keepUserContent ? (persisted?.favorites ?? []) : [],
+          playbackProgress: keepUserContent
+            ? (persisted?.playbackProgress ?? {})
+            : {},
+          liveFavorites: keepUserContent
+            ? (persisted?.liveFavorites ?? [])
+            : [],
+        };
+      },
       partialize: (state) => ({
         activeView: state.activeView,
         theme: state.theme,
