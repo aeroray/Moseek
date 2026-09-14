@@ -1,0 +1,172 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.5rem;
+  --background: oklch(0.982 0.006 88);
+  --foreground: oklch(0.2 0.024 258);
+  --card: oklch(0.998 0.002 90);
+  --card-foreground: oklch(0.2 0.024 258);
+  --popover: oklch(0.998 0.002 90);
+  --popover-foreground: oklch(0.2 0.024 258);
+  --primary: oklch(0.63 0.19 31);
+  --primary-foreground: oklch(0.99 0.005 90);
+  --secondary: oklch(0.94 0.014 88);
+  --secondary-foreground: oklch(0.28 0.026 258);
+  --muted: oklch(0.95 0.01 88);
+  --muted-foreground: oklch(0.48 0.026 258);
+  --accent: oklch(0.94 0.045 246);
+  --accent-foreground: oklch(0.3 0.11 248);
+  --destructive: oklch(0.58 0.21 25);
+  --border: oklch(0.88 0.014 88);
+  --input: oklch(0.86 0.018 88);
+  --ring: oklch(0.63 0.19 31);
+  --chart-1: oklch(0.63 0.19 31);
+  --chart-2: oklch(0.56 0.16 249);
+  --chart-3: oklch(0.7 0.16 156);
+  --chart-4: oklch(0.76 0.15 82);
+  --chart-5: oklch(0.59 0.14 315);
+  --sidebar: oklch(0.97 0.008 88);
+  --sidebar-foreground: oklch(0.25 0.024 258);
+  --sidebar-primary: oklch(0.63 0.19 31);
+  --sidebar-primary-foreground: oklch(0.99 0.005 90);
+  --sidebar-accent: oklch(0.93 0.025 88);
+  --sidebar-accent-foreground: oklch(0.24 0.028 258);
+  --sidebar-border: oklch(0.9 0.014 88);
+  --sidebar-ring: oklch(0.63 0.19 31);
+  --status-supported: oklch(0.52 0.15 155);
+  --status-supported-bg: oklch(0.94 0.045 155);
+  --status-supported-border: oklch(0.8 0.11 155);
+  --status-partial: oklch(0.58 0.16 76);
+  --status-partial-bg: oklch(0.95 0.07 88);
+  --status-partial-border: oklch(0.84 0.13 82);
+  --status-adapter: oklch(0.55 0.14 249);
+  --status-adapter-bg: oklch(0.94 0.045 249);
+  --status-adapter-border: oklch(0.8 0.1 249);
+  --status-blocked: oklch(0.57 0.19 25);
+  --status-blocked-bg: oklch(0.95 0.04 25);
+  --status-blocked-border: oklch(0.82 0.12 25);
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display:
+    "Space Grotesk", "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+.dark {
+  --background: oklch(0.17 0.018 258);
+  --foreground: oklch(0.94 0.012 88);
+  --card: oklch(0.205 0.02 258);
+  --card-foreground: oklch(0.94 0.012 88);
+  --popover: oklch(0.205 0.02 258);
+  --popover-foreground: oklch(0.94 0.012 88);
+  --primary: oklch(0.71 0.17 31);
+  --primary-foreground: oklch(0.18 0.018 258);
+  --secondary: oklch(0.27 0.022 258);
+  --secondary-foreground: oklch(0.91 0.014 88);
+  --muted: oklch(0.25 0.02 258);
+  --muted-foreground: oklch(0.69 0.022 88);
+  --accent: oklch(0.28 0.07 249);
+  --accent-foreground: oklch(0.86 0.05 249);
+  --destructive: oklch(0.67 0.18 25);
+  --border: oklch(0.3 0.022 258);
+  --input: oklch(0.34 0.026 258);
+  --ring: oklch(0.71 0.17 31);
+  --chart-1: oklch(0.71 0.17 31);
+  --chart-2: oklch(0.68 0.14 249);
+  --chart-3: oklch(0.72 0.14 156);
+  --chart-4: oklch(0.8 0.14 82);
+  --chart-5: oklch(0.7 0.13 315);
+  --sidebar: oklch(0.19 0.018 258);
+  --sidebar-foreground: oklch(0.88 0.014 88);
+  --sidebar-primary: oklch(0.71 0.17 31);
+  --sidebar-primary-foreground: oklch(0.18 0.018 258);
+  --sidebar-accent: oklch(0.25 0.022 258);
+  --sidebar-accent-foreground: oklch(0.91 0.014 88);
+  --sidebar-border: oklch(0.29 0.022 258);
+  --sidebar-ring: oklch(0.71 0.17 31);
+  --status-supported: oklch(0.76 0.13 155);
+  --status-supported-bg: oklch(0.27 0.07 155);
+  --status-supported-border: oklch(0.43 0.1 155);
+  --status-partial: oklch(0.81 0.13 82);
+  --status-partial-bg: oklch(0.29 0.07 82);
+  --status-partial-border: oklch(0.48 0.11 82);
+  --status-adapter: oklch(0.77 0.1 249);
+  --status-adapter-bg: oklch(0.26 0.07 249);
+  --status-adapter-border: oklch(0.43 0.1 249);
+  --status-blocked: oklch(0.78 0.13 25);
+  --status-blocked-bg: oklch(0.29 0.07 25);
+  --status-blocked-border: oklch(0.48 0.11 25);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-status-supported: var(--status-supported);
+  --color-status-supported-bg: var(--status-supported-bg);
+  --color-status-supported-border: var(--status-supported-border);
+  --color-status-partial: var(--status-partial);
+  --color-status-partial-bg: var(--status-partial-bg);
+  --color-status-partial-border: var(--status-partial-border);
+  --color-status-adapter: var(--status-adapter);
+  --color-status-adapter-bg: var(--status-adapter-bg);
+  --color-status-adapter-border: var(--status-adapter-border);
+  --color-status-blocked: var(--status-blocked);
+  --color-status-blocked-bg: var(--status-blocked-bg);
+  --color-status-blocked-border: var(--status-blocked-border);
+  --font-sans: var(--font-sans);
+  --font-display: var(--font-display);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+
+  body {
+    @apply min-w-[1200px] overflow-hidden bg-background font-sans text-foreground antialiased;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
