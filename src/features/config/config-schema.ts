@@ -58,7 +58,10 @@ export const RawLiveSchema = z
     api: optionalText,
     logo: optionalText,
     status: optionalBoolean,
-    ext: optionalText,
+    // Live `ext` is an object in the wild (`{"sp":"Huya"}`), exactly like site `ext`, so it
+    // has to be coerced rather than rejected. Treating it as plain text made one such entry
+    // fail validation for the whole configuration.
+    ext: optionalConfigText,
     epg: optionalText,
   })
   .passthrough();

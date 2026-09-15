@@ -741,12 +741,17 @@ export function ConfigCenter() {
 
     if (!result.ok) {
       const issue = result.issues[0];
-      const position = issue?.line
+      // Syntax errors carry a line and column; schema mismatches carry a field path instead.
+      // Without the path, "expected string, received object" gives no hint about which field
+      // in a configuration with hundreds of entries is wrong.
+      const location = issue?.line
         ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
-        : "";
+        : issue?.path && issue.path !== "$"
+          ? `（字段 ${issue.path}）`
+          : "";
       setParseState({
         type: "error",
-        message: `解析失败${position}：${issue?.message ?? "未知解析错误"}`,
+        message: `解析失败${location}：${issue?.message ?? "未知解析错误"}`,
       });
       setIsParsing(false);
       return;

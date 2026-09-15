@@ -286,10 +286,12 @@ export async function resolvePlayback(
 export async function fetchMediaResource(
   url: string,
   headers: Record<string, string> = {},
+  maxBytes?: number,
 ) {
   return invokeCommand<MediaResource>("fetch_media_resource", {
     url,
     headers,
+    maxBytes: maxBytes ?? null,
   });
 }
 

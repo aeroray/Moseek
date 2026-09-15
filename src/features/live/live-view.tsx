@@ -39,7 +39,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
-import { MediaPlayer } from "@/features/player/media-player";
+import { MediaPlayer, usesHlsPipeline } from "@/features/player/media-player";
 import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
@@ -155,6 +155,15 @@ export function LiveView() {
     : [];
   const selectedStreamUrl =
     streamUrls[streamIndex] ?? streamUrls[0] ?? selectedChannel?.streamUrl;
+  const playerUrl =
+    resolvedStream?.url ?? selectedStreamUrl ?? selectedChannel?.streamUrl ?? "";
+  const playerKind =
+    resolvedStream?.mediaKind ?? selectedChannel?.mediaKind ?? "unknown";
+  // hls.js and the native element need separate players, so switching between a playlist and
+  // a plain media file has to rebuild rather than reuse the mounted one.
+  const playerPipeline = usesHlsPipeline(playerKind, true, playerUrl)
+    ? "hls"
+    : "native";
 
   useEffect(() => {
     streamIndexRef.current = 0;
@@ -507,16 +516,11 @@ export function LiveView() {
                   </CardHeader>
                   <CardContent className="flex flex-col gap-3">
                     <MediaPlayer
+                      key={playerPipeline}
                       title={selectedChannel.name}
-                      url={
-                        resolvedStream?.url ??
-                        selectedStreamUrl ??
-                        selectedChannel.streamUrl
-                      }
+                      url={playerUrl}
                       isLive
-                      kind={
-                        resolvedStream?.mediaKind ?? selectedChannel.mediaKind
-                      }
+                      kind={playerKind}
                       onStatus={(nextStatus) => {
                         if (nextStatus === "error" && tryNextStream()) {
                           return;

@@ -45,16 +45,25 @@ pub struct MediaResource {
 
 const DEFAULT_SNIFFER_COMPANION_URL: &str = "http://127.0.0.1:57573/sniffer";
 const MAX_PARSE_REQUEST_BODY_BYTES: usize = 128 * 1024;
+const MAX_MEDIA_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MIN_MEDIA_RESOURCE_BYTES: usize = 64 * 1024;
 
 #[tauri::command]
 pub async fn fetch_media_resource(
     url: String,
     headers: HashMap<String, String>,
+    max_bytes: Option<usize>,
 ) -> Result<MediaResource, String> {
     let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
     let header_pairs = headers.into_iter().collect::<Vec<_>>();
+    // The caller narrows the budget for playlist requests. A manifest is a few kilobytes, so
+    // letting a non-HLS address stream megabytes into memory only delays the failure and
+    // reports a size limit instead of "this is not a playlist".
+    let limit = max_bytes
+        .unwrap_or(MAX_MEDIA_RESOURCE_BYTES)
+        .clamp(MIN_MEDIA_RESOURCE_BYTES, MAX_MEDIA_RESOURCE_BYTES);
     let (body, content_type, final_url) =
-        fetch_media_bytes(parsed_url, 16 * 1024 * 1024, "媒体资源", &header_pairs).await?;
+        fetch_media_bytes(parsed_url, limit, "媒体资源", &header_pairs).await?;
     Ok(MediaResource {
         body_base64: BASE64.encode(body),
         content_type,

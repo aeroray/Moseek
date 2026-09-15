@@ -48,6 +48,27 @@ interface MediaPlayerProps {
 
 let cachedTransmuxWorkerSupport: boolean | null = null;
 
+/**
+ * Playlists are a few kilobytes, so a manifest request gets a much smaller budget than a
+ * media fragment. Without it a non-HLS address (an MP4 behind a `.php` endpoint, for
+ * example) streams megabytes into memory before failing with a size limit instead of
+ * "this is not a playlist".
+ */
+const PLAYLIST_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Decides whether a source must be played through hls.js.
+ *
+ * A live channel is normally HLS even without the extension, but an explicit mp4 is never an
+ * HLS manifest: forcing one through hls.js downloaded the whole file and then failed with a
+ * size-limit error instead of playing it. Exported so callers can key the player on the
+ * pipeline, because switching between the two kinds needs a fresh player.
+ */
+export function usesHlsPipeline(kind: MediaKind, isLive: boolean, url: string) {
+  if (kind === "mp4") return false;
+  return isLive || kind === "hls" || url.toLowerCase().includes(".m3u8");
+}
+
 function shouldStartWithTransmuxWorker() {
   return cachedTransmuxWorkerSupport !== false;
 }
@@ -112,7 +133,11 @@ class TauriMediaLoader implements Loader<LoaderContext> {
     });
 
     void Promise.race([
-      fetchMediaResource(context.url, headers),
+      fetchMediaResource(
+        context.url,
+        headers,
+        isPlaylistContext(context) ? PLAYLIST_MAX_BYTES : undefined,
+      ),
       timeoutPromise,
     ])
       .then((resource) => {
@@ -233,11 +258,7 @@ function isHlsPlaylist(value: string) {
 }
 
 function isHlsSource(source: MediaSourceState) {
-  return (
-    source.isLive ||
-    source.kind === "hls" ||
-    source.url.toLowerCase().includes(".m3u8")
-  );
+  return usesHlsPipeline(source.kind, source.isLive, source.url);
 }
 
 export function MediaPlayer({
@@ -548,7 +569,10 @@ export function MediaPlayer({
 
     if (!liveMode) report("loading");
     video.poster = initialSource.poster ?? "";
-    video.crossOrigin = "anonymous";
+    // `crossOrigin` is deliberately left unset. Setting it makes the element demand CORS
+    // headers from the media host, which can only break the native path (a live mp4 or a VOD
+    // file) and buys nothing: nothing here reads pixels back through canvas, captureStream,
+    // or WebAudio, and the HLS path feeds the element from a same-origin MediaSource blob.
     video.autoplay = liveMode;
     video.defaultMuted = liveMode;
     video.muted = liveMode;
@@ -666,9 +690,15 @@ export function MediaPlayer({
           startPosition: liveMode ? -1 : 0,
           liveDurationInfinity: liveMode,
           liveSyncMode: "edge",
-          liveSyncDurationCount: 2,
-          liveMaxLatencyDurationCount: 4,
-          maxBufferLength: liveMode ? 10 : 30,
+          // Public IPTV sources routinely deliver a fragment slower than real time, so the
+          // player needs a cushion to ride out the slow patches. The cushion is bounded by the
+          // start position (you can only buffer from where playback begins up to the live
+          // edge), so starting one fragment further back is what actually buys resilience;
+          // the buffer cap is kept above it and the latency cap above that, so neither ever
+          // forces a mid-playback catch-up seek.
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 10,
+          maxBufferLength: 30,
           backBufferLength: liveMode ? 20 : Infinity,
           startFragPrefetch: liveMode,
         };

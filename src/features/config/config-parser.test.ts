@@ -325,4 +325,29 @@ describe("Moseek config parser", () => {
     expect(formatConfigText(oversized).issue?.message).toContain("10 MiB");
     expect(repairConfigText(oversized).issue?.message).toContain("10 MiB");
   });
+
+  it("accepts an object ext on a live source", () => {
+    // Live `ext` is an object in the wild (`{"sp":"Huya"}`). Treating it as plain text made
+    // one such entry fail validation for the entire configuration, with an error that did
+    // not name the field.
+    const result = parseConfigText(`{
+      lives: [
+        { name: "虎牙", url: "https://live.example/huya.m3u8", ext: { sp: "Huya" } },
+      ],
+    }`);
+
+    expect(result.ok).toBe(true);
+    expect(result.liveCount).toBe(1);
+    expect(result.sources[0]?.ext).toBe('{"sp":"Huya"}');
+  });
+
+  it("names the offending field when a schema check fails", () => {
+    const result = parseConfigText(`{
+      lives: [{ name: { nested: true }, url: "https://live.example/a.m3u8" }],
+    }`);
+
+    expect(result.ok).toBe(false);
+    expect(result.issues[0]?.path).toBe("lives.0.name");
+    expect(result.issues[0]?.line).toBeNull();
+  });
 });

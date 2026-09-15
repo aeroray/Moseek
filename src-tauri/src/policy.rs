@@ -174,9 +174,18 @@ async fn fetch_response_bytes(
                 .ok_or_else(|| format!("{resource_name}重定向缺少目标地址"))?
                 .to_str()
                 .map_err(|error| format!("{resource_name}重定向地址无效：{error}"))?;
-            current_url = current_url
+            let next_url = current_url
                 .join(location)
                 .map_err(|error| format!("{resource_name}重定向地址无法解析：{error}"))?;
+            // An empty Location resolves back to the current URL, which would otherwise spin
+            // until the redirect budget runs out and be reported as "too many redirects" even
+            // though only one hop was ever attempted.
+            if next_url == current_url {
+                return Err(format!(
+                    "{resource_name}的重定向没有指向新地址（Location 为空或指向自身），该地址当前不可用"
+                ));
+            }
+            current_url = next_url;
             continue;
         }
         let mut response = response
