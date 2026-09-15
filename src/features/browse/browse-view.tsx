@@ -1,19 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
-  ArrowRight,
-  Bookmark,
-  Check,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
   Film,
   Grid2X2,
-  Info,
   List,
   Play,
+  RotateCw,
   Search,
   SlidersHorizontal,
+  Sparkles,
   Star,
 } from "lucide-react";
 
@@ -22,13 +20,7 @@ import { MediaPoster } from "@/components/media-poster";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import {
   Empty,
   EmptyDescription,
@@ -47,7 +39,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppStore } from "@/stores/app-store";
 import type {
   CatalogViewMode,
@@ -57,24 +48,26 @@ import type {
   VodPlayLine,
 } from "@/types/moseek";
 import { getVodDetail, searchVod } from "@/features/browse/cms-adapter";
-import { isMovieLibrarySource } from "@/lib/adapters";
+import { isCandidateMovieSource, isMovieLibrarySource } from "@/lib/adapters";
 import {
   PlayerView,
   type VodPlayerRequest,
 } from "@/features/player/player-view";
+import { cn } from "@/lib/utils";
 
 interface BrowseViewProps {
   onNavigate: (view: ViewKey) => void;
 }
 
-const pageSize = 8;
+const pageSize = 12;
 
 export function BrowseView({ onNavigate }: BrowseViewProps) {
   const sources = useAppStore((state) => state.sources);
-  const browseSources = useMemo(
-    () => sources.filter(isMovieLibrarySource),
-    [sources],
-  );
+  const browseSources = useMemo(() => {
+    const passed = sources.filter(isMovieLibrarySource);
+    if (passed.length > 0) return passed;
+    return sources.filter(isCandidateMovieSource);
+  }, [sources]);
   const [sourceKey, setSourceKey] = useState(browseSources[0]?.key ?? "");
   const [searchInput, setSearchInput] = useState("");
   const [query, setQuery] = useState("");
@@ -143,244 +136,249 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
 
   if (!selectedSource) {
     return (
-      <ScrollArea className="h-full">
-        <div className="flex min-h-[calc(100vh-4rem)] items-center justify-center px-8">
-          <Empty className="max-w-lg border border-dashed bg-card/40 py-16">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Film data-icon="inline-start" aria-hidden="true" />
-              </EmptyMedia>
-              <EmptyTitle>还没有可浏览的 CMS 源</EmptyTitle>
-              <EmptyDescription>
-                请先在配置中心导入配置，测试并通过至少一个普通 CMS
-                源，再启用它。
-              </EmptyDescription>
-            </EmptyHeader>
-            <Button type="button" onClick={() => onNavigate("config")}>
-              打开配置中心
-            </Button>
-          </Empty>
-        </div>
-        <ScrollBar />
-      </ScrollArea>
+      <div className="flex h-full items-center justify-center p-8">
+        <Empty className="max-w-md border-border/60 bg-card/60 py-12">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <Film className="size-5 text-primary" data-icon="inline-start" aria-hidden="true" />
+            </EmptyMedia>
+            <EmptyTitle>暂无可用影视源</EmptyTitle>
+            <EmptyDescription>
+              请在「配置与源」中导入或启用至少一个普通 CMS 影视源。
+            </EmptyDescription>
+          </EmptyHeader>
+          <Button type="button" onClick={() => onNavigate("config")}>
+            打开配置中心
+          </Button>
+        </Empty>
+      </div>
     );
   }
 
   const categories = catalog?.categories ?? [];
-  const itemCountText = catalog ? `${catalog.total} 部内容` : "正在读取目录";
+  const itemCountText = catalog ? `${catalog.total} 部` : "读取中";
 
   return (
-    <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-[1520px] flex-col gap-6 px-8 py-8">
-        <section className="flex items-end justify-between gap-8">
-          <div>
-            <h1 className="font-display text-3xl font-semibold tracking-tight">
-              影视库
-            </h1>
-            <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              搜索、分类、分页和查看普通 CMS
-              源的统一影视数据。被阻止的源不会出现在浏览入口。
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="size-2 rounded-full bg-[color:var(--status-supported)]" />
-            {itemCountText}
-          </div>
-        </section>
+    <div className="flex h-full flex-col overflow-hidden bg-background">
+      {/* 44px Unified Toolbar (回归标准 32px 控件阶梯) */}
+      <header
+        className="flex h-12 shrink-0 items-center gap-3 border-b border-border/70 bg-card/40 px-4 backdrop-blur-md select-none"
+      >
+        {/* Source Selector */}
+        <Select
+          value={sourceKey}
+          onValueChange={(value) => {
+            setSourceKey(value);
+            setPage(1);
+          }}
+        >
+          <SelectTrigger size="sm" className="h-8 w-44 font-medium border-primary/25 bg-primary/5 text-foreground hover:border-primary/50">
+            <SelectValue placeholder="选择影视源" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {browseSources.map((source) => (
+                <SelectItem key={source.key} value={source.key}>
+                  {source.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
 
-        <Card>
-          <CardContent className="flex items-center gap-3 p-4">
-            <Select
-              value={sourceKey}
-              onValueChange={(value) => {
-                setSourceKey(value);
-                setPage(1);
-              }}
+        {/* Global Search Bar */}
+        <form
+          className="relative flex-1 max-w-md"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setQuery(searchInput.trim());
+            setPage(1);
+          }}
+        >
+          <Search
+            className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
+            data-icon="inline-start"
+            aria-hidden="true"
+          />
+          <Input
+            size="sm"
+            value={searchInput}
+            onChange={(event) => setSearchInput(event.target.value)}
+            placeholder="搜索影片、导演、年份..."
+            className="pl-8 pr-14 bg-muted/40 border-border/60 focus-visible:bg-background"
+          />
+          {searchInput.trim() && (
+            <button
+              type="submit"
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs font-semibold text-primary hover:bg-primary/10"
             >
-              <SelectTrigger className="w-52">
-                <SelectValue placeholder="选择资源源" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  {browseSources.map((source) => (
-                    <SelectItem key={source.key} value={source.key}>
-                      {source.name}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <form
-              className="relative min-w-0 flex-1"
-              onSubmit={(event) => {
-                event.preventDefault();
-                setQuery(searchInput.trim());
-                setPage(1);
-              }}
-            >
-              <Search
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
-                data-icon="inline-start"
-                aria-hidden="true"
-              />
-              <Input
-                value={searchInput}
-                onChange={(event) => setSearchInput(event.target.value)}
-                placeholder="搜索影视名称、年份或地区"
-                className="pl-9 pr-24"
-              />
-              <Button
-                type="submit"
-                size="sm"
-                className="absolute right-1 top-1/2 -translate-y-1/2"
-              >
-                搜索
-              </Button>
-            </form>
-            <Select
-              value={categoryId}
-              onValueChange={(value) => {
-                setCategoryId(value);
-                setPage(1);
-              }}
-            >
-              <SelectTrigger className="w-36">
-                <SlidersHorizontal
-                  data-icon="inline-start"
-                  aria-hidden="true"
-                />
-                <SelectValue placeholder="分类" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectGroup>
-                  <SelectItem value="all">全部分类</SelectItem>
-                  {categories.map((itemCategory) => (
-                    <SelectItem key={itemCategory.id} value={itemCategory.id}>
-                      {itemCategory.name}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              </SelectContent>
-            </Select>
-            <div className="flex items-center gap-1 rounded-md border bg-muted/30 p-1">
-              <Button
-                type="button"
-                variant={viewMode === "grid" ? "secondary" : "ghost"}
-                size="icon-sm"
-                aria-label="网格视图"
-                aria-pressed={viewMode === "grid"}
-                onClick={() => setViewMode("grid")}
-              >
-                <Grid2X2 data-icon="inline-start" aria-hidden="true" />
-              </Button>
-              <Button
-                type="button"
-                variant={viewMode === "list" ? "secondary" : "ghost"}
-                size="icon-sm"
-                aria-label="列表视图"
-                aria-pressed={viewMode === "list"}
-                onClick={() => setViewMode("list")}
-              >
-                <List data-icon="inline-start" aria-hidden="true" />
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
+              搜索
+            </button>
+          )}
+        </form>
 
-        {loadError && (
-          <Alert variant="destructive">
-            <CircleAlert data-icon="inline-start" aria-hidden="true" />
-            <AlertTitle>资源请求失败</AlertTitle>
-            <AlertDescription>
-              {loadError}。当前不会使用本地数据掩盖这个错误。
-            </AlertDescription>
-          </Alert>
-        )}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <CapabilityBadge status={selectedSource.capability} />
-            <span className="text-sm text-muted-foreground">
-              {selectedSource.capabilityNote}
-            </span>
-          </div>
-          <span className="text-xs text-muted-foreground">
-            {query ? `搜索：${query}` : "推荐内容"}
-          </span>
+        {/* Categories Chips */}
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
+          <button
+            type="button"
+            onClick={() => {
+              setCategoryId("all");
+              setPage(1);
+            }}
+            className={cn(
+              "shrink-0 rounded px-2.5 py-1 text-xs font-medium transition-colors",
+              categoryId === "all"
+                ? "bg-primary text-primary-foreground font-semibold"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
+          >
+            全部
+          </button>
+          {categories.slice(0, 8).map((cat) => (
+            <button
+              key={cat.id}
+              type="button"
+              onClick={() => {
+                setCategoryId(cat.id);
+                setPage(1);
+              }}
+              className={cn(
+                "shrink-0 rounded px-2.5 py-1 text-xs font-medium transition-colors",
+                categoryId === cat.id
+                  ? "bg-primary text-primary-foreground font-semibold"
+                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
+              )}
+            >
+              {cat.name}
+            </button>
+          ))}
         </div>
 
-        {isLoading ? (
-          <CatalogSkeleton viewMode={viewMode} />
-        ) : catalog?.items.length ? (
-          viewMode === "grid" ? (
-            <div className="grid grid-cols-4 gap-4">
-              {catalog.items.map((item) => (
-                <CatalogCard
-                  key={item.id}
-                  item={item}
-                  onOpen={() => setSelectedItem(item)}
-                />
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {catalog.items.map((item) => (
-                <CatalogListItem
-                  key={item.id}
-                  item={item}
-                  onOpen={() => setSelectedItem(item)}
-                />
-              ))}
-            </div>
-          )
-        ) : (
-          <Empty className="min-h-72 border border-dashed bg-card/40">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <Search data-icon="inline-start" aria-hidden="true" />
-              </EmptyMedia>
-              <EmptyTitle>没有匹配内容</EmptyTitle>
-              <EmptyDescription>
-                尝试清除关键词或切换其它资源源。
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
-        )}
+        <div className="ml-auto flex items-center gap-2 shrink-0">
+          <span className="text-xs text-muted-foreground hidden lg:inline">
+            {itemCountText}
+          </span>
 
-        <div className="flex items-center justify-between border-t pt-4">
-          <span className="text-xs text-muted-foreground">
+          {/* View Mode Toggle */}
+          <div className="flex items-center rounded-md border border-border/60 bg-muted/30 p-0.5">
+            <button
+              type="button"
+              className={cn(
+                "rounded p-1.5 transition-colors",
+                viewMode === "grid"
+                  ? "bg-card text-primary shadow-2xs font-semibold"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              aria-label="网格"
+              onClick={() => setViewMode("grid")}
+            >
+              <Grid2X2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className={cn(
+                "rounded p-1.5 transition-colors",
+                viewMode === "list"
+                  ? "bg-card text-primary shadow-2xs font-semibold"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              aria-label="列表"
+              onClick={() => setViewMode("list")}
+            >
+              <List className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Main Content Area */}
+      <ScrollArea className="flex-1">
+        <div className="p-4 flex flex-col gap-4">
+          {loadError && (
+            <Alert variant="destructive" className="py-2.5">
+              <CircleAlert className="size-4" data-icon="inline-start" aria-hidden="true" />
+              <AlertTitle className="text-xs">资源加载异常</AlertTitle>
+              <AlertDescription className="text-xs">{loadError}</AlertDescription>
+            </Alert>
+          )}
+
+          {isLoading ? (
+            <CatalogSkeleton viewMode={viewMode} />
+          ) : catalog?.items.length ? (
+            viewMode === "grid" ? (
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
+                {catalog.items.map((item) => (
+                  <CatalogCard
+                    key={item.id}
+                    item={item}
+                    onOpen={() => setSelectedItem(item)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {catalog.items.map((item) => (
+                  <CatalogListItem
+                    key={item.id}
+                    item={item}
+                    onOpen={() => setSelectedItem(item)}
+                  />
+                ))}
+              </div>
+            )
+          ) : (
+            <Empty className="min-h-64 border-border/40 bg-card/20 py-8">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <Search className="size-4 text-muted-foreground" data-icon="inline-start" aria-hidden="true" />
+                </EmptyMedia>
+                <EmptyTitle className="text-sm">未检索到内容</EmptyTitle>
+                <EmptyDescription className="text-xs">
+                  尝试清除关键词或切换分类与影视源
+                </EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          )}
+        </div>
+        <ScrollBar />
+      </ScrollArea>
+
+      {/* 40px Compact Pagination Footer */}
+      <footer className="flex h-10 shrink-0 items-center justify-between border-t border-border/70 bg-card/30 px-4 text-xs select-none">
+        <div className="flex items-center gap-2 text-muted-foreground text-xs">
+          <span>
             第 {catalog?.page ?? page} / {catalog?.pageCount ?? 1} 页
           </span>
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="icon-sm"
-              aria-label="上一页"
-              disabled={!catalog || catalog.page <= 1 || isLoading}
-              onClick={() => setPage((current) => Math.max(1, current - 1))}
-            >
-              <ChevronLeft data-icon="inline-start" aria-hidden="true" />
-            </Button>
-            <span className="min-w-16 text-center font-mono text-xs text-muted-foreground">
-              {catalog?.page ?? page} / {catalog?.pageCount ?? 1}
-            </span>
-            <Button
-              type="button"
-              variant="outline"
-              size="icon-sm"
-              aria-label="下一页"
-              disabled={
-                !catalog || catalog.page >= catalog.pageCount || isLoading
-              }
-              onClick={() => setPage((current) => current + 1)}
-            >
-              <ChevronRight data-icon="inline-start" aria-hidden="true" />
-            </Button>
-          </div>
+          {query && (
+            <span className="text-primary font-medium">搜索：「{query}」</span>
+          )}
         </div>
-      </div>
-      <ScrollBar />
-    </ScrollArea>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={!catalog || catalog.page <= 1 || isLoading}
+            onClick={() => setPage((current) => Math.max(1, current - 1))}
+          >
+            <ChevronLeft className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+            上一页
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={
+              !catalog || catalog.page >= catalog.pageCount || isLoading
+            }
+            onClick={() => setPage((current) => current + 1)}
+          >
+            下一页
+            <ChevronRight className="size-3.5" data-icon="inline-end" aria-hidden="true" />
+          </Button>
+        </div>
+      </footer>
+    </div>
   );
 }
 
@@ -388,45 +386,64 @@ function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
   const isFavorite = useAppStore((state) =>
     state.favorites.some((favorite) => favorite.id === item.id),
   );
+
   return (
-    <Card className="group overflow-hidden transition-colors hover:border-primary/50">
-      <button type="button" className="block w-full text-left" onClick={onOpen}>
+    <div
+      onClick={onOpen}
+      className="group relative flex flex-col overflow-hidden rounded-md border border-border/60 bg-card/60 transition-all duration-200 hover:-translate-y-1 hover:border-primary/50 hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] cursor-pointer"
+    >
+      {/* 2:3 Cinematic Poster ratio */}
+      <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted/40">
         <MediaPoster
           src={item.poster}
           alt={`${item.name} 海报`}
-          className="aspect-video"
-          imageClassName="transition-transform duration-200 group-hover:scale-[1.03]"
+          className="size-full"
+          imageClassName="transition-transform duration-300 group-hover:scale-105"
         />
-        <CardContent className="p-4">
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <p className="truncate font-medium">{item.name}</p>
-              <p className="mt-1 truncate text-xs text-muted-foreground">
-                {item.year} · {item.area}
-              </p>
-            </div>
-            {isFavorite && (
-              <Star
-                className="shrink-0 fill-primary text-primary"
-                data-icon="inline-end"
-                aria-hidden="true"
-              />
-            )}
+
+        {/* Top Badges */}
+        <div className="absolute top-1.5 left-1.5 right-1.5 flex items-center justify-between pointer-events-none">
+          {item.year ? (
+            <span className="rounded bg-black/60 px-1.5 py-0.5 text-xs font-semibold text-white/90 backdrop-blur-xs">
+              {item.year}
+            </span>
+          ) : <span />}
+          {isFavorite && (
+            <Star
+              className="size-4 fill-primary text-primary filter drop-shadow"
+              data-icon="inline-end"
+              aria-hidden="true"
+            />
+          )}
+        </div>
+
+        {/* Hover Action Overlay */}
+        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 backdrop-blur-2xs transition-opacity duration-200 group-hover:opacity-100">
+          <div className="flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform duration-200 group-hover:scale-110">
+            <Play className="size-4 ml-0.5 fill-current" />
           </div>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {item.categories.slice(0, 2).map((itemCategory) => (
-              <Badge
-                key={itemCategory.id}
-                variant="secondary"
-                className="text-[10px]"
-              >
-                {itemCategory.name}
-              </Badge>
-            ))}
+        </div>
+
+        {/* Category badge at bottom corner */}
+        {item.categories[0] && (
+          <div className="absolute bottom-1.5 right-1.5 pointer-events-none">
+            <span className="rounded bg-black/60 px-1.5 py-0.5 text-xs text-white/80 backdrop-blur-xs">
+              {item.categories[0].name}
+            </span>
           </div>
-        </CardContent>
-      </button>
-    </Card>
+        )}
+      </div>
+
+      {/* Info Block */}
+      <div className="p-2.5 flex flex-col gap-1">
+        <p className="truncate text-xs font-semibold text-foreground group-hover:text-primary transition-colors">
+          {item.name}
+        </p>
+        <p className="truncate text-xs text-muted-foreground">
+          {item.area || "未知地区"} · {item.sourceName}
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -438,70 +455,63 @@ function CatalogListItem({
   onOpen: () => void;
 }) {
   return (
-    <Card className="group">
-      <button
-        type="button"
-        className="flex w-full items-center gap-4 p-3 text-left"
-        onClick={onOpen}
-      >
-        <MediaPoster
-          src={item.poster}
-          alt={`${item.name} 海报`}
-          className="h-20 w-36 shrink-0 rounded-md"
-        />
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p className="truncate font-medium">{item.name}</p>
-            <span className="text-xs text-muted-foreground">{item.year}</span>
-          </div>
-          <p className="mt-1 truncate text-sm text-muted-foreground">
-            {item.description}
+    <div
+      onClick={onOpen}
+      className="group flex items-center gap-3.5 rounded-lg border border-border/60 bg-card/40 p-2.5 transition-all duration-150 hover:border-primary/40 hover:bg-card/70 cursor-pointer"
+    >
+      <MediaPoster
+        src={item.poster}
+        alt={`${item.name} 海报`}
+        className="h-16 w-24 shrink-0 rounded overflow-hidden"
+      />
+      <div className="min-w-0 flex-1 flex flex-col gap-1">
+        <div className="flex items-center gap-2">
+          <p className="truncate text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
+            {item.name}
           </p>
-          <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-            <span>{item.sourceName}</span>
-            <span>·</span>
-            <span>
-              {item.categories
-                .map((itemCategory) => itemCategory.name)
-                .join(" / ")}
-            </span>
-          </div>
+          {item.year && (
+            <span className="text-xs text-muted-foreground">({item.year})</span>
+          )}
+          <Badge variant="secondary" className="text-xs py-0.5 px-2">
+            {item.sourceName}
+          </Badge>
         </div>
-        <ArrowRight
-          className="text-muted-foreground transition-transform group-hover:translate-x-1"
-          data-icon="inline-end"
-          aria-hidden="true"
-        />
-      </button>
-    </Card>
+        <p className="truncate text-xs text-muted-foreground">
+          {item.description || "暂无剧集描述"}
+        </p>
+      </div>
+      <div className="flex items-center gap-2 text-muted-foreground group-hover:text-primary pr-2">
+        <Play className="size-4 fill-current" />
+      </div>
+    </div>
   );
 }
 
 function CatalogSkeleton({ viewMode }: { viewMode: CatalogViewMode }) {
-  if (viewMode === "list")
+  if (viewMode === "list") {
     return (
-      <div className="flex flex-col gap-3">
-        {Array.from({ length: 5 }, (_, index) => (
-          <Card key={index} className="flex items-center gap-4 p-3">
-            <Skeleton className="h-20 w-36 rounded-md" />
-            <div className="flex flex-1 flex-col gap-2">
-              <Skeleton className="h-4 w-48" />
+      <div className="flex flex-col gap-2">
+        {Array.from({ length: 8 }, (_, idx) => (
+          <div key={idx} className="flex items-center gap-3 rounded-md border border-border/40 p-2">
+            <Skeleton className="h-14 w-24 rounded" />
+            <div className="flex flex-1 flex-col gap-1.5">
+              <Skeleton className="h-3.5 w-40" />
               <Skeleton className="h-3 w-3/4" />
             </div>
-          </Card>
+          </div>
         ))}
       </div>
     );
+  }
+
   return (
-    <div className="grid grid-cols-4 gap-4">
-      {Array.from({ length: 8 }, (_, index) => (
-        <Card key={index} className="overflow-hidden">
-          <Skeleton className="aspect-video" />
-          <CardContent className="flex flex-col gap-2 p-4">
-            <Skeleton className="h-4 w-2/3" />
-            <Skeleton className="h-3 w-1/2" />
-          </CardContent>
-        </Card>
+    <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
+      {Array.from({ length: 14 }, (_, idx) => (
+        <div key={idx} className="flex flex-col gap-2 rounded-md border border-border/40 p-1.5">
+          <Skeleton className="aspect-[2/3] w-full rounded" />
+          <Skeleton className="h-3 w-3/4" />
+          <Skeleton className="h-2.5 w-1/2" />
+        </div>
       ))}
     </div>
   );
@@ -547,6 +557,7 @@ function DetailView({
   const selectedLine =
     detail.playLines.find((line) => line.id === selectedLineId) ??
     detail.playLines[0];
+
   const handleEpisode = (
     line: VodPlayLine,
     episodeId: string,
@@ -567,175 +578,163 @@ function DetailView({
   };
 
   return (
-    <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-[1280px] flex-col gap-6 px-8 py-8">
+    <div className="flex h-full flex-col overflow-hidden bg-background">
+      {/* Detail Topbar */}
+      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/40 px-4">
         <Button
           type="button"
           variant="ghost"
-          className="w-fit gap-2 px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+          size="sm"
+          className="gap-1.5 text-muted-foreground hover:text-foreground"
           onClick={onBack}
         >
-          <ArrowLeft data-icon="inline-start" aria-hidden="true" />
-          返回影视库
+          <ArrowLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+          返回列表
         </Button>
-        {detailError && (
-          <Alert variant="destructive">
-            <CircleAlert data-icon="inline-start" aria-hidden="true" />
-            <AlertTitle>详情请求失败</AlertTitle>
-            <AlertDescription>{detailError}</AlertDescription>
-          </Alert>
-        )}
-        <section className="grid grid-cols-[minmax(360px,42%)_1fr] gap-8">
-          <MediaPoster
-            src={detail.poster}
-            alt={`${detail.name} 海报`}
-            className="aspect-video rounded-lg border"
-          />
-          <div className="flex flex-col gap-5">
-            <div className="flex items-start justify-between gap-6">
-              <div>
-                <div className="flex items-center gap-2">
-                  <Badge variant="secondary">{detail.year}</Badge>
-                  <Badge variant="secondary">{detail.area}</Badge>
-                  {detail.categories.slice(0, 3).map((itemCategory) => (
-                    <Badge key={itemCategory.id} variant="outline">
-                      {itemCategory.name}
-                    </Badge>
-                  ))}
-                </div>
-                <h1 className="mt-3 font-display text-4xl font-semibold tracking-tight">
-                  {detail.name}
-                </h1>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  来自 {source.name} · {detail.playLines.length} 条播放线路
-                </p>
-              </div>
-              <Button
-                type="button"
-                variant={isFavorite ? "secondary" : "outline"}
-                className="shrink-0 gap-2"
-                onClick={() => toggleFavorite(detail)}
-              >
-                {isFavorite ? (
-                  <Star
-                    className="fill-primary text-primary"
-                    data-icon="inline-start"
-                    aria-hidden="true"
-                  />
-                ) : (
-                  <Bookmark data-icon="inline-start" aria-hidden="true" />
-                )}
-                {isFavorite ? "已收藏" : "收藏"}
-              </Button>
-            </div>
-            <p className="max-w-3xl text-sm leading-7 text-muted-foreground">
-              {detail.description || "暂无简介。"}
-            </p>
-            <div className="grid grid-cols-2 gap-4 border-y py-4 text-sm">
-              <div>
-                <span className="text-muted-foreground">导演</span>
-                <p className="mt-1 font-medium">
-                  {detail.directors.join(" / ") || "暂无"}
-                </p>
-              </div>
-              <div>
-                <span className="text-muted-foreground">演员</span>
-                <p className="mt-1 font-medium">
-                  {detail.actors.join(" / ") || "暂无"}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <CapabilityBadge status={source.capability} />
-              <span className="text-xs text-muted-foreground">
-                {source.capabilityNote}
-              </span>
-            </div>
-          </div>
-        </section>
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Play data-icon="inline-start" aria-hidden="true" />
-              选集
-            </CardTitle>
-            <CardDescription>
-              点击选集会记录到播放历史，播放器将在下一阶段接入。
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            {detail.playLines.length > 0 ? (
-              <Tabs value={selectedLine?.id} onValueChange={setSelectedLineId}>
-                <TabsList>
-                  {detail.playLines.map((line) => (
-                    <TabsTrigger key={line.id} value={line.id}>
-                      {line.name}
-                    </TabsTrigger>
-                  ))}
-                </TabsList>
-                {detail.playLines.map((line) => (
-                  <TabsContent key={line.id} value={line.id} className="mt-5">
-                    <div className="grid grid-cols-6 gap-2">
-                      {line.episodes.map((episode) => (
-                        <Button
-                          key={episode.id}
-                          type="button"
-                          variant={
-                            selectedEpisode === episode.id
-                              ? "secondary"
-                              : "outline"
-                          }
-                          className="justify-start gap-2"
-                          onClick={() =>
-                            handleEpisode(line, episode.id, episode.name)
-                          }
-                        >
-                          {selectedEpisode === episode.id && (
-                            <Check
-                              data-icon="inline-start"
-                              aria-hidden="true"
-                            />
-                          )}
-                          {episode.name}
-                        </Button>
-                      ))}
-                    </div>
-                  </TabsContent>
-                ))}
-              </Tabs>
-            ) : (
-              <Empty className="min-h-40">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon">
-                    <Info data-icon="inline-start" aria-hidden="true" />
-                  </EmptyMedia>
-                  <EmptyTitle>暂无播放线路</EmptyTitle>
-                  <EmptyDescription>
-                    该源返回了详情，但没有可用的播放选集。
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
-            )}
-          </CardContent>
-        </Card>
-        <Card className="border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)]">
-          <CardContent className="flex items-start gap-3 p-4 text-[color:var(--status-adapter)]">
-            <Info
-              className="mt-0.5 shrink-0"
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant={isFavorite ? "secondary" : "outline"}
+            size="sm"
+            className="gap-1.5"
+            onClick={() => toggleFavorite(detail)}
+          >
+            <Star
+              className={cn("size-4", isFavorite && "fill-primary text-primary")}
               data-icon="inline-start"
               aria-hidden="true"
             />
-            <div>
-              <p className="font-medium">播放地址尚未交给播放器</p>
-              <p className="mt-1 text-sm opacity-80">
-                Moseek 当前只读取普通 CMS
-                返回的线路信息，不自动执行远程脚本，也不会静默下载 JAR。
-              </p>
-            </div>
-          </CardContent>
-        </Card>
+            {isFavorite ? "已收藏" : "加入收藏"}
+          </Button>
+        </div>
       </div>
-      <ScrollBar />
-    </ScrollArea>
+
+      <ScrollArea className="flex-1">
+        <div className="mx-auto max-w-5xl p-6 flex flex-col gap-6">
+          {detailError && (
+            <Alert variant="destructive" className="py-2.5">
+              <CircleAlert className="size-4" data-icon="inline-start" aria-hidden="true" />
+              <AlertTitle className="text-xs">详情获取异常</AlertTitle>
+              <AlertDescription className="text-xs">{detailError}</AlertDescription>
+            </Alert>
+          )}
+
+          {/* Hero Banner Grid */}
+          <div className="grid grid-cols-[200px_1fr] gap-6 items-start">
+            <div className="aspect-[2/3] w-full overflow-hidden rounded-lg border border-border/80 shadow-xl bg-card">
+              <MediaPoster
+                src={detail.poster}
+                alt={`${detail.name} 海报`}
+                className="size-full"
+              />
+            </div>
+
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {detail.year && <Badge variant="secondary">{detail.year}</Badge>}
+                {detail.area && <Badge variant="secondary">{detail.area}</Badge>}
+                {detail.categories.slice(0, 3).map((cat) => (
+                  <Badge key={cat.id} variant="outline">
+                    {cat.name}
+                  </Badge>
+                ))}
+                <span className="text-xs text-muted-foreground ml-auto">
+                  来源：{source.name}
+                </span>
+              </div>
+
+              <h1 className="font-display text-2xl font-bold tracking-tight text-foreground">
+                {detail.name}
+              </h1>
+
+              <p className="text-xs leading-relaxed text-muted-foreground/90 line-clamp-4">
+                {detail.description || "暂无剧集背景简介。"}
+              </p>
+
+              {/* Quick Play First Button */}
+              {selectedLine?.episodes[0] && (
+                <div className="pt-2">
+                  <Button
+                    type="button"
+                    variant="default"
+                    size="sm"
+                    className="gap-2 font-semibold shadow-md shadow-primary/20"
+                    onClick={() =>
+                      handleEpisode(
+                        selectedLine,
+                        selectedLine.episodes[0].id,
+                        selectedLine.episodes[0].name,
+                      )
+                    }
+                  >
+                    <Play className="size-3.5 fill-current" />
+                    立即起播：{selectedLine.episodes[0].name}
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Play Lines & Episodes Picker */}
+          <div className="flex flex-col gap-3 rounded-lg border border-border/80 bg-card/60 p-4">
+            <div className="flex items-center justify-between border-b border-border/60 pb-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-semibold text-foreground">
+                  播放线路
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  (共 {detail.playLines.length} 条)
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {detail.playLines.map((line) => (
+                  <button
+                    key={line.id}
+                    type="button"
+                    onClick={() => setSelectedLineId(line.id)}
+                    className={cn(
+                      "rounded px-2.5 py-1 text-xs font-medium transition-colors",
+                      line.id === selectedLine?.id
+                        ? "bg-primary text-primary-foreground font-semibold"
+                        : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )}
+                  >
+                    {line.name} ({line.episodes.length} 集)
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Episode Grid */}
+            {selectedLine ? (
+              <div className="pt-2">
+                <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">
+                  {selectedLine.episodes.map((ep) => (
+                    <button
+                      key={ep.id}
+                      type="button"
+                      onClick={() => handleEpisode(selectedLine, ep.id, ep.name)}
+                      className={cn(
+                        "flex h-9 items-center justify-center rounded border text-xs font-medium transition-all hover:border-primary/60 hover:text-primary active:scale-95",
+                        selectedEpisode === ep.id
+                          ? "border-primary bg-primary/15 text-primary font-bold shadow-xs"
+                          : "border-border/60 bg-muted/30 text-foreground/80",
+                      )}
+                    >
+                      <span className="truncate px-1.5">{ep.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="py-6 text-center text-xs text-muted-foreground">
+                当前源未解析出可用剧集或播放线路。
+              </div>
+            )}
+          </div>
+        </div>
+        <ScrollBar />
+      </ScrollArea>
+    </div>
   );
 }

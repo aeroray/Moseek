@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   getAdapterProfile,
+  isCandidateMovieSource,
   isMovieLibrarySource,
   isTestableCmsSource,
   isTestableLiveSource,
@@ -135,6 +136,10 @@ describe("adapter registry", () => {
     ).toBe(false);
     expect(
       isMovieLibrarySource(source({ enabled: false, testStatus: "passed" })),
+    ).toBe(false);
+    expect(isCandidateMovieSource(source({ testStatus: "untested" }))).toBe(true);
+    expect(
+      isCandidateMovieSource(source({ enabled: false, testStatus: "untested" })),
     ).toBe(false);
   });
 });

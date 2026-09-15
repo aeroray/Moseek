@@ -6,11 +6,11 @@ import {
   Library,
   Radio,
   Settings2,
-  Video,
+  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { ViewKey } from "@/types/moseek";
@@ -21,96 +21,130 @@ interface AppShellProps {
   onNavigate: (view: ViewKey) => void;
 }
 
-interface NavigationItem {
+interface NavItem {
   key: ViewKey;
   label: string;
   icon: LucideIcon;
+  badge?: number | string;
 }
 
-const navigationGroups: { label: string; items: NavigationItem[] }[] = [
-  {
-    label: "工作区",
-    items: [
-      { key: "browse", label: "影视库", icon: Library },
-      { key: "live", label: "直播", icon: Radio },
-    ],
-  },
-  {
-    label: "我的内容",
-    items: [
-      { key: "favorites", label: "收藏", icon: Clapperboard },
-      { key: "history", label: "播放历史", icon: History },
-    ],
-  },
-  {
-    label: "系统",
-    items: [
-      { key: "config", label: "配置中心", icon: FileSliders },
-      { key: "settings", label: "设置", icon: Settings2 },
-    ],
-  },
+const mainNavItems: NavItem[] = [
+  { key: "browse", label: "影视库", icon: Library },
+  { key: "live", label: "电视直播", icon: Radio },
+  { key: "favorites", label: "我的收藏", icon: Clapperboard },
+  { key: "history", label: "播放历史", icon: History },
+];
+
+const systemNavItems: NavItem[] = [
+  { key: "config", label: "配置与源", icon: FileSliders },
+  { key: "settings", label: "设置中心", icon: Settings2 },
 ];
 
 export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
   const sourceCount = useAppStore((state) => state.sources.length);
+  const favoritesCount = useAppStore((state) => state.favorites.length);
 
   return (
-    <div className="flex h-screen min-h-[720px] min-w-[1200px] bg-background text-foreground">
-      <aside className="flex w-64 shrink-0 flex-col border-r border-sidebar-border bg-sidebar px-3 py-4">
-        <div className="flex items-center gap-3 px-3 pb-7">
-          <div className="flex size-9 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm">
-            <Video data-icon="inline-start" aria-hidden="true" />
+    <TooltipProvider delayDuration={150}>
+      <div className="flex h-screen min-h-[640px] min-w-[1080px] bg-background text-foreground antialiased selection:bg-primary/20 selection:text-primary">
+        {/* 54px Ultra-Slim Rail (方案一：极光黑曜微轨) */}
+        <aside
+          className="relative z-40 flex w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar/95 py-3 select-none backdrop-blur-md"
+          data-tauri-drag-region
+        >
+          {/* Brand Mark */}
+          <div className="mb-4 flex flex-col items-center">
+            <button
+              type="button"
+              onClick={() => onNavigate("browse")}
+              className="group relative flex size-9 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary transition-all duration-200 hover:scale-105 hover:border-primary hover:bg-primary/20 hover:shadow-[0_0_12px_rgba(229,169,60,0.3)] active:scale-95"
+              title="拾影 · 万千影画，一拾即得"
+            >
+              <span className="font-display text-sm font-bold tracking-tight">拾</span>
+              <span className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-primary animate-pulse" />
+            </button>
           </div>
-          <div className="min-w-0">
-            <p className="font-display text-base font-semibold tracking-tight text-sidebar-foreground">
-              Moseek
-            </p>
-            <p className="text-xs text-muted-foreground">内容操作台</p>
-          </div>
-        </div>
 
-        <nav className="flex flex-1 flex-col gap-6" aria-label="主导航">
-          {navigationGroups.map((group) => (
-            <div key={group.label} className="flex flex-col gap-2">
-              <p className="px-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
-                {group.label}
-              </p>
-              <div className="flex flex-col gap-1">
-                {group.items.map((item) => {
-                  const Icon = item.icon;
-                  const isActive = item.key === activeView;
-                  return (
-                    <Button
-                      key={item.key}
+          {/* Main Navigation Rail */}
+          <nav className="flex flex-1 flex-col items-center gap-1.5" aria-label="核心导航">
+            {mainNavItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = item.key === activeView;
+              const hasBadge = item.key === "favorites" && favoritesCount > 0;
+
+              return (
+                <Tooltip key={item.key}>
+                  <TooltipTrigger asChild>
+                    <button
                       type="button"
-                      variant="ghost"
-                      className={cn(
-                        "h-10 justify-start gap-3 rounded-md px-3 text-sm font-medium text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                        isActive &&
-                          "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm hover:bg-sidebar-primary hover:text-sidebar-primary-foreground",
-                      )}
-                      aria-current={isActive ? "page" : undefined}
                       onClick={() => onNavigate(item.key)}
+                      aria-label={item.label}
+                      aria-current={isActive ? "page" : undefined}
+                      className={cn(
+                        "relative flex size-9 items-center justify-center rounded-md text-sidebar-foreground/60 transition-all duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground active:scale-95",
+                        isActive &&
+                          "bg-primary/15 text-primary shadow-xs hover:bg-primary/20 hover:text-primary font-semibold before:absolute before:left-[-6px] before:h-4 before:w-1 before:rounded-r-full before:bg-primary",
+                      )}
                     >
-                      <Icon data-icon="inline-start" aria-hidden="true" />
-                      <span>{item.label}</span>
-                      {item.key === "config" && (
-                        <span className="ml-auto rounded-full bg-sidebar-accent px-2 py-0.5 text-[10px] font-semibold text-sidebar-accent-foreground">
+                      <Icon className={cn("size-4 transition-transform duration-150", isActive && "scale-110")} />
+                      {hasBadge && (
+                        <span className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary" />
+                      )}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right" sideOffset={12} className="font-medium">
+                    {item.label}
+                    {hasBadge && ` (${favoritesCount})`}
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </nav>
+
+          {/* System & Settings Rail Bottom */}
+          <div className="flex flex-col items-center gap-1.5 pt-2 border-t border-sidebar-border/60">
+            {systemNavItems.map((item) => {
+              const Icon = item.icon;
+              const isActive = item.key === activeView;
+              const hasCount = item.key === "config" && sourceCount > 0;
+
+              return (
+                <Tooltip key={item.key}>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="button"
+                      onClick={() => onNavigate(item.key)}
+                      aria-label={item.label}
+                      aria-current={isActive ? "page" : undefined}
+                      className={cn(
+                        "relative flex size-9 items-center justify-center rounded-md text-sidebar-foreground/60 transition-all duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground active:scale-95",
+                        isActive &&
+                          "bg-primary/15 text-primary shadow-xs hover:bg-primary/20 hover:text-primary font-semibold before:absolute before:left-[-6px] before:h-4 before:w-1 before:rounded-r-full before:bg-primary",
+                      )}
+                    >
+                      <Icon className={cn("size-4 transition-transform duration-150", isActive && "scale-110")} />
+                      {hasCount && (
+                        <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-sidebar-accent px-1 text-xs font-bold text-sidebar-accent-foreground">
                           {sourceCount}
                         </span>
                       )}
-                    </Button>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </nav>
-      </aside>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent side="right" sideOffset={12} className="font-medium">
+                    {item.label}
+                    {hasCount && ` (${sourceCount} 个源)`}
+                  </TooltipContent>
+                </Tooltip>
+              );
+            })}
+          </div>
+        </aside>
 
-      <section className="flex min-w-0 flex-1 flex-col">
-        <main className="min-h-0 flex-1">{children}</main>
-      </section>
-    </div>
+        {/* Main Work Area */}
+        <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background">
+          <main className="relative min-h-0 flex-1 overflow-hidden">{children}</main>
+        </section>
+      </div>
+    </TooltipProvider>
   );
 }

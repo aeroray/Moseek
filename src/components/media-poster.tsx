@@ -23,7 +23,7 @@ export function MediaPoster({
   }, [src]);
 
   return (
-    <div className={cn("relative w-full overflow-hidden bg-muted", className)}>
+    <div className={cn("relative w-full overflow-hidden bg-muted/60 transition-colors", className)}>
       {!imageFailed ? (
         <img
           src={src}
@@ -36,10 +36,10 @@ export function MediaPoster({
         <div
           role="img"
           aria-label={`${alt}，暂无可用图片`}
-          className="flex size-full flex-col items-center justify-center gap-2 bg-muted text-muted-foreground"
+          className="flex size-full flex-col items-center justify-center gap-1.5 bg-gradient-to-b from-card/80 to-muted/80 text-muted-foreground/60 select-none"
         >
-          <Film data-icon="inline-start" aria-hidden="true" />
-          <span className="text-xs">暂无海报</span>
+          <Film data-icon="inline-start" aria-hidden="true" className="size-5 opacity-40" />
+          <span className="text-xs font-medium tracking-tight">拾影</span>
         </div>
       )}
     </div>

@@ -63,7 +63,7 @@ export function CapabilityBadge({
       variant="outline"
       className={cn("gap-1.5 font-medium", config.className)}
     >
-      <Icon data-icon="inline-start" aria-hidden="true" />
+      <Icon className="size-3" data-icon="inline-start" aria-hidden="true" />
       {!compact && config.label}
     </Badge>
   );

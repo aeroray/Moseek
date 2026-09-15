@@ -50,7 +50,7 @@ export function MediaDiagnosticPanel({
         <div className="flex items-start justify-between gap-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-base">
-              <ScrollText data-icon="inline-start" aria-hidden="true" />
+              <ScrollText className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
               播放诊断
             </CardTitle>
             <CardDescription>
@@ -65,9 +65,9 @@ export function MediaDiagnosticPanel({
             onClick={() => void copyReport()}
           >
             {copyState === "done" ? (
-              <ClipboardCheck data-icon="inline-start" aria-hidden="true" />
+              <ClipboardCheck className="size-3.5" data-icon="inline-start" aria-hidden="true" />
             ) : (
-              <ClipboardCopy data-icon="inline-start" aria-hidden="true" />
+              <ClipboardCopy className="size-3.5" data-icon="inline-start" aria-hidden="true" />
             )}
             {copyState === "done"
               ? "已复制"

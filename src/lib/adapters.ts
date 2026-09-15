@@ -285,3 +285,7 @@ export function isMovieLibrarySource(source: SourceRecord) {
     source.testStatus === "passed"
   );
 }
+
+export function isCandidateMovieSource(source: SourceRecord) {
+  return source.enabled && isTestableCmsSource(source);
+}

@@ -321,18 +321,22 @@ export function SettingsView({
 
   return (
     <div className="h-full overflow-auto">
-      <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-6 px-8 py-8">
-        <div>
-          <p className="text-sm font-medium text-primary">系统偏好</p>
-          <h1 className="mt-1 font-display text-3xl font-semibold tracking-tight">
-            设置
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            控制主题、播放行为和本机访问边界。
-          </p>
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 p-5">
+        <div className="flex items-center justify-between border-b border-border/60 pb-3">
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="font-display text-lg font-bold tracking-tight text-foreground">
+                系统设置
+              </h1>
+              <Badge variant="secondary">拾影 · 偏好设置</Badge>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              万千影画，一拾即得 · 主题外观、播放引擎与网络安全控制
+            </p>
+          </div>
         </div>
 
-        <Tabs defaultValue="appearance" className="flex flex-col gap-6">
+        <Tabs defaultValue="appearance" className="flex flex-col gap-4">
           <TabsList className="w-fit">
             <TabsTrigger value="appearance">外观</TabsTrigger>
             <TabsTrigger value="player">播放器</TabsTrigger>
@@ -347,7 +351,7 @@ export function SettingsView({
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <MonitorCog data-icon="inline-start" aria-hidden="true" />
+                  <MonitorCog className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   主题模式
                 </CardTitle>
                 <CardDescription>默认跟随 Windows 系统外观。</CardDescription>
@@ -365,6 +369,7 @@ export function SettingsView({
                       <SelectItem value="system">
                         <span className="flex items-center gap-2">
                           <MonitorCog
+                            className="size-4"
                             data-icon="inline-start"
                             aria-hidden="true"
                           />
@@ -373,13 +378,13 @@ export function SettingsView({
                       </SelectItem>
                       <SelectItem value="light">
                         <span className="flex items-center gap-2">
-                          <Sun data-icon="inline-start" aria-hidden="true" />
+                          <Sun className="size-4" data-icon="inline-start" aria-hidden="true" />
                           浅色
                         </span>
                       </SelectItem>
                       <SelectItem value="dark">
                         <span className="flex items-center gap-2">
-                          <Moon data-icon="inline-start" aria-hidden="true" />
+                          <Moon className="size-4" data-icon="inline-start" aria-hidden="true" />
                           深色
                         </span>
                       </SelectItem>
@@ -446,7 +451,7 @@ export function SettingsView({
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <ShieldCheck data-icon="inline-start" aria-hidden="true" />
+                  <ShieldCheck className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   执行边界
                 </CardTitle>
                 <CardDescription>
@@ -496,7 +501,7 @@ export function SettingsView({
             <Card className="col-span-2">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <FileUp data-icon="inline-start" aria-hidden="true" />
+                  <FileUp className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   本地脚本档案
                 </CardTitle>
                 <CardDescription>
@@ -522,11 +527,12 @@ export function SettingsView({
                   <Button
                     type="button"
                     variant="outline"
-                    className="gap-2"
+                    size="sm"
+                    className="gap-1.5"
                     onClick={() => scriptFileInputRef.current?.click()}
                     disabled={!isTauriRuntime() || isLoadingArchives}
                   >
-                    <FileUp data-icon="inline-start" aria-hidden="true" />
+                    <FileUp className="size-4" data-icon="inline-start" aria-hidden="true" />
                     导入本地脚本
                   </Button>
                 </div>
@@ -573,7 +579,7 @@ export function SettingsView({
                           <p className="truncate text-sm font-medium">
                             {archive.name}
                           </p>
-                          <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                          <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
                             {archive.fileName} · sha256{" "}
                             {archive.sha256.slice(0, 16)}…
                           </p>
@@ -615,7 +621,7 @@ export function SettingsView({
                             void handleExecuteScriptArchive(archive)
                           }
                         >
-                          <Play data-icon="inline-start" aria-hidden="true" />
+                          <Play className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                           执行
                         </Button>
                         <Button
@@ -628,6 +634,7 @@ export function SettingsView({
                           }
                         >
                           <ShieldX
+                            className="size-4"
                             data-icon="inline-start"
                             aria-hidden="true"
                           />
@@ -641,7 +648,7 @@ export function SettingsView({
                           disabled={archive.enabled}
                           onClick={() => void handlePurgeScriptArchive(archive)}
                         >
-                          <Trash2 data-icon="inline-start" aria-hidden="true" />
+                          <Trash2 className="size-4" data-icon="inline-start" aria-hidden="true" />
                         </Button>
                       </div>
                     ))}
@@ -715,11 +722,12 @@ export function SettingsView({
                   />
                   <Button
                     type="button"
-                    className="w-fit gap-2"
+                    size="sm"
+                    className="w-fit gap-1.5"
                     onClick={() => void handleExecuteScript()}
                     disabled={isExecutingScript || !isTauriRuntime()}
                   >
-                    <Check data-icon="inline-start" aria-hidden="true" />
+                    <Check className="size-4" data-icon="inline-start" aria-hidden="true" />
                     {isExecutingScript ? "执行中..." : "执行本地脚本"}
                   </Button>
                 </div>
@@ -737,7 +745,7 @@ export function SettingsView({
                       {scriptExecutionLogs.slice(0, 4).map((log) => (
                         <div
                           key={log.id}
-                          className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground"
+                          className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
                         >
                           <div className="flex min-w-0 items-center gap-2">
                             <Badge
@@ -791,7 +799,7 @@ export function SettingsView({
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <Trash2 data-icon="inline-start" aria-hidden="true" />
+                  <Trash2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   数据清理
                 </CardTitle>
                 <CardDescription>

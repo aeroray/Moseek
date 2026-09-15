@@ -917,7 +917,7 @@ export function MediaPlayer({
             size="sm"
             onClick={() => retryRef.current?.()}
           >
-            <RotateCw data-icon="inline-start" aria-hidden="true" />
+            <RotateCw className="size-3.5" data-icon="inline-start" aria-hidden="true" />
             重试
           </Button>
         </div>

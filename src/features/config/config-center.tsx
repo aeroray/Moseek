@@ -825,49 +825,55 @@ export function ConfigCenter() {
 
   return (
     <div className="h-full overflow-auto">
-      <div className="mx-auto flex w-full max-w-[1520px] flex-col gap-6 px-8 py-8">
-        <section className="flex items-end justify-between gap-8">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-5">
+        <section className="flex items-center justify-between gap-4 border-b border-border/60 pb-3">
           <div>
-            <h1 className="font-display text-3xl font-semibold tracking-tight">
-              配置中心
-            </h1>
-            <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-              这里是 Moseek
-              的安全边界。原始配置、标准化数据和每个源的能力状态分开保存，任何被阻止的依赖都会明确说明原因。
+            <div className="flex items-center gap-2">
+              <h1 className="font-display text-lg font-bold tracking-tight text-foreground">
+                配置与源
+              </h1>
+              <Badge variant="secondary">
+                {sources.length} 个解析源
+              </Badge>
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              集中管理多套影视与直播配置档案，实时监控源探针状态
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Button
               type="button"
               variant="outline"
-              className="gap-2"
+              size="sm"
+              className="gap-1.5"
               disabled={testableSources.length === 0 || testingKeys.size > 0}
               onClick={() => void handleTestAll()}
             >
               {testingKeys.size > 0 ? (
                 <LoaderCircle
-                  className="animate-spin"
+                  className="size-3.5 animate-spin"
                   data-icon="inline-start"
                   aria-hidden="true"
                 />
               ) : (
-                <FlaskConical data-icon="inline-start" aria-hidden="true" />
+                <FlaskConical className="size-3.5" data-icon="inline-start" aria-hidden="true" />
               )}
               {testingKeys.size > 0
-                ? `测试中 ${testingKeys.size}/${testableSources.length}`
-                : `测试支持源（${testableSources.length}）`}
+                ? `测速中 ${testingKeys.size}/${testableSources.length}`
+                : `全部测速 (${testableSources.length})`}
             </Button>
             <Button
               type="button"
               variant="outline"
-              className="gap-2"
+              size="sm"
+              className="gap-1.5"
               onClick={handleExport}
             >
-              <Download data-icon="inline-start" aria-hidden="true" />
-              导出标准配置
+              <Download className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+              导出
             </Button>
-            <Button type="button" className="gap-2" onClick={openImportDialog}>
-              <Upload data-icon="inline-start" aria-hidden="true" />
+            <Button type="button" size="sm" className="gap-1.5 font-semibold" onClick={openImportDialog}>
+              <Upload className="size-3.5" data-icon="inline-start" aria-hidden="true" />
               导入配置
             </Button>
           </div>
@@ -905,18 +911,18 @@ export function ConfigCenter() {
         )}
 
         <Card>
-          <CardHeader className="border-b pb-4">
+          <CardHeader className="border-b border-border/60 pb-3">
             <div className="flex items-center justify-between gap-4">
               <div>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <Layers3 data-icon="inline-start" aria-hidden="true" />
-                  配置档
+                  <Layers3 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
+                  配置档案库
                 </CardTitle>
-                <CardDescription>
-                  每份配置独立保存。影视库、直播和源启停只作用于当前配置。
+                <CardDescription className="text-xs">
+                  每套配置独立保存，点击即可秒级切换主用源
                 </CardDescription>
               </div>
-              <Badge variant="secondary">{configDocuments.length} 份</Badge>
+              <Badge variant="secondary">{configDocuments.length} 套配置</Badge>
             </div>
           </CardHeader>
           <CardContent className="p-0">
@@ -977,6 +983,7 @@ export function ConfigCenter() {
                               onClick={() => setDeleteCandidate(document)}
                             >
                               <Trash2
+                                className="size-4"
                                 data-icon="inline-start"
                                 aria-hidden="true"
                               />
@@ -992,7 +999,7 @@ export function ConfigCenter() {
               <Empty className="min-h-56">
                 <EmptyHeader>
                   <EmptyMedia variant="icon">
-                    <Layers3 data-icon="inline-start" aria-hidden="true" />
+                    <Layers3 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   </EmptyMedia>
                   <EmptyTitle>还没有配置档</EmptyTitle>
                   <EmptyDescription>
@@ -1038,20 +1045,20 @@ export function ConfigCenter() {
         <Tabs defaultValue="sources" className="flex flex-col gap-5">
           <div className="flex items-center justify-between gap-4">
             <TabsList>
-              <TabsTrigger value="sources" className="gap-2">
-                <ListFilter data-icon="inline-start" aria-hidden="true" />
+              <TabsTrigger value="sources" className="gap-1.5">
+                <ListFilter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                 资源源
               </TabsTrigger>
-              <TabsTrigger value="adapters" className="gap-2">
-                <Link2 data-icon="inline-start" aria-hidden="true" />
+              <TabsTrigger value="adapters" className="gap-1.5">
+                <Link2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                 适配器矩阵
               </TabsTrigger>
-              <TabsTrigger value="raw" className="gap-2">
-                <Code2 data-icon="inline-start" aria-hidden="true" />
+              <TabsTrigger value="raw" className="gap-1.5">
+                <Code2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                 原始配置
               </TabsTrigger>
-              <TabsTrigger value="report" className="gap-2">
-                <FileJson data-icon="inline-start" aria-hidden="true" />
+              <TabsTrigger value="report" className="gap-1.5">
+                <FileJson className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                 解析报告
               </TabsTrigger>
             </TabsList>
@@ -1077,15 +1084,16 @@ export function ConfigCenter() {
                   <div className="flex items-center gap-2">
                     <div className="relative w-64">
                       <Search
-                        className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
                         data-icon="inline-start"
                         aria-hidden="true"
                       />
                       <Input
+                        size="sm"
                         value={query}
                         onChange={(event) => setQuery(event.target.value)}
                         placeholder="搜索源名称、key 或 API"
-                        className="pl-9"
+                        className="pl-8"
                       />
                     </div>
                     <Select
@@ -1094,8 +1102,8 @@ export function ConfigCenter() {
                         setSourceFilter(value as SourceFilter)
                       }
                     >
-                      <SelectTrigger className="w-40">
-                        <Filter data-icon="inline-start" aria-hidden="true" />
+                      <SelectTrigger size="sm" className="w-36">
+                        <Filter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                         <SelectValue placeholder="筛选状态" />
                       </SelectTrigger>
                       <SelectContent>
@@ -1154,11 +1162,13 @@ export function ConfigCenter() {
                                 <div className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
                                   {source.sourceType === "live" ? (
                                     <Globe2
+                                      className="size-4"
                                       data-icon="inline-start"
                                       aria-hidden="true"
                                     />
                                   ) : (
                                     <FileJson
+                                      className="size-4"
                                       data-icon="inline-start"
                                       aria-hidden="true"
                                     />
@@ -1230,12 +1240,13 @@ export function ConfigCenter() {
                                 >
                                   {testingKeys.has(source.key) ? (
                                     <LoaderCircle
-                                      className="animate-spin"
+                                      className="size-3.5 animate-spin"
                                       data-icon="inline-start"
                                       aria-hidden="true"
                                     />
                                   ) : (
                                     <TestTube2
+                                      className="size-3.5"
                                       data-icon="inline-start"
                                       aria-hidden="true"
                                     />
@@ -1262,7 +1273,7 @@ export function ConfigCenter() {
                   <Empty className="min-h-80">
                     <EmptyHeader>
                       <EmptyMedia variant="icon">
-                        <Search data-icon="inline-start" aria-hidden="true" />
+                        <Search className="size-4" data-icon="inline-start" aria-hidden="true" />
                       </EmptyMedia>
                       <EmptyTitle>没有匹配的资源源</EmptyTitle>
                       <EmptyDescription>
@@ -1277,7 +1288,7 @@ export function ConfigCenter() {
                         setSourceFilter("all");
                       }}
                     >
-                      <X data-icon="inline-start" aria-hidden="true" />
+                      <X className="size-4" data-icon="inline-start" aria-hidden="true" />
                       清除筛选
                     </Button>
                   </Empty>
@@ -1318,7 +1329,7 @@ export function ConfigCenter() {
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <CardTitle className="flex items-center gap-2 text-base">
-                      <Link2 data-icon="inline-start" aria-hidden="true" />
+                      <Link2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                       适配器能力矩阵
                     </CardTitle>
                     <CardDescription>
@@ -1331,7 +1342,7 @@ export function ConfigCenter() {
                       setAdapterFilter(value as AdapterFilter)
                     }
                   >
-                    <SelectTrigger className="w-40" aria-label="筛选适配器状态">
+                    <SelectTrigger size="sm" className="w-36" aria-label="筛选适配器状态">
                       <SelectValue placeholder="适配器状态" />
                     </SelectTrigger>
                     <SelectContent>
@@ -1364,7 +1375,7 @@ export function ConfigCenter() {
                           <TableCell className="pl-6">
                             <div>
                               <p className="font-medium">{adapter.label}</p>
-                              <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                              <p className="mt-1 font-mono text-xs text-muted-foreground">
                                 {adapter.id}
                               </p>
                             </div>
@@ -1379,7 +1390,7 @@ export function ConfigCenter() {
                                   <Badge
                                     key={operation}
                                     variant="secondary"
-                                    className="text-[10px]"
+                                    className="text-xs py-0.5 px-2"
                                   >
                                     {operation}
                                   </Badge>
@@ -1412,7 +1423,7 @@ export function ConfigCenter() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <Code2 data-icon="inline-start" aria-hidden="true" />
+                  <Code2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   原始配置文本
                 </CardTitle>
                 <CardDescription>
@@ -1437,7 +1448,7 @@ export function ConfigCenter() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <FileJson data-icon="inline-start" aria-hidden="true" />
+                  <FileJson className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   解析报告
                 </CardTitle>
                 <CardDescription>
@@ -1577,6 +1588,7 @@ export function ConfigCenter() {
               <Button
                 type="button"
                 variant={importMode === "remote" ? "secondary" : "ghost"}
+                size="sm"
                 className="gap-2"
                 onClick={() => {
                   setImportMode("remote");
@@ -1584,12 +1596,13 @@ export function ConfigCenter() {
                   setParseState({ type: "idle", message: "" });
                 }}
               >
-                <Globe2 data-icon="inline-start" aria-hidden="true" />
+                <Globe2 className="size-4" data-icon="inline-start" aria-hidden="true" />
                 远程 URL
               </Button>
               <Button
                 type="button"
                 variant={importMode === "local" ? "secondary" : "ghost"}
+                size="sm"
                 className="gap-2"
                 onClick={() => {
                   setImportMode("local");
@@ -1597,7 +1610,7 @@ export function ConfigCenter() {
                   setParseState({ type: "idle", message: "" });
                 }}
               >
-                <FileUp data-icon="inline-start" aria-hidden="true" />
+                <FileUp className="size-4" data-icon="inline-start" aria-hidden="true" />
                 本地文件
               </Button>
             </div>
@@ -1615,15 +1628,16 @@ export function ConfigCenter() {
                   <Button
                     type="button"
                     variant="secondary"
-                    className="shrink-0 gap-2"
+                    size="sm"
+                    className="shrink-0 gap-1.5"
                     onClick={handleFetchRemote}
                     disabled={isFetchingRemote || !sourceInput.trim()}
                   >
-                    <Globe2 data-icon="inline-start" aria-hidden="true" />
+                    <Globe2 className="size-4" data-icon="inline-start" aria-hidden="true" />
                     {isFetchingRemote ? "请求中..." : "获取配置"}
                   </Button>
                 </div>
-                <p className="text-[11px] text-muted-foreground">
+                <p className="text-xs text-muted-foreground">
                   远程配置中的 ./ 相对直播和资源路径会按配置 URL
                   的目录解析；本地文件不会猜测远程基址。
                 </p>
@@ -1690,22 +1704,22 @@ export function ConfigCenter() {
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="gap-2"
+                    className="gap-1.5"
                     onClick={handleFormatConfig}
                     disabled={!importText.trim()}
                   >
-                    <Braces data-icon="inline-start" aria-hidden="true" />
+                    <Braces className="size-4" data-icon="inline-start" aria-hidden="true" />
                     格式化
                   </Button>
                   <Button
                     type="button"
                     variant="ghost"
                     size="sm"
-                    className="gap-2"
+                    className="gap-1.5"
                     onClick={handleRepairConfig}
                     disabled={!importText.trim()}
                   >
-                    <WandSparkles data-icon="inline-start" aria-hidden="true" />
+                    <WandSparkles className="size-4" data-icon="inline-start" aria-hidden="true" />
                     修正配置
                   </Button>
                 </div>
@@ -1719,7 +1733,7 @@ export function ConfigCenter() {
             </div>
             {duplicateMatch && (
               <Alert>
-                <Info data-icon="inline-start" aria-hidden="true" />
+                <Info className="size-4" data-icon="inline-start" aria-hidden="true" />
                 <AlertTitle>检测到重复配置</AlertTitle>
                 <AlertDescription className="flex flex-col gap-1.5">
                   <span>{describeDuplicateMatch(duplicateMatch)}</span>
@@ -1736,9 +1750,9 @@ export function ConfigCenter() {
                 }
               >
                 {parseState.type === "success" ? (
-                  <Check data-icon="inline-start" aria-hidden="true" />
+                  <Check className="size-4" data-icon="inline-start" aria-hidden="true" />
                 ) : (
-                  <AlertTriangle data-icon="inline-start" aria-hidden="true" />
+                  <AlertTriangle className="size-4" data-icon="inline-start" aria-hidden="true" />
                 )}
                 <AlertTitle>
                   {parseState.type === "success"
@@ -1755,18 +1769,20 @@ export function ConfigCenter() {
                 <Button
                   type="button"
                   variant="outline"
+                  size="sm"
                   onClick={handleSkipDuplicateImport}
                 >
-                  <X data-icon="inline-start" aria-hidden="true" />
+                  <X className="size-4" data-icon="inline-start" aria-hidden="true" />
                   跳过
                 </Button>
                 <Button
                   type="button"
-                  className="gap-2"
+                  size="sm"
+                  className="gap-1.5"
                   onClick={() => void handleConfirmDuplicateImport()}
                   disabled={isParsing}
                 >
-                  <FileJson data-icon="inline-start" aria-hidden="true" />
+                  <FileJson className="size-4" data-icon="inline-start" aria-hidden="true" />
                   {isParsing ? "导入中..." : "继续导入"}
                 </Button>
               </>
@@ -1775,17 +1791,19 @@ export function ConfigCenter() {
                 <Button
                   type="button"
                   variant="outline"
+                  size="sm"
                   onClick={() => setImportOpen(false)}
                 >
                   取消
                 </Button>
                 <Button
                   type="button"
-                  className="gap-2"
+                  size="sm"
+                  className="gap-1.5"
                   onClick={handleParse}
                   disabled={isParsing || !importText.trim()}
                 >
-                  <FileJson data-icon="inline-start" aria-hidden="true" />
+                  <FileJson className="size-4" data-icon="inline-start" aria-hidden="true" />
                   {isParsing ? "解析中..." : "解析配置"}
                 </Button>
               </>
@@ -1828,13 +1846,13 @@ export function ConfigCenter() {
           if (!open) setInspectedSourceKey(null);
         }}
       >
-        <SheetContent className="w-[480px] sm:max-w-[480px]">
+        <SheetContent className="w-[460px] sm:max-w-[460px] p-0 flex flex-col h-full overflow-hidden border-l border-border/80 bg-card/95 backdrop-blur-md">
           {inspectedSource && (
             <>
-              <SheetHeader>
+              <SheetHeader className="px-6 pt-5 pb-4 border-b border-border/60 bg-card/40 shrink-0">
                 <div className="flex items-center gap-2">
                   <CapabilityBadge status={inspectedSource.capability} />
-                  <Badge variant="outline">
+                  <Badge variant="outline" className="text-xs">
                     {inspectedSource.sourceType === "cms"
                       ? "普通 CMS"
                       : inspectedSource.sourceType === "live"
@@ -1842,85 +1860,94 @@ export function ConfigCenter() {
                         : "解析服务"}
                   </Badge>
                 </div>
-                <SheetTitle className="mt-3">{inspectedSource.name}</SheetTitle>
-                <SheetDescription>
-                  {inspectedSource.capabilityNote}
-                </SheetDescription>
+                <SheetTitle className="mt-2 text-base font-bold tracking-tight">
+                  {inspectedSource.name}
+                </SheetTitle>
+                {inspectedSource.capabilityNote && (
+                  <SheetDescription className="mt-0.5 text-xs leading-5 text-muted-foreground">
+                    {inspectedSource.capabilityNote}
+                  </SheetDescription>
+                )}
               </SheetHeader>
-              <ScrollArea className="flex-1 pr-4">
-                <div className="flex flex-col gap-6 py-6">
+
+              <ScrollArea className="flex-1 min-h-0 w-full overflow-hidden">
+                <div className="flex flex-col gap-5 px-6 py-5">
                   <DetailSection title="标准化字段">
-                    <DetailRow label="key" value={inspectedSource.key} mono />
-                    <DetailRow
-                      label="sourceType"
-                      value={inspectedSource.sourceType}
-                      mono
-                    />
-                    <DetailRow
-                      label="sourceDialect"
-                      value={inspectedSource.sourceDialect ?? "unknown"}
-                      mono
-                    />
-                    {inspectedSource.description && (
+                    <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+                      <DetailRow label="key" value={inspectedSource.key} mono />
                       <DetailRow
-                        label="description"
-                        value={inspectedSource.description}
-                      />
-                    )}
-                    <DetailRow
-                      label="status"
-                      value={
-                        inspectedSource.status === false ? "false" : "true"
-                      }
-                      mono
-                    />
-                    <DetailRow
-                      label="searchable"
-                      value={inspectedSource.searchable ? "true" : "false"}
-                      mono
-                    />
-                    <DetailRow
-                      label="filterable"
-                      value={inspectedSource.filterable ? "true" : "false"}
-                      mono
-                    />
-                    <DetailRow
-                      label="requestCount"
-                      value={String(inspectedSource.requestCount)}
-                      mono
-                    />
-                    <DetailRow
-                      label="testStatus"
-                      value={inspectedSource.testStatus ?? "untested"}
-                      mono
-                    />
-                    {inspectedSource.testMessage && (
-                      <DetailRow
-                        label="testMessage"
-                        value={inspectedSource.testMessage}
-                      />
-                    )}
-                    {inspectedSource.testDurationMs !== undefined && (
-                      <DetailRow
-                        label="testDurationMs"
-                        value={`${inspectedSource.testDurationMs} ms`}
+                        label="sourceType"
+                        value={inspectedSource.sourceType}
                         mono
                       />
-                    )}
+                      <DetailRow
+                        label="sourceDialect"
+                        value={inspectedSource.sourceDialect ?? "unknown"}
+                        mono
+                      />
+                      {inspectedSource.description && (
+                        <DetailRow
+                          label="description"
+                          value={inspectedSource.description}
+                        />
+                      )}
+                      <DetailRow
+                        label="status"
+                        value={
+                          inspectedSource.status === false ? "false" : "true"
+                        }
+                        mono
+                      />
+                      <DetailRow
+                        label="searchable"
+                        value={inspectedSource.searchable ? "true" : "false"}
+                        mono
+                      />
+                      <DetailRow
+                        label="filterable"
+                        value={inspectedSource.filterable ? "true" : "false"}
+                        mono
+                      />
+                      <DetailRow
+                        label="requestCount"
+                        value={String(inspectedSource.requestCount)}
+                        mono
+                      />
+                      <DetailRow
+                        label="testStatus"
+                        value={inspectedSource.testStatus ?? "untested"}
+                        mono
+                      />
+                      {inspectedSource.testMessage && (
+                        <DetailRow
+                          label="testMessage"
+                          value={inspectedSource.testMessage}
+                        />
+                      )}
+                      {inspectedSource.testDurationMs !== undefined && (
+                        <DetailRow
+                          label="testDurationMs"
+                          value={`${inspectedSource.testDurationMs} ms`}
+                          mono
+                        />
+                      )}
+                    </div>
                   </DetailSection>
+
                   <AdapterDetail source={inspectedSource} />
+
                   {inspectedSource.sourceType === "cms" &&
                     (inspectedSource.siteProtocol === "js-extension" ||
                       (inspectedSource.scriptArchiveId !== null &&
                         inspectedSource.scriptArchiveId !== undefined)) && (
                       <DetailSection title="本地脚本绑定">
-                        <div className="rounded-md border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
+                        <div className="rounded-lg border border-border/70 bg-card/40 p-3 text-xs leading-5 text-muted-foreground">
                           绑定后只会调用本地档案；远程 JS、JAR 和 Spider
                           仍不会自动执行。
                         </div>
                         {inspectedSource.scriptArchiveId !== null &&
                           inspectedSource.scriptArchiveId !== undefined && (
-                            <div className="flex items-start gap-3 rounded-md border p-3">
+                            <div className="flex items-start gap-3 rounded-lg border border-border/70 bg-card/40 p-3">
                               <Badge
                                 variant={
                                   boundScriptArchive === undefined
@@ -1937,7 +1964,7 @@ export function ConfigCenter() {
                                     : "已绑定但停用"}
                               </Badge>
                               <div className="min-w-0 text-xs leading-5">
-                                <p className="font-medium">
+                                <p className="font-medium text-foreground">
                                   {boundScriptArchive?.name ??
                                     `档案 #${inspectedSource.scriptArchiveId}`}
                                 </p>
@@ -1959,7 +1986,7 @@ export function ConfigCenter() {
                             void handleBindScriptArchive(inspectedSource, value)
                           }
                         >
-                          <SelectTrigger>
+                          <SelectTrigger size="sm" className="w-full">
                             <SelectValue placeholder="选择本地脚本档案" />
                           </SelectTrigger>
                           <SelectContent>
@@ -1983,54 +2010,61 @@ export function ConfigCenter() {
                         </Select>
                       </DetailSection>
                     )}
+
                   {inspectedSource.testOperations &&
                     inspectedSource.testOperations.length > 0 && (
                       <DetailSection title="能力审计">
-                        {inspectedSource.testOperations.map((operation) => (
-                          <div
-                            key={`${operation.operation}-${operation.message}`}
-                            className="flex items-start justify-between gap-3 rounded-md border bg-muted/20 p-3"
-                          >
-                            <div className="min-w-0">
-                              <p className="font-medium">
-                                {operation.operation}
-                              </p>
-                              <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                                {operation.message}
-                              </p>
-                            </div>
-                            <Badge
-                              variant="outline"
-                              className={operationStatusClass(operation.status)}
+                        <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+                          {inspectedSource.testOperations.map((operation) => (
+                            <div
+                              key={`${operation.operation}-${operation.message}`}
+                              className="flex items-start justify-between gap-3 p-3 text-xs"
                             >
-                              {operationStatusLabel(operation.status)}
-                            </Badge>
-                          </div>
-                        ))}
+                              <div className="min-w-0">
+                                <p className="font-medium text-foreground">
+                                  {operation.operation}
+                                </p>
+                                <p className="mt-1 leading-5 text-muted-foreground">
+                                  {operation.message}
+                                </p>
+                              </div>
+                              <Badge
+                                variant="outline"
+                                className={cn("shrink-0", operationStatusClass(operation.status))}
+                              >
+                                {operationStatusLabel(operation.status)}
+                              </Badge>
+                            </div>
+                          ))}
+                        </div>
                       </DetailSection>
                     )}
+
                   <DetailSection title="远程地址">
-                    <DetailRow label="api" value={inspectedSource.api} mono />
-                    {inspectedSource.ext && (
-                      <DetailRow label="ext" value={inspectedSource.ext} mono />
-                    )}
-                    {inspectedSource.jar && (
-                      <DetailRow
-                        label="jar"
-                        value={inspectedSource.jar}
-                        mono
-                        danger
-                      />
-                    )}
+                    <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+                      <DetailRow label="api" value={inspectedSource.api} mono />
+                      {inspectedSource.ext && (
+                        <DetailRow label="ext" value={inspectedSource.ext} mono />
+                      )}
+                      {inspectedSource.jar && (
+                        <DetailRow
+                          label="jar"
+                          value={inspectedSource.jar}
+                          mono
+                          danger
+                        />
+                      )}
+                    </div>
                   </DetailSection>
+
                   <DetailSection title="执行说明">
-                    <div className="rounded-md border bg-muted/30 p-3 text-sm leading-6 text-muted-foreground">
+                    <div className="rounded-lg border border-border/70 bg-card/40 p-3.5 text-xs leading-5 text-muted-foreground">
                       {inspectedSource.capabilityNote}
                     </div>
                     {inspectedSource.jar && (
-                      <div className="mt-3 flex items-start gap-2 rounded-md border border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] p-3 text-xs leading-5 text-[color:var(--status-blocked)]">
+                      <div className="mt-2.5 flex items-start gap-2 rounded-lg border border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] p-3 text-xs leading-5 text-[color:var(--status-blocked)]">
                         <ShieldAlert
-                          className="mt-0.5 shrink-0"
+                          className="mt-0.5 size-4 shrink-0"
                           data-icon="inline-start"
                           aria-hidden="true"
                         />
@@ -2039,11 +2073,11 @@ export function ConfigCenter() {
                     )}
                   </DetailSection>
                 </div>
-                <ScrollBar />
               </ScrollArea>
-              <SheetFooter className="border-t pt-4">
+
+              <SheetFooter className="px-6 py-3.5 border-t border-border/60 bg-card/60 backdrop-blur-xs shrink-0">
                 <div className="flex w-full items-center justify-between gap-3">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
                     <span
                       className={cn(
                         "size-2 rounded-full",
@@ -2052,25 +2086,27 @@ export function ConfigCenter() {
                           : "bg-muted-foreground",
                       )}
                     />
-                    {inspectedSource.enabled ? "源已启用" : "源已停用"}
+                    <span>{inspectedSource.enabled ? "源已启用" : "源已停用"}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     {isTestableSource(inspectedSource) && (
                       <Button
                         type="button"
                         variant="outline"
+                        size="sm"
                         className="gap-1.5"
                         disabled={testingKeys.has(inspectedSource.key)}
                         onClick={() => void handleTestSource(inspectedSource)}
                       >
                         {testingKeys.has(inspectedSource.key) ? (
                           <LoaderCircle
-                            className="animate-spin"
+                            className="size-3.5 animate-spin"
                             data-icon="inline-start"
                             aria-hidden="true"
                           />
                         ) : (
                           <TestTube2
+                            className="size-3.5"
                             data-icon="inline-start"
                             aria-hidden="true"
                           />
@@ -2082,6 +2118,7 @@ export function ConfigCenter() {
                     <Button
                       type="button"
                       variant="outline"
+                      size="sm"
                       onClick={() =>
                         void handleToggleSource(inspectedSource.key)
                       }
@@ -2136,9 +2173,9 @@ function ReportCard({
     <Card className="border-border/80 shadow-none">
       <CardContent className="flex items-center gap-3 p-4">
         <div
-          className={`flex size-9 shrink-0 items-center justify-center rounded-md ${toneClasses[tone]}`}
+          className={`flex size-8 shrink-0 items-center justify-center rounded-md ${toneClasses[tone]}`}
         >
-          <Icon data-icon="inline-start" aria-hidden="true" />
+          <Icon className="size-4" data-icon="inline-start" aria-hidden="true" />
         </div>
         <div>
           <p className="text-xs text-muted-foreground">{label}</p>
@@ -2210,11 +2247,11 @@ function DetailSection({
   children: React.ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-3">
-      <h3 className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+    <section className="flex flex-col gap-2">
+      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground/80">
         {title}
       </h3>
-      <div className="flex flex-col gap-2">{children}</div>
+      {children}
     </section>
   );
 }
@@ -2223,27 +2260,30 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
   const adapter = getAdapterProfile(source);
   return (
     <DetailSection title="适配器边界">
-      <div className="flex items-center justify-between gap-3 rounded-md border bg-muted/20 p-3">
-        <div>
-          <p className="font-medium">{adapter.label}</p>
-          <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-            {adapter.id}
-          </p>
+      <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+        <div className="flex items-center justify-between gap-3 p-3.5">
+          <div>
+            <p className="font-semibold text-sm text-foreground">{adapter.label}</p>
+            <p className="mt-0.5 font-mono text-xs text-muted-foreground">
+              {adapter.id}
+            </p>
+          </div>
+          <AdapterStatusBadge execution={adapter.execution} />
         </div>
-        <AdapterStatusBadge execution={adapter.execution} />
-      </div>
-      <div className="rounded-md border bg-muted/20 p-3 text-sm leading-6 text-muted-foreground">
-        {adapter.reason}
-      </div>
-      {adapter.operations.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {adapter.operations.map((operation) => (
-            <Badge key={operation} variant="secondary" className="text-[10px]">
-              {operation}
-            </Badge>
-          ))}
+        <div className="p-3.5 text-xs leading-5 text-muted-foreground bg-muted/10">
+          {adapter.reason}
         </div>
-      )}
+        {adapter.operations.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1.5 p-3 bg-muted/5">
+            <span className="text-xs text-muted-foreground/70 mr-1">支持操作：</span>
+            {adapter.operations.map((operation) => (
+              <Badge key={operation} variant="secondary" className="text-xs py-0.5 px-2">
+                {operation}
+              </Badge>
+            ))}
+          </div>
+        )}
+      </div>
     </DetailSection>
   );
 }
@@ -2284,7 +2324,7 @@ function SourceTestBadge({ source }: { source: SourceRecord }) {
   const { icon: Icon, ...display } = config[status];
   return (
     <div className={cn("flex items-center gap-1.5 text-xs", display.className)}>
-      <Icon data-icon="inline-start" aria-hidden="true" />
+      <Icon className="size-3.5" data-icon="inline-start" aria-hidden="true" />
       <span>{display.label}</span>
     </div>
   );
@@ -2326,13 +2366,13 @@ function DetailRow({
   danger?: boolean;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 rounded-md border bg-muted/20 p-3">
-      <span className="shrink-0 text-xs text-muted-foreground">{label}</span>
+    <div className="flex items-start justify-between gap-4 px-3.5 py-2 text-xs transition-colors hover:bg-muted/20">
+      <span className="shrink-0 font-medium text-muted-foreground">{label}</span>
       <span
         className={cn(
-          "max-w-[290px] break-all text-right text-sm",
+          "max-w-[280px] break-all text-right font-medium text-foreground",
           mono && "font-mono text-xs",
-          danger && "text-[color:var(--status-blocked)]",
+          danger && "text-[color:var(--status-blocked)] font-semibold",
         )}
       >
         {value}
@@ -2367,11 +2407,11 @@ function ReportLine({
         )}
       >
         {danger ? (
-          <ShieldAlert data-icon="inline-start" aria-hidden="true" />
+          <ShieldAlert className="size-3.5" data-icon="inline-start" aria-hidden="true" />
         ) : warning ? (
-          <Info data-icon="inline-start" aria-hidden="true" />
+          <Info className="size-3.5" data-icon="inline-start" aria-hidden="true" />
         ) : (
-          <Check data-icon="inline-start" aria-hidden="true" />
+          <Check className="size-3.5" data-icon="inline-start" aria-hidden="true" />
         )}
       </div>
       <div className="min-w-0 flex-1">

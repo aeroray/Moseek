@@ -35,7 +35,7 @@ export function PlaceholderView({
         <Empty className="max-w-lg border border-dashed bg-card/40 py-16">
           <EmptyHeader>
             <EmptyMedia variant="icon">
-              <Icon data-icon="inline-start" aria-hidden="true" />
+              <Icon className="size-5 text-primary" data-icon="inline-start" aria-hidden="true" />
             </EmptyMedia>
             <EmptyTitle>{title}</EmptyTitle>
             <EmptyDescription>{description}</EmptyDescription>

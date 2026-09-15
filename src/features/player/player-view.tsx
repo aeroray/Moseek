@@ -222,80 +222,79 @@ export function PlayerView({
 
   return (
     <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-[1520px] flex-col gap-5 px-8 py-8">
-        <div className="flex items-center justify-between gap-6">
+      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-5">
+        <div className="flex items-center justify-between gap-4 border-b border-border/60 pb-3">
           <Button
             type="button"
             variant="ghost"
-            className="gap-2 px-0 text-muted-foreground hover:bg-transparent hover:text-foreground"
+            size="sm"
+            className="gap-1.5 text-muted-foreground hover:text-foreground"
             onClick={onBack}
           >
-            <ArrowLeft data-icon="inline-start" aria-hidden="true" />
-            返回详情
+            <ArrowLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+            返回列表
           </Button>
           <div className="flex items-center gap-2">
             <Button
               type="button"
               variant="outline"
-              className="gap-2"
+              size="sm"
+              className="gap-1.5"
               disabled={!isTauriRuntime() || isSniffing}
               onClick={() => void handleLocalSniff()}
             >
-              <ScanSearch data-icon="inline-start" aria-hidden="true" />
+              <ScanSearch className="size-4" data-icon="inline-start" aria-hidden="true" />
               {isSniffing ? "嗅探中..." : "本地嗅探"}
             </Button>
             <Button
               type="button"
               variant="outline"
-              className="gap-2"
+              size="sm"
+              className="gap-1.5"
               onClick={handleExternalPlayer}
             >
-              <ExternalLink data-icon="inline-start" aria-hidden="true" />
+              <ExternalLink className="size-4" data-icon="inline-start" aria-hidden="true" />
               外部播放器
             </Button>
-            <CapabilityBadge status={source.capability} />
+            <CapabilityBadge status={source.capability} compact />
           </div>
         </div>
 
-        <header className="flex items-end justify-between gap-8">
+        <header className="flex items-center justify-between gap-4 border-b border-border/60 pb-3">
           <div>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <h2 className="font-display text-base font-bold tracking-tight text-foreground">
+              播放器视窗
+            </h2>
+            <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
               <Badge variant="secondary">{source.name}</Badge>
               <span>·</span>
-              <span>{activeLine.name}</span>
+              <span className="text-foreground font-medium">{activeLine.name}</span>
               <span>·</span>
-              <span>{activeEpisode.name}</span>
+              <span className="text-primary font-medium">{activeEpisode.name}</span>
             </div>
-            <h1 className="mt-2 font-display text-3xl font-semibold tracking-tight">
-              {item.name}
-            </h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Plyr 控制层 · hls.js 媒体接入 · 进度记忆{" "}
-              {resumeAt > 0 ? `从 ${formatSeconds(resumeAt)} 继续` : "尚未开始"}
-            </p>
           </div>
           <div className="flex items-center gap-2">
             <Button
               type="button"
               variant="outline"
-              size="icon-sm"
-              aria-label="上一集"
+              size="sm"
               disabled={activeIndex <= 0}
               onClick={() => stepEpisode(-1)}
             >
-              <ChevronLeft data-icon="inline-start" aria-hidden="true" />
+              <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+              上一集
             </Button>
             <Button
               type="button"
               variant="outline"
-              size="icon-sm"
-              aria-label="下一集"
+              size="sm"
               disabled={
                 activeIndex < 0 || activeIndex >= activeLine.episodes.length - 1
               }
               onClick={() => stepEpisode(1)}
             >
-              <ChevronRight data-icon="inline-start" aria-hidden="true" />
+              下一集
+              <ChevronRight className="size-4" data-icon="inline-end" aria-hidden="true" />
             </Button>
           </div>
         </header>
@@ -338,7 +337,7 @@ export function PlayerView({
             </div>
             {diagnostic && (
               <Alert variant={status === "error" ? "destructive" : "default"}>
-                <AlertTriangle data-icon="inline-start" aria-hidden="true" />
+                <AlertTriangle className="size-4" data-icon="inline-start" aria-hidden="true" />
                 <AlertTitle>播放诊断</AlertTitle>
                 <AlertDescription>{diagnostic}</AlertDescription>
               </Alert>
@@ -347,7 +346,7 @@ export function PlayerView({
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <Info data-icon="inline-start" aria-hidden="true" />
+                  <Info className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   播放边界
                 </CardTitle>
                 <CardDescription>
@@ -384,7 +383,7 @@ export function PlayerView({
           <Card className="min-h-[560px]">
             <CardHeader>
               <CardTitle className="flex items-center gap-2 text-base">
-                <ListVideo data-icon="inline-start" aria-hidden="true" />
+                <ListVideo className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                 线路与选集
               </CardTitle>
               <CardDescription>
@@ -428,10 +427,11 @@ export function PlayerView({
                                 ? "secondary"
                                 : "outline"
                             }
-                            className="justify-start gap-2"
+                            size="sm"
+                            className="justify-start gap-1.5"
                             onClick={() => selectEpisode(line, episode)}
                           >
-                            <Play data-icon="inline-start" aria-hidden="true" />
+                            <Play className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                             {episode.name}
                           </Button>
                         ))}
