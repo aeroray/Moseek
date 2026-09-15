@@ -144,6 +144,7 @@ export interface LiveChannel {
   groupName: string;
   logoUrl: string;
   streamUrl: string;
+  streamUrls: string[];
   mediaKind: MediaKind;
   sourceKey: string;
   epgId?: string;

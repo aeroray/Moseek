@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{collections::HashMap, time::Instant};
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -27,6 +27,7 @@ pub struct LiveChannel {
     pub group_name: String,
     pub logo_url: String,
     pub stream_url: String,
+    pub stream_urls: Vec<String>,
     pub media_kind: String,
     pub source_key: String,
     pub epg_id: Option<String>,
@@ -70,7 +71,7 @@ pub async fn load_live_source(source: SourceRecord) -> Result<LiveCatalog, Strin
     let url = reqwest::Url::parse(&source_url).map_err(|error| error.to_string())?;
     let format = format.to_ascii_lowercase();
     let text = fetch_text(url, 20 * 1024 * 1024, "直播源响应").await?;
-    let channels = if format == "json"
+    let parsed_channels = if format == "json"
         || text.trim_start().starts_with('{')
         || text.trim_start().starts_with('[')
     {
@@ -84,6 +85,7 @@ pub async fn load_live_source(source: SourceRecord) -> Result<LiveCatalog, Strin
     } else {
         parse_txt(&text, &source_key)
     };
+    let channels = deduplicate_channels(parsed_channels);
     let groups = collect_groups(&channels);
     Ok(LiveCatalog { channels, groups })
 }
@@ -375,7 +377,7 @@ fn parse_m3u(text: &str, source_key: &str) -> Vec<LiveChannel> {
             let logo = attribute(line, "tvg-logo").unwrap_or_default();
             let epg_id = attribute(line, "tvg-id");
             metadata = Some((name, group, logo, epg_id));
-        } else if !line.starts_with('#') {
+        } else if !line.starts_with('#') && is_stream_url(line) {
             let (name, group, logo, epg_id) = metadata
                 .take()
                 .unwrap_or_else(|| (line.to_string(), "未分组".to_string(), String::new(), None));
@@ -390,21 +392,66 @@ fn parse_m3u(text: &str, source_key: &str) -> Vec<LiveChannel> {
 }
 
 fn parse_txt(text: &str, source_key: &str) -> Vec<LiveChannel> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| {
-            let (name, url) = line.split_once(',').or_else(|| line.split_once('$'))?;
-            make_channel(
+    let mut channels = Vec::new();
+    let mut group_name = "未分组".to_string();
+    let mut pending_name: Option<String> = None;
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some((name, marker)) = line.split_once(',') {
+            if marker.trim().eq_ignore_ascii_case("#genre#") {
+                group_name = name.trim().to_string();
+                pending_name = None;
+                continue;
+            }
+        }
+        if line.starts_with('#') {
+            continue;
+        }
+
+        let split = line.split_once(',').or_else(|| line.split_once('$'));
+        if let Some((left, right)) = split {
+            if is_stream_url(right.trim()) {
+                let name = pending_name
+                    .take()
+                    .unwrap_or_else(|| left.trim().to_string());
+                if let Some(channel) = make_channel(
+                    source_key,
+                    name,
+                    group_name.clone(),
+                    String::new(),
+                    None,
+                    right.trim().to_string(),
+                ) {
+                    channels.push(channel);
+                }
+                continue;
+            }
+        }
+
+        if is_stream_url(line) {
+            let name = pending_name
+                .take()
+                .unwrap_or_else(|| "未命名频道".to_string());
+            if let Some(channel) = make_channel(
                 source_key,
-                name.trim().to_string(),
-                "未分组".to_string(),
+                name,
+                group_name.clone(),
                 String::new(),
                 None,
-                url.trim().to_string(),
-            )
-        })
-        .collect()
+                line.to_string(),
+            ) {
+                channels.push(channel);
+            }
+        } else {
+            pending_name = Some(line.to_string());
+        }
+    }
+    channels
+}
+
+fn is_stream_url(value: &str) -> bool {
+    reqwest::Url::parse(value)
+        .map(|url| matches!(url.scheme(), "http" | "https"))
+        .unwrap_or(false)
 }
 
 fn parse_json(text: &str, source_key: &str) -> Result<Vec<LiveChannel>, String> {
@@ -465,6 +512,7 @@ fn make_channel(
         group_name,
         logo_url,
         stream_url: stream_url.clone(),
+        stream_urls: vec![stream_url.clone()],
         media_kind: if stream_url.to_ascii_lowercase().contains(".m3u8") {
             "hls".to_string()
         } else if stream_url.to_ascii_lowercase().contains(".mp4") {
@@ -475,6 +523,70 @@ fn make_channel(
         source_key: source_key.to_string(),
         epg_id,
     })
+}
+
+fn deduplicate_channels(channels: Vec<LiveChannel>) -> Vec<LiveChannel> {
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    let mut deduplicated: Vec<LiveChannel> = Vec::with_capacity(channels.len());
+
+    for mut channel in channels {
+        let identity = channel_identity(&channel);
+        if let Some(index) = positions.get(&identity).copied() {
+            let existing = &mut deduplicated[index];
+            let stream_urls = if channel.stream_urls.is_empty() {
+                vec![channel.stream_url.clone()]
+            } else {
+                channel.stream_urls
+            };
+            for stream_url in stream_urls {
+                if !existing.stream_urls.contains(&stream_url) {
+                    existing.stream_urls.push(stream_url);
+                }
+            }
+            if existing.logo_url.is_empty() && !channel.logo_url.is_empty() {
+                existing.logo_url = channel.logo_url;
+            }
+            if existing.epg_id.is_none() {
+                existing.epg_id = channel.epg_id;
+            }
+            continue;
+        }
+
+        if channel.stream_urls.is_empty() {
+            channel.stream_urls.push(channel.stream_url.clone());
+        }
+        positions.insert(identity, deduplicated.len());
+        deduplicated.push(channel);
+    }
+
+    deduplicated
+}
+
+fn channel_identity(channel: &LiveChannel) -> String {
+    let stable_name = channel
+        .epg_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&channel.name);
+    format!(
+        "{}:{}",
+        normalize_identity_part(&channel.group_name),
+        normalize_channel_identity(stable_name)
+    )
+}
+
+fn normalize_channel_identity(value: &str) -> String {
+    let without_variant = value.split('@').next().unwrap_or(value);
+    let without_quality = without_variant.split('(').next().unwrap_or(without_variant);
+    normalize_identity_part(without_quality)
+}
+
+fn normalize_identity_part(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect()
 }
 
 fn collect_groups(channels: &[LiveChannel]) -> Vec<LiveGroup> {
@@ -538,7 +650,7 @@ fn slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_epg_json, parse_m3u, parse_txt, parse_xmltv};
+    use super::{deduplicate_channels, parse_epg_json, parse_m3u, parse_txt, parse_xmltv};
 
     #[test]
     fn parses_m3u_groups_logos_and_epg_ids() {
@@ -564,6 +676,60 @@ mod tests {
 
         assert_eq!(txt[0].media_kind, "mp4");
         assert_eq!(json[0].group_name, "Sports");
+    }
+
+    #[test]
+    fn parses_grouped_two_line_ipv6_txt_sources() {
+        let catalog = parse_txt(
+            "央视高清,#genre#\nCCTV1\n4M1080,http://[2409:8087::2]/live/cctv1.m3u8\n",
+            "ipv6",
+        );
+
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "CCTV1");
+        assert_eq!(catalog[0].group_name, "央视高清");
+        assert_eq!(catalog[0].media_kind, "hls");
+    }
+
+    #[test]
+    fn groups_duplicate_channel_names_and_preserves_stream_variants() {
+        let parsed = parse_txt(
+            "央视频道,#genre#\nCCTV1,https://stream.example/cctv1-main.m3u8\nCCTV-1,https://stream.example/cctv1-backup.m3u8\n",
+            "live-main",
+        );
+        let catalog = deduplicate_channels(parsed);
+
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "CCTV1");
+        assert_eq!(catalog[0].stream_urls.len(), 2);
+        assert_eq!(catalog[0].stream_url, catalog[0].stream_urls[0]);
+    }
+
+    #[test]
+    fn groups_m3u_quality_variants_by_tvg_id_base() {
+        let parsed = parse_m3u(
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"CCTV1.cn@HD\" group-title=\"General\",CCTV-1 (1080p)\nhttps://stream.example/cctv1-hd.m3u8\n#EXTINF:-1 tvg-id=\"CCTV1.cn@SD\" group-title=\"General\",CCTV-1 (720p)\nhttps://stream.example/cctv1-sd.m3u8\n",
+            "live-main",
+        );
+        let catalog = deduplicate_channels(parsed);
+
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].stream_urls.len(), 2);
+    }
+
+    #[test]
+    fn skips_multiline_m3u_metadata_until_the_stream_url() {
+        let catalog = parse_m3u(
+            "#EXTM3U\n#EXTINF:-1 tvg-id=\"CCTV1\",CCTV-1\ntvg-name=\"CCTV1\"\n综合\nhttp://[2409:8087::2]/live/cctv1.m3u8\n",
+            "ipv6",
+        );
+
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "CCTV-1");
+        assert_eq!(
+            catalog[0].stream_url,
+            "http://[2409:8087::2]/live/cctv1.m3u8"
+        );
     }
 
     #[test]

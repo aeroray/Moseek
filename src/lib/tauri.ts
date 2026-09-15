@@ -20,6 +20,7 @@ export interface StoredConfigDocument {
   sources: SourceRecord[];
   sourceCount: number;
   liveCount: number;
+  sourceBaseUrl?: string | null;
   importedAt: string;
 }
 
@@ -37,6 +38,7 @@ export interface SaveConfigDocumentInput {
   normalizedConfig: string;
   sources: SourceRecord[];
   liveCount: number;
+  sourceBaseUrl?: string | null;
 }
 
 export interface PlaybackResolution {
@@ -45,6 +47,11 @@ export interface PlaybackResolution {
   adapterId: string;
   parseServiceId?: string | null;
   headers?: Record<string, string>;
+}
+
+export interface MediaResource {
+  bodyBase64: string;
+  contentType?: string | null;
 }
 
 export interface ScriptExecutionRequest {
@@ -179,6 +186,23 @@ export async function fetchConfigUrl(url: string) {
   return invokeCommand<string>("fetch_config_url", { url });
 }
 
+export async function setConfigSourceBaseUrl(
+  documentId: number,
+  sourceBaseUrl: string,
+) {
+  return invokeCommand<StoredConfigDocument>("set_config_source_base_url", {
+    documentId,
+    sourceBaseUrl,
+  });
+}
+
+export async function recoverKnownLiveSources(documentId: number) {
+  return invokeCommand<StoredConfigDocument | null>(
+    "recover_known_live_sources",
+    { documentId },
+  );
+}
+
 export async function browseSource(
   source: SourceRecord,
   query: string,
@@ -229,6 +253,16 @@ export async function resolvePlayback(
   return invokeCommand<PlaybackResolution>("resolve_playback", {
     url,
     parseServices,
+  });
+}
+
+export async function fetchMediaResource(
+  url: string,
+  headers: Record<string, string> = {},
+) {
+  return invokeCommand<MediaResource>("fetch_media_resource", {
+    url,
+    headers,
   });
 }
 

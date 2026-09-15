@@ -59,8 +59,21 @@ export async function loadEpg(
 }
 
 function getErrorMessage(error: unknown, fallback: string) {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string" && error.trim()) return error;
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : error &&
+            typeof error === "object" &&
+            "message" in error &&
+            typeof error.message === "string"
+          ? error.message
+          : "";
+  if (message.includes("relative URL without a base")) {
+    return "该直播源使用相对地址，请在配置中心补充原远程配置 URL 基址并重新保存。";
+  }
+  if (message.trim()) return message;
   if (
     error &&
     typeof error === "object" &&

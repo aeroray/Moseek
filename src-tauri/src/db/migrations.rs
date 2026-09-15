@@ -10,6 +10,7 @@ pub(crate) fn create_tables(connection: &Connection) -> Result<(), String> {
                raw_config TEXT NOT NULL,
                normalized_config TEXT NOT NULL,
                sources_json TEXT,
+               source_base_url TEXT,
                live_count INTEGER NOT NULL DEFAULT 0,
                imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
@@ -134,6 +135,7 @@ pub(crate) fn create_tables(connection: &Connection) -> Result<(), String> {
 }
 
 pub(crate) fn run(connection: &Connection) -> Result<(), String> {
+    ensure_config_source_base_url_column(connection)?;
     ensure_config_sources_column(connection)?;
     ensure_sources_epg_column(connection)?;
     ensure_script_archives_deleted_at_column(connection)?;
@@ -141,6 +143,10 @@ pub(crate) fn run(connection: &Connection) -> Result<(), String> {
     ensure_script_archives_modules_column(connection)?;
     ensure_script_archives_cookie_column(connection)?;
     crate::script_runtime::archive::migrate_script_archive_cookies(connection)
+}
+
+fn ensure_config_source_base_url_column(connection: &Connection) -> Result<(), String> {
+    add_column_if_missing(connection, "config_documents", "source_base_url", "TEXT")
 }
 
 fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {

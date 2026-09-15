@@ -58,7 +58,10 @@ export function countParsedCapabilities(sources: SourceRecord[]) {
   );
 }
 
-export function parseConfigText(rawText: string): ParseResult {
+export function parseConfigText(
+  rawText: string,
+  baseUrl?: string,
+): ParseResult {
   const sizeIssue = createSizeIssue(rawText);
   if (sizeIssue) {
     return {
@@ -117,10 +120,10 @@ export function parseConfigText(rawText: string): ParseResult {
   }
 
   const siteSources = validation.data.sites.map((site, index) =>
-    classifySource(site, index, normalizedInput.dialect),
+    classifySource(site, index, normalizedInput.dialect, baseUrl),
   );
   const liveSources = validation.data.lives.map((live, index) =>
-    classifyLiveSource(live, index),
+    classifyLiveSource(live, index, baseUrl),
   );
   const duplicateKeyIssues = ensureUniqueSourceKeys([
     { section: "sites", sources: siteSources },
@@ -398,10 +401,11 @@ function classifySource(
   site: RawSite,
   index: number,
   configDialect: SourceDialect,
+  baseUrl?: string,
 ): SourceRecord {
   const key = site.key ?? site.id ?? `invalid-${index + 1}`;
   const name = site.name ?? `未命名源 ${index + 1}`;
-  const api = site.api ?? "";
+  const api = resolveConfiguredUrl(site.api ?? "", baseUrl);
   const siteType = normalizeSiteType(site.type);
   const sourceDialect = getSourceDialect(site, configDialect);
   const keyLower = key.toLowerCase();
@@ -565,10 +569,17 @@ function getSiteProtocol(
   return "unknown";
 }
 
-function classifyLiveSource(live: RawLive, index: number): SourceRecord {
+function classifyLiveSource(
+  live: RawLive,
+  index: number,
+  baseUrl?: string,
+): SourceRecord {
   const key = live.key ?? `live-${index + 1}`;
   const name = live.name ?? `直播源 ${index + 1}`;
-  const api = live.url ?? live.source ?? live.api ?? "";
+  const api = resolveConfiguredUrl(
+    live.url ?? live.source ?? live.api ?? "",
+    baseUrl,
+  );
   const normalizedApi = api.toLowerCase();
   const hasRequiredFields = Boolean(name && api);
   const hasDangerousProtocol = /^(javascript|data|file|shell):/i.test(api);
@@ -769,6 +780,25 @@ function normalizeParseServices(values: unknown): ParseServiceRecord[] {
       capabilityNote,
     };
   });
+}
+
+function resolveConfiguredUrl(value: string, baseUrl?: string) {
+  const trimmed = value.trim();
+  if (!trimmed || !baseUrl || /^[a-z][a-z\d+.-]*:/i.test(trimmed)) {
+    return trimmed;
+  }
+  try {
+    const base = new URL(baseUrl);
+    if (base.protocol !== "http:" && base.protocol !== "https:") {
+      return trimmed;
+    }
+    const resolved = new URL(trimmed, base);
+    return resolved.protocol === "http:" || resolved.protocol === "https:"
+      ? resolved.toString()
+      : trimmed;
+  } catch {
+    return trimmed;
+  }
 }
 
 function parseObject(value: string | undefined) {

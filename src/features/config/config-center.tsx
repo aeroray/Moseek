@@ -27,7 +27,6 @@ import {
   Search,
   ShieldAlert,
   TestTube2,
-  SlidersHorizontal,
   Trash2,
   Upload,
   WandSparkles,
@@ -110,8 +109,12 @@ import {
   deleteConfigDocument,
   exportConfig,
   fetchConfigUrl,
+  isTauriRuntime,
+  loadActiveConfig,
   listScriptArchives,
+  recoverKnownLiveSources,
   saveConfigDocument,
+  setConfigSourceBaseUrl,
   setSourceScriptArchive,
   testSource,
   updateSourceTest,
@@ -166,6 +169,9 @@ export function ConfigCenter() {
   const [isParsing, setIsParsing] = useState(false);
   const [importMode, setImportMode] = useState<ImportMode>("remote");
   const [sourceInput, setSourceInput] = useState("");
+  const [configBaseUrl, setConfigBaseUrl] = useState<string | undefined>();
+  const [sourceBaseUrlDraft, setSourceBaseUrlDraft] = useState("");
+  const [isApplyingBaseUrl, setIsApplyingBaseUrl] = useState(false);
   const [selectedFileName, setSelectedFileName] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isFetchingRemote, setIsFetchingRemote] = useState(false);
@@ -176,9 +182,22 @@ export function ConfigCenter() {
   const [deleteCandidate, setDeleteCandidate] =
     useState<ConfigDocumentSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const liveRecoveryAttempts = useRef(new Set<number>());
   const counts = getCapabilityCounts(sources);
   const editorText = rawDraft ?? rawConfig;
-  const report = parseResult ?? (rawConfig ? parseConfigText(rawConfig) : null);
+  const report =
+    parseResult ??
+    (rawConfig ? parseConfigText(rawConfig, configBaseUrl) : null);
+  const activeDocument =
+    activeConfigId === null ? undefined : configDocumentCache[activeConfigId];
+  const relativeLiveSources = useMemo(
+    () =>
+      sources.filter(
+        (source) =>
+          source.sourceType === "live" && isRelativeConfiguredUrl(source.api),
+      ),
+    [sources],
+  );
   const inspectedSource =
     sources.find((source) => source.key === inspectedSourceKey) ?? null;
   const boundScriptArchive =
@@ -241,16 +260,69 @@ export function ConfigCenter() {
   );
 
   useEffect(() => {
+    const sourceBaseUrl = activeDocument?.sourceBaseUrl ?? undefined;
+    setConfigBaseUrl(sourceBaseUrl);
+    setSourceBaseUrlDraft(sourceBaseUrl ?? "");
+  }, [activeDocument?.id, activeDocument?.sourceBaseUrl]);
+
+  useEffect(() => {
     setRawDraft(rawConfig);
     setImportText(rawConfig);
-    setParseResult(rawConfig ? parseConfigText(rawConfig) : null);
-  }, [activeConfigId, rawConfig]);
+    setParseResult(
+      rawConfig ? parseConfigText(rawConfig, configBaseUrl) : null,
+    );
+  }, [activeConfigId, configBaseUrl, rawConfig]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    void loadActiveConfig()
+      .then((document) => {
+        if (!cancelled && document) setConfigDocument(document);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [setConfigDocument]);
 
   useEffect(() => {
     void listScriptArchives()
       .then((archives) => setScriptArchives(archives ?? []))
       .catch(() => setScriptArchives([]));
   }, []);
+
+  useEffect(() => {
+    if (
+      !isTauriRuntime() ||
+      activeConfigId === null ||
+      activeDocument?.sourceBaseUrl ||
+      relativeLiveSources.length === 0 ||
+      liveRecoveryAttempts.current.has(activeConfigId)
+    ) {
+      return;
+    }
+    liveRecoveryAttempts.current.add(activeConfigId);
+    void recoverKnownLiveSources(activeConfigId)
+      .then((document) => {
+        if (!document) return;
+        setConfigDocument(document);
+        setParseState({
+          type: "success",
+          title: "直播源已自动恢复",
+          message:
+            "已为旧配置替换为可访问的公开兼容直播列表，请点击连接测试确认当前频道可用。",
+        });
+      })
+      .catch(() => {
+        // Keep the manual base URL repair action visible when no known fallback is reachable.
+      });
+  }, [
+    activeConfigId,
+    activeDocument?.sourceBaseUrl,
+    relativeLiveSources.length,
+    setConfigDocument,
+  ]);
 
   const filteredSources = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -270,6 +342,7 @@ export function ConfigCenter() {
     setConfigName(`配置 ${configDocuments.length + 1}`);
     setImportMode("remote");
     setSourceInput("");
+    setConfigBaseUrl(undefined);
     setSelectedFileName("");
     setImportText("");
     setParseResult(null);
@@ -446,6 +519,7 @@ export function ConfigCenter() {
   const handleLocalFile = async (file: File) => {
     if (!file) return;
     setImportMode("local");
+    setConfigBaseUrl(undefined);
     setSelectedFileName(file.name);
     setIsDraggingFile(false);
     setConfigName(file.name.replace(/\.(json5?|txt)$/i, "") || file.name);
@@ -487,11 +561,13 @@ export function ConfigCenter() {
         });
         return;
       }
+      setConfigBaseUrl(new URL(sourceInput.trim()).toString());
       setImportText(text);
       setSelectedFileName("");
       setParseState({
         type: "success",
-        message: "远程配置已载入，请点击解析配置生成报告。",
+        message:
+          "远程配置已载入；其中 ./ 相对资源路径会按这个 URL 自动解析，请点击解析配置生成报告。",
       });
     } catch (error) {
       const message =
@@ -499,6 +575,57 @@ export function ConfigCenter() {
       setParseState({ type: "error", message });
     } finally {
       setIsFetchingRemote(false);
+    }
+  };
+
+  const handleApplySourceBaseUrl = async () => {
+    if (activeConfigId === null) {
+      setParseState({
+        type: "error",
+        message: "请先保存当前配置，再修复相对直播地址。",
+      });
+      return;
+    }
+    const value = sourceBaseUrlDraft.trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      setParseState({
+        type: "error",
+        message: "配置基址必须是有效的 HTTP 或 HTTPS URL。",
+      });
+      return;
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      setParseState({
+        type: "error",
+        message: "配置基址只允许 HTTP 或 HTTPS URL。",
+      });
+      return;
+    }
+    setIsApplyingBaseUrl(true);
+    try {
+      const document = await setConfigSourceBaseUrl(
+        activeConfigId,
+        parsed.toString(),
+      );
+      if (!document) throw new Error("浏览器预览不会保存配置基址。");
+      setConfigBaseUrl(document.sourceBaseUrl ?? parsed.toString());
+      setSourceBaseUrlDraft(document.sourceBaseUrl ?? parsed.toString());
+      setConfigDocument(document);
+      setParseState({
+        type: "success",
+        title: "相对地址已修复",
+        message: "直播源地址已按配置基址归一化，请重新测试直播源。",
+      });
+    } catch (error) {
+      setParseState({
+        type: "error",
+        message: error instanceof Error ? error.message : "配置基址保存失败",
+      });
+    } finally {
+      setIsApplyingBaseUrl(false);
     }
   };
 
@@ -548,7 +675,7 @@ export function ConfigCenter() {
 
   const handleParse = async () => {
     setIsParsing(true);
-    const result = parseConfigText(importText);
+    const result = parseConfigText(importText, configBaseUrl);
     setParseResult(result);
 
     if (!result.ok) {
@@ -574,6 +701,7 @@ export function ConfigCenter() {
         normalizedConfig: result.normalizedConfig,
         sources: result.sources,
         liveCount: result.liveCount,
+        sourceBaseUrl: configBaseUrl ?? null,
       });
       const document: StoredConfigDocument = savedDocument ?? {
         id: -Date.now(),
@@ -584,6 +712,7 @@ export function ConfigCenter() {
         sourceCount: result.sources.length,
         liveCount: result.liveCount,
         importedAt: new Date().toISOString(),
+        sourceBaseUrl: configBaseUrl ?? null,
       };
       setConfigDocument(document);
       setParseState({
@@ -630,21 +759,6 @@ export function ConfigCenter() {
       <div className="mx-auto flex w-full max-w-[1520px] flex-col gap-6 px-8 py-8">
         <section className="flex items-end justify-between gap-8">
           <div>
-            <div className="mb-3 flex items-center gap-2">
-              <Badge
-                variant="secondary"
-                className="gap-1.5 bg-accent text-accent-foreground"
-              >
-                <SlidersHorizontal
-                  data-icon="inline-start"
-                  aria-hidden="true"
-                />
-                Phase 5
-              </Badge>
-              <span className="text-xs text-muted-foreground">
-                适配器、安全边界
-              </span>
-            </div>
             <h1 className="font-display text-3xl font-semibold tracking-tight">
               配置中心
             </h1>
@@ -689,6 +803,37 @@ export function ConfigCenter() {
             </Button>
           </div>
         </section>
+
+        {relativeLiveSources.length > 0 && !activeDocument?.sourceBaseUrl && (
+          <Alert variant="destructive">
+            <CircleX data-icon="inline-start" aria-hidden="true" />
+            <AlertTitle>当前配置包含相对直播地址</AlertTitle>
+            <AlertDescription>
+              {relativeLiveSources.map((source) => source.name).join("、")}{" "}
+              使用了 `./` 路径。旧配置没有保存远程基址，请填入原配置 URL
+              后修复；否则直播页无法请求这些源。
+              <div className="mt-3 flex items-center gap-2">
+                <Input
+                  value={sourceBaseUrlDraft}
+                  onChange={(event) =>
+                    setSourceBaseUrlDraft(event.target.value)
+                  }
+                  placeholder="https://example.com/path/config.json"
+                  aria-label="远程配置基址"
+                  className="min-w-0 flex-1 bg-background"
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={isApplyingBaseUrl || !sourceBaseUrlDraft.trim()}
+                  onClick={() => void handleApplySourceBaseUrl()}
+                >
+                  {isApplyingBaseUrl ? "修复中..." : "修复相对地址"}
+                </Button>
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
 
         <Card>
           <CardHeader className="border-b pb-4">
@@ -1382,25 +1527,31 @@ export function ConfigCenter() {
               </Button>
             </div>
             {importMode === "remote" ? (
-              <div className="flex h-20 shrink-0 items-center gap-2 rounded-md border bg-muted/20 p-3">
-                <Input
-                  type="url"
-                  value={sourceInput}
-                  onChange={(event) => setSourceInput(event.target.value)}
-                  placeholder="https://example.com/config.json5"
-                  aria-label="远程配置 URL"
-                  className="min-w-0 flex-1 bg-background"
-                />
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="shrink-0 gap-2"
-                  onClick={handleFetchRemote}
-                  disabled={isFetchingRemote || !sourceInput.trim()}
-                >
-                  <Globe2 data-icon="inline-start" aria-hidden="true" />
-                  {isFetchingRemote ? "请求中..." : "获取配置"}
-                </Button>
+              <div className="flex min-h-20 shrink-0 flex-col justify-center gap-2 rounded-md border bg-muted/20 p-3">
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="url"
+                    value={sourceInput}
+                    onChange={(event) => setSourceInput(event.target.value)}
+                    placeholder="https://example.com/config.json5"
+                    aria-label="远程配置 URL"
+                    className="min-w-0 flex-1 bg-background"
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    className="shrink-0 gap-2"
+                    onClick={handleFetchRemote}
+                    disabled={isFetchingRemote || !sourceInput.trim()}
+                  >
+                    <Globe2 data-icon="inline-start" aria-hidden="true" />
+                    {isFetchingRemote ? "请求中..." : "获取配置"}
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  远程配置中的 ./ 相对直播和资源路径会按配置 URL
+                  的目录解析；本地文件不会猜测远程基址。
+                </p>
               </div>
             ) : (
               <div
@@ -1834,6 +1985,17 @@ export function ConfigCenter() {
         </SheetContent>
       </Sheet>
     </div>
+  );
+}
+
+function isRelativeConfiguredUrl(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || /^[a-z][a-z\d+.-]*:/i.test(trimmed)) return false;
+  return (
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.includes("/")
   );
 }
 

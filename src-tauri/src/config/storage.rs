@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
+use reqwest::Url;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
+use crate::policy::validate_remote_url;
 use crate::{cms, ConfigDocument, SourceRecord};
 
 pub(super) fn serialize_sources(sources: &[SourceRecord]) -> Result<String, String> {
@@ -115,7 +117,7 @@ pub(super) fn load_config_document(
 ) -> Result<Option<ConfigDocument>, String> {
     let document = connection
         .query_row(
-            "SELECT id, name, raw_config, normalized_config, sources_json, live_count, imported_at FROM config_documents WHERE id = ?1",
+            "SELECT id, name, raw_config, normalized_config, sources_json, source_base_url, live_count, imported_at FROM config_documents WHERE id = ?1",
             params![document_id],
             |row| {
                 Ok((
@@ -124,16 +126,25 @@ pub(super) fn load_config_document(
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, String>(7)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| error.to_string())?;
 
-    let Some((id, name, raw_config, normalized_config, sources_json, live_count, imported_at)) =
-        document
+    let Some((
+        id,
+        name,
+        raw_config,
+        normalized_config,
+        sources_json,
+        source_base_url,
+        live_count,
+        imported_at,
+    )) = document
     else {
         return Ok(None);
     };
@@ -150,6 +161,7 @@ pub(super) fn load_config_document(
         sources,
         live_count,
         imported_at,
+        source_base_url,
     }))
 }
 
@@ -206,6 +218,174 @@ pub(super) fn load_active_document(
         }
     }
     load_latest_document(connection)
+}
+
+pub(super) fn set_config_source_base_url(
+    connection: &mut Connection,
+    document_id: i64,
+    source_base_url: &str,
+) -> Result<ConfigDocument, String> {
+    let base_url =
+        Url::parse(source_base_url.trim()).map_err(|error| format!("配置基址无效：{error}"))?;
+    validate_remote_url(&base_url)?;
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    for source in &mut sources {
+        source.api = resolve_configured_url(&source.api, &base_url)?;
+        if let Some(epg) = source.epg.as_deref() {
+            source.epg = Some(resolve_configured_url(epg, &base_url)?);
+        }
+        if source.source_type == "live" && is_http_url(&source.api) {
+            source.capability = "supported".to_string();
+            source.capability_note =
+                "支持通过 Rust 网络层解析 M3U、TXT 或 JSON 直播频道。".to_string();
+            source.searchable = true;
+            source.filterable = true;
+            source.enabled = source.status;
+            source.test_status = None;
+            source.test_message = None;
+            source.tested_at = None;
+            source.test_item_count = None;
+            source.test_category_count = None;
+            source.test_duration_ms = None;
+            source.test_operations = Vec::new();
+        }
+    }
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config = update_normalized_source_urls(&document.normalized_config, &sources);
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2, source_base_url = ?3 WHERE id = ?4",
+            params![sources_json, normalized_config, base_url.as_str(), document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置基址保存后无法读取配置".to_string())
+}
+
+pub(super) fn replace_known_live_source_urls(
+    connection: &mut Connection,
+    document_id: i64,
+    replacements: &HashMap<String, String>,
+) -> Result<Option<ConfigDocument>, String> {
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    let mut changed = false;
+    for source in &mut sources {
+        let Some(url) = replacements.get(&source.key) else {
+            continue;
+        };
+        source.api = url.clone();
+        if source.source_type == "live" {
+            source.capability = "supported".to_string();
+            source.capability_note =
+                "已自动恢复为公开兼容直播列表；请通过连接测试确认当前频道可用性。".to_string();
+            source.searchable = true;
+            source.filterable = true;
+            source.enabled = source.status;
+            source.test_status = None;
+            source.test_message = None;
+            source.tested_at = None;
+            source.test_item_count = None;
+            source.test_category_count = None;
+            source.test_duration_ms = None;
+            source.test_operations = Vec::new();
+        }
+        changed = true;
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config = update_normalized_source_urls(&document.normalized_config, &sources);
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2, source_base_url = NULL WHERE id = ?3",
+            params![sources_json, normalized_config, document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id).map_err(|error| error.to_string())
+}
+
+fn resolve_configured_url(value: &str, base_url: &Url) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || Url::parse(trimmed).is_ok() {
+        return Ok(trimmed.to_string());
+    }
+    if !looks_like_relative_path(trimmed) {
+        return Ok(trimmed.to_string());
+    }
+    let resolved = base_url
+        .join(trimmed)
+        .map_err(|error| format!("相对资源地址无法解析：{error}"))?;
+    validate_remote_url(&resolved)?;
+    Ok(resolved.to_string())
+}
+
+fn looks_like_relative_path(value: &str) -> bool {
+    value.starts_with('/')
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || (value.contains('/') && !value.contains("://"))
+}
+
+fn is_http_url(value: &str) -> bool {
+    Url::parse(value)
+        .map(|url| matches!(url.scheme(), "http" | "https"))
+        .unwrap_or(false)
+}
+
+fn update_normalized_source_urls(normalized_config: &str, sources: &[SourceRecord]) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            let Some(key) = item.get("key").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(source) = sources.iter().find(|source| source.key == key) else {
+                continue;
+            };
+            if let Some(object) = item.as_object_mut() {
+                object.insert("api".to_string(), Value::String(source.api.clone()));
+                if let Some(epg) = &source.epg {
+                    object.insert("epg".to_string(), Value::String(epg.clone()));
+                }
+                object.insert(
+                    "capability".to_string(),
+                    Value::String(source.capability.clone()),
+                );
+                object.insert(
+                    "capabilityNote".to_string(),
+                    Value::String(source.capability_note.clone()),
+                );
+                object.insert("enabled".to_string(), Value::Bool(source.enabled));
+                object.insert(
+                    "testStatus".to_string(),
+                    source
+                        .test_status
+                        .clone()
+                        .map(Value::String)
+                        .unwrap_or(Value::Null),
+                );
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
 }
 
 fn update_normalized_source_enabled(
@@ -513,6 +693,7 @@ mod tests {
                    raw_config TEXT NOT NULL,
                    normalized_config TEXT NOT NULL,
                    sources_json TEXT,
+                   source_base_url TEXT,
                    live_count INTEGER NOT NULL DEFAULT 0,
                    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                  );",
@@ -557,6 +738,18 @@ mod tests {
             last_checked_at: "刚刚".to_string(),
             request_count: 0,
         }
+    }
+
+    fn test_live_source() -> SourceRecord {
+        let mut source = test_source_with_key("live-relative", true);
+        source.name = "相对直播".to_string();
+        source.source_type = "live".to_string();
+        source.api = "./libs/tv/tvlive.txt".to_string();
+        source.site_type = None;
+        source.site_protocol = None;
+        source.capability = "needs-adapter".to_string();
+        source.capability_note = "相对地址需要配置基址".to_string();
+        source
     }
 
     fn insert_test_document(connection: &Connection, name: &str, enabled: bool) -> i64 {
@@ -708,5 +901,46 @@ mod tests {
         assert_eq!(updated_value["sites"][0]["testItemCount"], 8);
         assert_eq!(untouched.sources[0].test_status, None);
         assert_eq!(untouched_value["sites"][0]["testStatus"], Value::Null);
+    }
+
+    #[test]
+    fn source_base_url_resolves_relative_live_sources() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let source = test_live_source();
+        let sources_json = serialize_sources(&[source]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 1)",
+                params![
+                    "直播基址配置",
+                    "{}",
+                    r#"{"lives":[{"key":"live-relative","api":"./libs/tv/tvlive.txt","capability":"needs-adapter"}]}"#,
+                    sources_json
+                ],
+            )
+            .unwrap();
+        let document_id = connection.last_insert_rowid();
+
+        let updated = set_config_source_base_url(
+            &mut connection,
+            document_id,
+            "https://example.com/config/config.json",
+        )
+        .unwrap();
+
+        assert_eq!(
+            updated.sources[0].api,
+            "https://example.com/config/libs/tv/tvlive.txt"
+        );
+        assert_eq!(updated.sources[0].capability, "supported");
+        assert_eq!(
+            updated.source_base_url.as_deref(),
+            Some("https://example.com/config/config.json")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&updated.normalized_config).unwrap()["lives"][0]["api"],
+            "https://example.com/config/libs/tv/tvlive.txt"
+        );
     }
 }

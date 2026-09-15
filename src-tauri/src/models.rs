@@ -75,6 +75,8 @@ pub struct SaveConfigDocumentInput {
     pub normalized_config: String,
     pub sources: Vec<SourceRecord>,
     pub live_count: i64,
+    #[serde(default)]
+    pub source_base_url: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -98,4 +100,5 @@ pub struct ConfigDocument {
     pub source_count: i64,
     pub live_count: i64,
     pub imported_at: String,
+    pub source_base_url: Option<String>,
 }

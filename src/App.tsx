@@ -5,6 +5,7 @@ import {
   isTauriRuntime,
   listConfigDocuments,
   loadActiveConfig,
+  recoverKnownLiveSources,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
 import type { ViewKey } from "@/types/moseek";
@@ -73,11 +74,16 @@ function App() {
     if (!isTauriRuntime()) return;
     let cancelled = false;
     void Promise.all([listConfigDocuments(), loadActiveConfig()])
-      .then(([documents, document]) => {
+      .then(async ([documents, document]) => {
         if (cancelled) return;
+        const recoveredDocument = document
+          ? await recoverKnownLiveSources(document.id).catch(() => null)
+          : null;
+        if (cancelled) return;
+        const activeDocument = recoveredDocument ?? document;
         setConfigDocuments(documents ?? []);
-        if (document) {
-          setConfigDocument(document);
+        if (activeDocument) {
+          setConfigDocument(activeDocument);
         } else {
           clearConfigDocument();
         }

@@ -2314,6 +2314,7 @@ dependencies = [
 name = "moseek"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "keyring",
  "quick-xml 0.41.0",
  "reqwest 0.12.28",

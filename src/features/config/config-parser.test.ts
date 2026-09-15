@@ -113,6 +113,26 @@ describe("Moseek config parser", () => {
     expect(result.normalizedConfig).toContain('"parses"');
   });
 
+  it("resolves relative live URLs against a remote config URL", () => {
+    const result = parseConfigText(
+      `{
+        lives: [
+          { key: "live-2", name: "SA00", url: "./libs/tv/tvlive.txt" },
+          { key: "live-3", name: "IPV6", url: "./lib/tv/ipv6.m3u" }
+        ]
+      }`,
+      "https://config.example/repository/config.json",
+    );
+
+    expect(result.sources.map((source) => source.api)).toEqual([
+      "https://config.example/repository/libs/tv/tvlive.txt",
+      "https://config.example/repository/lib/tv/ipv6.m3u",
+    ]);
+    expect(
+      result.sources.every((source) => source.capability === "supported"),
+    ).toBe(true);
+  });
+
   it("classifies declarative HTML mappings without enabling remote scripts", () => {
     const result = parseConfigText(`{
       sites: [

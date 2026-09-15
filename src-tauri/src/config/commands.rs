@@ -1,4 +1,5 @@
 use rusqlite::{params, OptionalExtension};
+use std::collections::HashMap;
 use tauri::State;
 
 use crate::{
@@ -25,12 +26,13 @@ pub fn save_config_document(
 
     transaction
         .execute(
-            "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, source_base_url, live_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 name,
                 input.raw_config,
                 input.normalized_config,
                 sources_json,
+                input.source_base_url,
                 input.live_count
             ],
         )
@@ -47,6 +49,72 @@ pub fn save_config_document(
     transaction.commit().map_err(|error| error.to_string())?;
     storage::load_config_document(&connection, document_id)?
         .ok_or_else(|| "配置保存后无法读取".to_string())
+}
+
+#[tauri::command]
+pub fn set_config_source_base_url(
+    document_id: i64,
+    source_base_url: String,
+    state: State<'_, AppDatabase>,
+) -> Result<ConfigDocument, String> {
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    storage::set_config_source_base_url(&mut connection, document_id, &source_base_url)
+}
+
+#[tauri::command]
+pub async fn recover_known_live_sources(
+    document_id: i64,
+    state: State<'_, AppDatabase>,
+) -> Result<Option<ConfigDocument>, String> {
+    let sources = {
+        let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        storage::load_config_document(&connection, document_id)?
+            .ok_or_else(|| "配置不存在或已被删除".to_string())?
+            .sources
+    };
+    let mut replacements = HashMap::new();
+    for source in sources {
+        let candidates = match source.api.as_str() {
+            "./libs/tv/tvlive.txt" => {
+                vec!["https://raw.githubusercontent.com/my-tv1/tvv/main/live.txt"]
+            }
+            "./lib/tv/ipv6.m3u" | "./libs/tv/ipv6.m3u" => vec![
+                "https://raw.githubusercontent.com/fanmingming/live/main/tv/m3u/ipv6.m3u",
+                "https://raw.githubusercontent.com/lsjspl/TV/main/source/ipv6.m3u",
+            ],
+            "https://raw.githubusercontent.com/my-tv1/tvv/main/live.txt" => {
+                vec!["https://iptv-org.github.io/iptv/countries/cn.m3u"]
+            }
+            _ => Vec::new(),
+        };
+        for candidate in candidates {
+            let url = reqwest::Url::parse(candidate).map_err(|error| error.to_string())?;
+            match policy::fetch_text(url, 20 * 1024 * 1024, "公开直播兼容源").await {
+                Ok(text) if looks_like_live_source(candidate, &text) => {
+                    replacements.insert(source.key.clone(), candidate.to_string());
+                    break;
+                }
+                Ok(_) | Err(_) => continue,
+            }
+        }
+    }
+    if replacements.is_empty() {
+        return Ok(None);
+    }
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    storage::replace_known_live_source_urls(&mut connection, document_id, &replacements)
+}
+
+fn looks_like_live_source(url: &str, text: &str) -> bool {
+    let lower_url = url.to_ascii_lowercase();
+    let trimmed = text.trim_start();
+    if lower_url.ends_with(".m3u") || lower_url.ends_with(".m3u8") {
+        return trimmed.contains("#EXTINF") || trimmed.starts_with("#EXTM3U");
+    }
+    text.lines().any(|line| {
+        let line = line.trim();
+        line.contains("http://") || line.contains("https://")
+    })
 }
 
 #[tauri::command]

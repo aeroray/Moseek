@@ -1,10 +1,13 @@
 use std::{collections::HashMap, net::IpAddr, time::Duration};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::policy::{fetch_text_with_headers, fetch_text_with_method, validate_remote_url};
+use crate::policy::{
+    fetch_media_bytes, fetch_text_with_headers, fetch_text_with_method, validate_remote_url,
+};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,8 +35,30 @@ pub struct PlaybackResolution {
     pub parse_service_id: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaResource {
+    pub body_base64: String,
+    pub content_type: Option<String>,
+}
+
 const DEFAULT_SNIFFER_COMPANION_URL: &str = "http://127.0.0.1:57573/sniffer";
 const MAX_PARSE_REQUEST_BODY_BYTES: usize = 128 * 1024;
+
+#[tauri::command]
+pub async fn fetch_media_resource(
+    url: String,
+    headers: HashMap<String, String>,
+) -> Result<MediaResource, String> {
+    let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
+    let header_pairs = headers.into_iter().collect::<Vec<_>>();
+    let (body, content_type) =
+        fetch_media_bytes(parsed_url, 16 * 1024 * 1024, "媒体资源", &header_pairs).await?;
+    Ok(MediaResource {
+        body_base64: BASE64.encode(body),
+        content_type,
+    })
+}
 
 #[tauri::command]
 pub async fn resolve_playback(

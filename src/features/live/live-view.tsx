@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -20,16 +19,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { loadEpg, loadLiveCatalog } from "@/lib/live-adapter";
 import {
   isTauriRuntime,
@@ -41,6 +41,8 @@ import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
 import { MediaPlayer } from "@/features/player/media-player";
 import type { MediaStatus } from "@/features/player/media-player";
+
+const maxAutomaticStreamAttempts = 3;
 
 export function LiveView() {
   const sources = useAppStore((state) => state.sources);
@@ -54,7 +56,10 @@ export function LiveView() {
       ),
     [sources],
   );
-  const liveSource = liveSources[0];
+  const [liveSourceKey, setLiveSourceKey] = useState(liveSources[0]?.key ?? "");
+  const liveSource =
+    liveSources.find((source) => source.key === liveSourceKey) ??
+    liveSources[0];
   const [catalog, setCatalog] = useState<LiveCatalog>({
     channels: [],
     groups: [],
@@ -70,10 +75,32 @@ export function LiveView() {
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [resolvedStream, setResolvedStream] =
     useState<PlaybackResolution | null>(null);
+  const [streamIndex, setStreamIndex] = useState(0);
+  const streamIndexRef = useRef(0);
+
+  useEffect(() => {
+    if (!liveSources.some((source) => source.key === liveSourceKey)) {
+      setLiveSourceKey(liveSources[0]?.key ?? "");
+    }
+  }, [liveSourceKey, liveSources]);
 
   useEffect(() => {
     let cancelled = false;
-    setIsLoading(true);
+    setCatalog({ channels: [], groups: [] });
+    setLoadError(null);
+    setEpgPrograms([]);
+    setEpgError(null);
+    setGroupId("");
+    setSelectedChannelId("");
+    setStatus("idle");
+    setDiagnostic(null);
+    setResolvedStream(null);
+    setIsLoading(Boolean(liveSource));
+    if (!liveSource) {
+      return () => {
+        cancelled = true;
+      };
+    }
     void loadLiveCatalog(liveSource).then((result) => {
       if (cancelled) return;
       setCatalog(result.data);
@@ -119,19 +146,47 @@ export function LiveView() {
     (program) =>
       program.channelId === (selectedChannel?.epgId ?? selectedChannel?.id),
   );
+  const streamUrls = selectedChannel
+    ? selectedChannel.streamUrls.length > 0
+      ? selectedChannel.streamUrls
+      : [selectedChannel.streamUrl]
+    : [];
+  const selectedStreamUrl =
+    streamUrls[streamIndex] ?? streamUrls[0] ?? selectedChannel?.streamUrl;
+
+  useEffect(() => {
+    streamIndexRef.current = 0;
+    setStreamIndex(0);
+  }, [selectedChannel?.id]);
+
+  const tryNextStream = () => {
+    const lastAttemptIndex =
+      Math.min(streamUrls.length, maxAutomaticStreamAttempts) - 1;
+    if (streamIndexRef.current >= lastAttemptIndex) return false;
+    const nextIndex = streamIndexRef.current + 1;
+    streamIndexRef.current = nextIndex;
+    setStreamIndex(nextIndex);
+    setResolvedStream(null);
+    setStatus("loading");
+    setDiagnostic(
+      `当前线路不可用，正在尝试第 ${nextIndex + 1} 条线路（最多自动尝试 ${Math.min(streamUrls.length, maxAutomaticStreamAttempts)} 条）。`,
+    );
+    return true;
+  };
 
   useEffect(() => {
     let cancelled = false;
     setDiagnostic(null);
-    if (!selectedChannel) {
+    if (!selectedChannel || !selectedStreamUrl) {
       setResolvedStream(null);
+      setStatus("idle");
       return () => {
         cancelled = true;
       };
     }
     if (!isTauriRuntime()) {
       setResolvedStream({
-        url: selectedChannel.streamUrl,
+        url: selectedStreamUrl,
         mediaKind: selectedChannel.mediaKind,
         adapterId: "browser-preview",
       });
@@ -141,7 +196,7 @@ export function LiveView() {
     }
     setResolvedStream(null);
     setStatus("loading");
-    void resolvePlayback(selectedChannel.streamUrl)
+    void resolvePlayback(selectedStreamUrl)
       .then((resolution) => {
         if (cancelled) return;
         if (!resolution) {
@@ -151,6 +206,7 @@ export function LiveView() {
       })
       .catch((error) => {
         if (cancelled) return;
+        if (tryNextStream()) return;
         setDiagnostic(
           error instanceof Error ? error.message : "播放地址未通过安全检查",
         );
@@ -159,10 +215,17 @@ export function LiveView() {
     return () => {
       cancelled = true;
     };
-  }, [selectedChannel?.mediaKind, selectedChannel?.streamUrl]);
+  }, [selectedChannel?.mediaKind, selectedStreamUrl]);
 
   useEffect(() => {
     let cancelled = false;
+    if (!liveSource?.epg) {
+      setEpgPrograms([]);
+      setEpgError(null);
+      return () => {
+        cancelled = true;
+      };
+    }
     void loadEpg(liveSource).then((result) => {
       if (cancelled) return;
       setEpgPrograms(result.data.programs);
@@ -171,7 +234,7 @@ export function LiveView() {
     return () => {
       cancelled = true;
     };
-  }, [liveSource?.epg]);
+  }, [liveSource?.epg, liveSource?.key]);
 
   const selectChannel = (channel: LiveChannel) => {
     setSelectedChannelId(channel.id);
@@ -189,32 +252,11 @@ export function LiveView() {
 
   const canRenderPlayer = !isTauriRuntime() || resolvedStream !== null;
 
-  if (!selectedChannel) {
-    return (
-      <EmptyLiveState
-        error={loadError ?? epgError}
-        hasSource={Boolean(liveSource)}
-        loading={isLoading}
-        onOpenConfig={() => setActiveView("config")}
-      />
-    );
-  }
-
   return (
     <ScrollArea className="h-full">
       <div className="mx-auto flex w-full max-w-[1520px] flex-col gap-6 px-8 py-8">
         <section className="flex items-end justify-between gap-8">
           <div>
-            <div className="mb-3 flex items-center gap-2">
-              <Badge
-                variant="secondary"
-                className="gap-1.5 bg-accent text-accent-foreground"
-              >
-                <Radio data-icon="inline-start" aria-hidden="true" />
-                Phase 4
-              </Badge>
-              <span className="text-xs text-muted-foreground">直播与 EPG</span>
-            </div>
             <h1 className="font-display text-3xl font-semibold tracking-tight">
               直播
             </h1>
@@ -222,11 +264,44 @@ export function LiveView() {
               频道、台标和节目单集中在一个工作区。切台和收藏状态保存在本机。
             </p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span className="size-2 rounded-full bg-[color:var(--status-supported)]" />
+          <div className="text-xs text-muted-foreground">
             {channels.length} 个频道 · {groups.length} 个分组
           </div>
         </section>
+
+        <Card className="py-0">
+          <CardContent className="flex items-center justify-between gap-4 px-4 py-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium">直播源</p>
+              <p className="mt-1 truncate text-xs text-muted-foreground">
+                {liveSource
+                  ? `${liveSource.name} · 频道目录与节目单分别从当前源读取`
+                  : "没有启用的直播源，先保留工作区结构"}
+              </p>
+            </div>
+            <Select
+              value={liveSourceKey}
+              onValueChange={(value) => {
+                setLiveSourceKey(value);
+                setQuery("");
+              }}
+              disabled={liveSources.length === 0}
+            >
+              <SelectTrigger size="sm" className="w-56 shrink-0">
+                <SelectValue placeholder="选择直播源" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {liveSources.map((source) => (
+                    <SelectItem key={source.key} value={source.key}>
+                      {source.name}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </CardContent>
+        </Card>
 
         {(loadError || epgError) && (
           <Alert variant="destructive">
@@ -254,39 +329,50 @@ export function LiveView() {
               <CardDescription>选择频道组</CardDescription>
             </CardHeader>
             <CardContent className="flex flex-col gap-1 p-3">
-              {groups.map((group) => (
-                <Button
-                  key={group.id}
-                  type="button"
-                  variant={group.id === groupId ? "secondary" : "ghost"}
-                  className="justify-between"
-                  onClick={() => {
-                    setGroupId(group.id);
-                    setSelectedChannelId(
-                      channels.find((channel) => channel.groupId === group.id)
-                        ?.id ?? "",
-                    );
-                  }}
-                >
-                  <span className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        "size-2 rounded-full",
-                        group.id === groupId
-                          ? "bg-primary"
-                          : "bg-muted-foreground/50",
-                      )}
-                    />
-                    {group.name}
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    {
-                      channels.filter((channel) => channel.groupId === group.id)
-                        .length
-                    }
-                  </span>
-                </Button>
-              ))}
+              {groups.length > 0 ? (
+                groups.map((group) => (
+                  <Button
+                    key={group.id}
+                    type="button"
+                    variant={group.id === groupId ? "secondary" : "ghost"}
+                    className="justify-between"
+                    onClick={() => {
+                      setGroupId(group.id);
+                      setSelectedChannelId(
+                        channels.find((channel) => channel.groupId === group.id)
+                          ?.id ?? "",
+                      );
+                    }}
+                  >
+                    <span className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "size-2 rounded-full",
+                          group.id === groupId
+                            ? "bg-primary"
+                            : "bg-muted-foreground/50",
+                        )}
+                      />
+                      {group.name}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {
+                        channels.filter(
+                          (channel) => channel.groupId === group.id,
+                        ).length
+                      }
+                    </span>
+                  </Button>
+                ))
+              ) : (
+                <div className="rounded-md border border-dashed px-3 py-4 text-center text-xs leading-5 text-muted-foreground">
+                  {isLoading
+                    ? "正在读取频道分组..."
+                    : liveSource
+                      ? "当前源暂无可解析分组"
+                      : "启用直播源后显示分组"}
+                </div>
+              )}
               <Separator className="my-3" />
               <div className="rounded-md border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
                 M3U/TXT/JSON 直播源解析入口已保留。远程频道地址不会执行脚本。
@@ -325,32 +411,34 @@ export function LiveView() {
             <CardContent className="p-0">
               <ScrollArea className="h-[565px]">
                 <div className="flex flex-col gap-1 p-3">
-                  {filteredChannels.map((channel) => {
-                    const favorite = liveFavorites.includes(channel.id);
-                    return (
-                      <button
-                        key={channel.id}
-                        type="button"
-                        className={cn(
-                          "flex items-center gap-3 rounded-md px-3 py-3 text-left transition-colors hover:bg-muted",
-                          selectedChannel.id === channel.id &&
-                            "bg-accent text-accent-foreground",
-                        )}
-                        onClick={() => selectChannel(channel)}
-                      >
-                        <span className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-card text-sm font-semibold">
-                          {channel.name.slice(0, 1)}
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="block truncate text-sm font-medium">
-                            {channel.name}
+                  {filteredChannels.length > 0 ? (
+                    filteredChannels.map((channel) => {
+                      const favorite = liveFavorites.includes(channel.id);
+                      return (
+                        <button
+                          key={channel.id}
+                          type="button"
+                          className={cn(
+                            "flex items-center gap-3 rounded-md px-3 py-3 text-left transition-colors hover:bg-muted",
+                            selectedChannel?.id === channel.id &&
+                              "bg-accent text-accent-foreground",
+                          )}
+                          onClick={() => selectChannel(channel)}
+                        >
+                          <span className="flex size-10 shrink-0 items-center justify-center rounded-md border bg-card text-sm font-semibold">
+                            {channel.name.slice(0, 1)}
                           </span>
-                          <span className="mt-1 block text-xs text-muted-foreground">
-                            {channel.mediaKind.toUpperCase()} ·{" "}
-                            {channel.groupName}
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-medium">
+                              {channel.name}
+                            </span>
+                            <span className="mt-1 block text-xs text-muted-foreground">
+                              {channel.mediaKind.toUpperCase()} ·{" "}
+                              {channel.groupName}
+                              {channel.streamUrls.length > 1 &&
+                                ` · ${channel.streamUrls.length} 条线路`}
+                            </span>
                           </span>
-                        </span>
-                        <span className="flex items-center gap-2">
                           {favorite && (
                             <Heart
                               className="fill-primary text-primary"
@@ -358,18 +446,23 @@ export function LiveView() {
                               aria-hidden="true"
                             />
                           )}
-                          <span
-                            className={cn(
-                              "size-2 rounded-full",
-                              selectedChannel.id === channel.id
-                                ? "bg-primary"
-                                : "bg-[color:var(--status-supported)]",
-                            )}
-                          />
-                        </span>
-                      </button>
-                    );
-                  })}
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="flex h-[565px] flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+                      <Radio className="size-6" aria-hidden="true" />
+                      <p>
+                        {query.trim()
+                          ? "没有匹配的频道"
+                          : isLoading
+                            ? "正在读取频道目录..."
+                            : liveSource
+                              ? "当前直播源没有可解析频道"
+                              : "启用直播源后显示频道"}
+                      </p>
+                    </div>
+                  )}
                 </div>
                 <ScrollBar />
               </ScrollArea>
@@ -377,206 +470,247 @@ export function LiveView() {
           </Card>
 
           <div className="flex min-w-0 flex-col gap-5">
-            <Card>
-              <CardHeader className="pb-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <CardTitle className="text-base">
-                      {selectedChannel.name}
+            {selectedChannel ? (
+              <>
+                <Card>
+                  <CardHeader className="pb-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <CardTitle className="text-base">
+                          {selectedChannel.name}
+                        </CardTitle>
+                        <CardDescription>
+                          {selectedChannel.groupName} ·{" "}
+                          {selectedChannel.mediaKind.toUpperCase()}
+                          {streamUrls.length > 1 &&
+                            ` · ${streamUrls.length} 条线路`}
+                        </CardDescription>
+                      </div>
+                      <Button
+                        type="button"
+                        variant={
+                          liveFavorites.includes(selectedChannel.id)
+                            ? "secondary"
+                            : "outline"
+                        }
+                        size="icon-sm"
+                        aria-label={
+                          liveFavorites.includes(selectedChannel.id)
+                            ? "取消收藏频道"
+                            : "收藏频道"
+                        }
+                        onClick={() => toggleLiveFavorite(selectedChannel)}
+                      >
+                        <Heart
+                          className={cn(
+                            liveFavorites.includes(selectedChannel.id) &&
+                              "fill-primary text-primary",
+                          )}
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
+                      </Button>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3">
+                    {canRenderPlayer ? (
+                      <MediaPlayer
+                        key={resolvedStream?.url ?? selectedStreamUrl}
+                        title={selectedChannel.name}
+                        url={resolvedStream?.url ?? selectedStreamUrl}
+                        kind={
+                          resolvedStream?.mediaKind ?? selectedChannel.mediaKind
+                        }
+                        onStatus={(nextStatus, message) => {
+                          if (nextStatus === "error" && tryNextStream()) {
+                            return;
+                          }
+                          setStatus(nextStatus);
+                          if (
+                            nextStatus === "ready" ||
+                            nextStatus === "playing"
+                          ) {
+                            setDiagnostic(null);
+                          } else if (message) {
+                            const attempted = Math.min(
+                              streamIndexRef.current + 1,
+                              streamUrls.length,
+                            );
+                            setDiagnostic(
+                              streamUrls.length > 1
+                                ? `${message} 已尝试 ${attempted} 条线路。`
+                                : message,
+                            );
+                          }
+                        }}
+                      />
+                    ) : (
+                      <div className="flex aspect-video items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
+                        正在校验播放地址...
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between text-xs text-muted-foreground">
+                      <span className="flex items-center gap-2">
+                        <span
+                          className={cn(
+                            "size-2 rounded-full",
+                            status === "error"
+                              ? "bg-destructive"
+                              : status === "playing"
+                                ? "bg-[color:var(--status-supported)]"
+                                : "bg-muted-foreground",
+                          )}
+                        />
+                        {statusLabel(status)}
+                      </span>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label="上一台"
+                          disabled={selectedIndex <= 0}
+                          onClick={() => stepChannel(-1)}
+                        >
+                          <ChevronLeft
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label="下一台"
+                          disabled={
+                            selectedIndex < 0 ||
+                            selectedIndex >= channels.length - 1
+                          }
+                          onClick={() => stepChannel(1)}
+                        >
+                          <ChevronRight
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                        </Button>
+                      </div>
+                    </div>
+                    {diagnostic && (
+                      <Alert variant="destructive">
+                        <CircleAlert
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
+                        <AlertTitle>频道播放诊断</AlertTitle>
+                        <AlertDescription>{diagnostic}</AlertDescription>
+                      </Alert>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Clock3 data-icon="inline-start" aria-hidden="true" />
+                      节目单 EPG
                     </CardTitle>
                     <CardDescription>
-                      {selectedChannel.groupName} ·{" "}
-                      {selectedChannel.mediaKind.toUpperCase()}
+                      {selectedChannel.name} · 当前源节目单
                     </CardDescription>
-                  </div>
-                  <Button
-                    type="button"
-                    variant={
-                      liveFavorites.includes(selectedChannel.id)
-                        ? "secondary"
-                        : "outline"
-                    }
-                    size="icon-sm"
-                    aria-label={
-                      liveFavorites.includes(selectedChannel.id)
-                        ? "取消收藏频道"
-                        : "收藏频道"
-                    }
-                    onClick={() => toggleLiveFavorite(selectedChannel)}
-                  >
-                    <Heart
-                      className={cn(
-                        liveFavorites.includes(selectedChannel.id) &&
-                          "fill-primary text-primary",
-                      )}
-                      data-icon="inline-start"
-                      aria-hidden="true"
-                    />
-                  </Button>
-                </div>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-3">
-                {canRenderPlayer ? (
-                  <MediaPlayer
-                    key={resolvedStream?.url ?? selectedChannel.streamUrl}
-                    title={selectedChannel.name}
-                    url={resolvedStream?.url ?? selectedChannel.streamUrl}
-                    kind={
-                      resolvedStream?.mediaKind ?? selectedChannel.mediaKind
-                    }
-                    onStatus={(nextStatus, message) => {
-                      setStatus(nextStatus);
-                      if (message) setDiagnostic(message);
-                    }}
-                  />
-                ) : (
-                  <div className="flex aspect-video items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
-                    正在校验播放地址...
-                  </div>
-                )}
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <span className="flex items-center gap-2">
-                    <span
-                      className={cn(
-                        "size-2 rounded-full",
-                        status === "error"
-                          ? "bg-destructive"
-                          : status === "playing"
-                            ? "bg-[color:var(--status-supported)]"
-                            : "bg-muted-foreground",
-                      )}
-                    />
-                    {statusLabel(status)}
-                  </span>
-                  <div className="flex items-center gap-1">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="上一台"
-                      disabled={selectedIndex <= 0}
-                      onClick={() => stepChannel(-1)}
-                    >
-                      <ChevronLeft
-                        data-icon="inline-start"
-                        aria-hidden="true"
-                      />
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label="下一台"
-                      disabled={
-                        selectedIndex < 0 ||
-                        selectedIndex >= channels.length - 1
-                      }
-                      onClick={() => stepChannel(1)}
-                    >
-                      <ChevronRight
-                        data-icon="inline-start"
-                        aria-hidden="true"
-                      />
-                    </Button>
-                  </div>
-                </div>
-                {diagnostic && (
-                  <Alert variant="destructive">
-                    <CircleAlert data-icon="inline-start" aria-hidden="true" />
-                    <AlertTitle>频道播放诊断</AlertTitle>
-                    <AlertDescription>{diagnostic}</AlertDescription>
-                  </Alert>
-                )}
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Clock3 data-icon="inline-start" aria-hidden="true" />
-                  节目单 EPG
-                </CardTitle>
-                <CardDescription>
-                  {selectedChannel.name} · 当前源节目单
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-2">
-                {programs.length > 0 ? (
-                  programs.map((program, index) => (
-                    <div
-                      key={program.id}
-                      className={cn(
-                        "rounded-md border p-3",
-                        index === 0 && "border-primary/50 bg-accent/50",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-3">
-                        <p className="text-sm font-medium">{program.title}</p>
-                        <span className="font-mono text-[11px] text-muted-foreground">
-                          {program.startAt}–{program.endAt}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        {program.description}
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-2">
+                    {programs.length > 0 ? (
+                      programs.map((program, index) => (
+                        <div
+                          key={program.id}
+                          className={cn(
+                            "rounded-md border p-3",
+                            index === 0 && "border-primary/50 bg-accent/50",
+                          )}
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-medium">
+                              {program.title}
+                            </p>
+                            <span className="font-mono text-[11px] text-muted-foreground">
+                              {program.startAt}–{program.endAt}
+                            </span>
+                          </div>
+                          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                            {program.description}
+                          </p>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="py-4 text-sm text-muted-foreground">
+                        暂无 EPG 数据。
                       </p>
+                    )}
+                  </CardContent>
+                </Card>
+              </>
+            ) : (
+              <>
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="text-base">频道预览</CardTitle>
+                    <CardDescription>
+                      {liveSource?.name ?? "尚未选择直播源"}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex flex-col gap-3">
+                    <div className="flex aspect-video flex-col items-center justify-center gap-3 rounded-md bg-black text-sm text-white/70">
+                      <Radio
+                        className="size-7 text-white/50"
+                        aria-hidden="true"
+                      />
+                      <span>
+                        {isLoading
+                          ? "正在读取频道目录..."
+                          : liveSource
+                            ? "选择频道后开始播放"
+                            : "启用直播源后开始播放"}
+                      </span>
                     </div>
-                  ))
-                ) : (
-                  <p className="py-4 text-sm text-muted-foreground">
-                    暂无 EPG 数据。
-                  </p>
-                )}
-              </CardContent>
-            </Card>
+                    <p className="text-xs leading-5 text-muted-foreground">
+                      {loadError ??
+                        (liveSource
+                          ? "当前源还没有可用频道，播放区域会在目录加载后保持可用。"
+                          : "可以先在配置中心导入并启用一个直播源。")}
+                    </p>
+                    {!liveSource && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setActiveView("config")}
+                      >
+                        打开配置中心
+                      </Button>
+                    )}
+                  </CardContent>
+                </Card>
+
+                <Card>
+                  <CardHeader className="pb-3">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Clock3 data-icon="inline-start" aria-hidden="true" />
+                      节目单 EPG
+                    </CardTitle>
+                    <CardDescription>选择频道后显示节目单</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="py-4 text-sm text-muted-foreground">
+                      暂无选中的频道。
+                    </p>
+                  </CardContent>
+                </Card>
+              </>
+            )}
           </div>
         </div>
       </div>
       <ScrollBar />
     </ScrollArea>
-  );
-}
-
-function EmptyLiveState({
-  error,
-  hasSource,
-  loading,
-  onOpenConfig,
-}: {
-  error: string | null;
-  hasSource: boolean;
-  loading: boolean;
-  onOpenConfig: () => void;
-}) {
-  const title = loading
-    ? "正在读取直播频道"
-    : error
-      ? "直播源加载失败"
-      : hasSource
-        ? "直播源没有可解析频道"
-        : "没有启用的直播源";
-  const description = error
-    ? `${error}。请在配置中心更新直播源地址或停用该源。`
-    : hasSource
-      ? "请检查直播源格式和频道地址。"
-      : "请先导入或启用直播源。";
-
-  return (
-    <div className="flex h-full items-center justify-center">
-      <Empty className="max-w-md border border-dashed">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <Radio data-icon="inline-start" aria-hidden="true" />
-          </EmptyMedia>
-          <EmptyTitle>{title}</EmptyTitle>
-          <EmptyDescription>{description}</EmptyDescription>
-        </EmptyHeader>
-        {!loading && (
-          <Button type="button" variant="outline" onClick={onOpenConfig}>
-            更新直播源
-          </Button>
-        )}
-      </Empty>
-    </div>
   );
 }
 

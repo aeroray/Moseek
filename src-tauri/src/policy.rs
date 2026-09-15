@@ -52,6 +52,15 @@ pub(crate) async fn fetch_text_with_method(
     String::from_utf8(body).map_err(|_| format!("{resource_name}不是有效的 UTF-8 文本"))
 }
 
+pub(crate) async fn fetch_media_bytes(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+    headers: &[(String, String)],
+) -> Result<(Vec<u8>, Option<String>), String> {
+    fetch_response_bytes(url, Method::GET, max_bytes, resource_name, headers, None).await
+}
+
 pub(crate) async fn fetch_json(
     url: Url,
     max_bytes: usize,
@@ -73,6 +82,19 @@ async fn fetch_bytes_with_request(
     headers: &[(String, String)],
     body: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
+    fetch_response_bytes(url, method, max_bytes, resource_name, headers, body)
+        .await
+        .map(|(body, _)| body)
+}
+
+async fn fetch_response_bytes(
+    url: Url,
+    method: Method,
+    max_bytes: usize,
+    resource_name: &str,
+    headers: &[(String, String)],
+    body: Option<Vec<u8>>,
+) -> Result<(Vec<u8>, Option<String>), String> {
     validate_remote_url(&url)?;
     let client = build_http_client(&url)?;
     let mut request = client.request(method, url);
@@ -107,6 +129,11 @@ async fn fetch_bytes_with_request(
         .map_err(|error| error.to_string())?
         .error_for_status()
         .map_err(|error| error.to_string())?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
     if response
         .content_length()
         .is_some_and(|size| size > max_bytes as u64)
@@ -131,7 +158,7 @@ async fn fetch_bytes_with_request(
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok((body, content_type))
 }
 
 fn build_http_client(url: &Url) -> Result<Client, String> {

@@ -174,18 +174,6 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
       <div className="mx-auto flex w-full max-w-[1520px] flex-col gap-6 px-8 py-8">
         <section className="flex items-end justify-between gap-8">
           <div>
-            <div className="mb-3 flex items-center gap-2">
-              <Badge
-                variant="secondary"
-                className="gap-1.5 bg-accent text-accent-foreground"
-              >
-                <Film data-icon="inline-start" aria-hidden="true" />
-                Phase 3
-              </Badge>
-              <span className="text-xs text-muted-foreground">
-                普通 CMS 浏览
-              </span>
-            </div>
             <h1 className="font-display text-3xl font-semibold tracking-tight">
               影视库
             </h1>
