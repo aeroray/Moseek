@@ -160,6 +160,7 @@ export function SettingsView({
           2,
         ),
       );
+      refreshScriptExecutionLogs();
     } finally {
       setIsExecutingScript(false);
     }
@@ -312,6 +313,7 @@ export function SettingsView({
           2,
         ),
       );
+      refreshScriptExecutionLogs();
     } finally {
       setIsExecutingScript(false);
     }

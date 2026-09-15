@@ -446,9 +446,11 @@ fn parse_xml_payload(text: &str) -> Result<Value, String> {
                 }
             }
             Ok(Event::Text(event)) => {
-                let value = event
-                    .unescape()
-                    .map_err(|error| format!("CMS XML 文本解析失败：{error}"))?
+                let decoded = event
+                    .decode()
+                    .map_err(|error| format!("CMS XML 文本解码失败：{error}"))?;
+                let value = quick_xml::escape::unescape(decoded.as_ref())
+                    .map_err(|error| format!("CMS XML 文本实体解析失败：{error}"))?
                     .into_owned();
                 store_xml_value(
                     &mut current_item,
@@ -652,7 +654,7 @@ fn parse_categories(payload: &Value) -> Vec<VodCategory> {
 fn parse_item_categories(value: &Value) -> Vec<VodCategory> {
     let class = value_text(value, &["vod_class", "category", "categories"]);
     class
-        .split(|character| matches!(character, '/' | ',' | '、' | '|'))
+        .split(['/', ',', '、', '|'])
         .map(str::trim)
         .filter(|name| !name.is_empty())
         .enumerate()
@@ -746,7 +748,7 @@ fn split_delimited(value: &str, delimiter: &str) -> Vec<String> {
 
 fn split_people(value: &str) -> Vec<String> {
     value
-        .split(|character| matches!(character, '/' | ',' | '、' | '|'))
+        .split(['/', ',', '、', '|'])
         .map(str::trim)
         .filter(|item| !item.is_empty())
         .map(ToOwned::to_owned)

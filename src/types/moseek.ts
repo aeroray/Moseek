@@ -36,6 +36,7 @@ export interface ParseServiceRecord {
   url: string;
   method: string;
   headers: Record<string, string>;
+  body?: Record<string, unknown> | null;
   enabled: boolean;
   capability: CapabilityStatus;
   capabilityNote: string;

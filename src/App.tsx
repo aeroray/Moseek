@@ -1,12 +1,6 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 
 import { AppShell } from "@/components/app-shell";
-import { BrowseView } from "@/features/browse/browse-view";
-import { FavoritesView } from "@/features/browse/favorites-view";
-import { HistoryView } from "@/features/browse/history-view";
-import { ConfigCenter } from "@/features/config/config-center";
-import { LiveView } from "@/features/live/live-view";
-import { SettingsView } from "@/features/settings/settings-view";
 import {
   isTauriRuntime,
   listConfigDocuments,
@@ -14,6 +8,37 @@ import {
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
 import type { ViewKey } from "@/types/moseek";
+
+const BrowseView = lazy(() =>
+  import("@/features/browse/browse-view").then(({ BrowseView }) => ({
+    default: BrowseView,
+  })),
+);
+const FavoritesView = lazy(() =>
+  import("@/features/browse/favorites-view").then(({ FavoritesView }) => ({
+    default: FavoritesView,
+  })),
+);
+const HistoryView = lazy(() =>
+  import("@/features/browse/history-view").then(({ HistoryView }) => ({
+    default: HistoryView,
+  })),
+);
+const ConfigCenter = lazy(() =>
+  import("@/features/config/config-center").then(({ ConfigCenter }) => ({
+    default: ConfigCenter,
+  })),
+);
+const LiveView = lazy(() =>
+  import("@/features/live/live-view").then(({ LiveView }) => ({
+    default: LiveView,
+  })),
+);
+const SettingsView = lazy(() =>
+  import("@/features/settings/settings-view").then(({ SettingsView }) => ({
+    default: SettingsView,
+  })),
+);
 
 function App() {
   const activeView = useAppStore((state) => state.activeView);
@@ -71,20 +96,30 @@ function App() {
 
   return (
     <AppShell activeView={activeView} onNavigate={navigate}>
-      {activeView === "config" && <ConfigCenter />}
-      {activeView === "settings" && (
-        <SettingsView
-          theme={theme}
-          onThemeChange={setTheme}
-          snifferCompanionUrl={snifferCompanionUrl}
-          onSnifferCompanionUrlChange={setSnifferCompanionUrl}
-        />
-      )}
-      {activeView === "browse" && <BrowseView onNavigate={navigate} />}
-      {activeView === "live" && <LiveView />}
-      {activeView === "favorites" && <FavoritesView onNavigate={navigate} />}
-      {activeView === "history" && <HistoryView onNavigate={navigate} />}
+      <Suspense fallback={<ViewLoading />}>
+        {activeView === "config" && <ConfigCenter />}
+        {activeView === "settings" && (
+          <SettingsView
+            theme={theme}
+            onThemeChange={setTheme}
+            snifferCompanionUrl={snifferCompanionUrl}
+            onSnifferCompanionUrlChange={setSnifferCompanionUrl}
+          />
+        )}
+        {activeView === "browse" && <BrowseView onNavigate={navigate} />}
+        {activeView === "live" && <LiveView />}
+        {activeView === "favorites" && <FavoritesView onNavigate={navigate} />}
+        {activeView === "history" && <HistoryView onNavigate={navigate} />}
+      </Suspense>
     </AppShell>
+  );
+}
+
+function ViewLoading() {
+  return (
+    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+      正在加载工作区…
+    </div>
   );
 }
 

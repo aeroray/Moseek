@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   countParsedCapabilities,
   formatConfigText,
+  MAX_CONFIG_TEXT_BYTES,
   parseConfigText,
   repairConfigText,
 } from "@/features/config/config-parser";
@@ -86,7 +87,10 @@ describe("Moseek config parser", () => {
   it("accepts the data alias and normalizes safe GET parse services", () => {
     const result = parseConfigText(`{
       data: [{ id: "data-source", name: "数据源", type: 0, api: "https://example.com/api" }],
-      parses: [{ id: "parse-1", name: "解析一", url: "https://parser.example/parse", headers: { Referer: "https://example.com" } }]
+      parses: [
+        { id: "parse-1", name: "解析一", url: "https://parser.example/parse", headers: { Referer: "https://example.com" } },
+        { id: "parse-2", name: "POST 解析", url: "https://parser.example/post", method: "POST", body: { token: "demo" } }
+      ]
     }`);
 
     expect(result.ok).toBe(true);
@@ -98,6 +102,12 @@ describe("Moseek config parser", () => {
         capability: "supported",
         method: "GET",
         headers: { Referer: "https://example.com" },
+      },
+      {
+        key: "parse-2",
+        capability: "supported",
+        method: "POST",
+        body: { token: "demo" },
       },
     ]);
     expect(result.normalizedConfig).toContain('"parses"');
@@ -286,5 +296,13 @@ describe("Moseek config parser", () => {
     expect(repaired.ok).toBe(false);
     expect(repaired.text).toBe(malformed);
     expect(repaired.issue?.line).not.toBeNull();
+  });
+
+  it("rejects oversized config text before parsing or formatting", () => {
+    const oversized = " ".repeat(MAX_CONFIG_TEXT_BYTES + 1);
+
+    expect(parseConfigText(oversized).issues[0]?.message).toContain("10 MiB");
+    expect(formatConfigText(oversized).issue?.message).toContain("10 MiB");
+    expect(repairConfigText(oversized).issue?.message).toContain("10 MiB");
   });
 });

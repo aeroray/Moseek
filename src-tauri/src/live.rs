@@ -268,9 +268,11 @@ fn parse_xmltv(text: &str) -> Result<Vec<EpgProgram>, String> {
             }
             Ok(Event::Text(text_event)) => {
                 if let Some(field) = current_field {
-                    let text_value = text_event
-                        .unescape()
-                        .map_err(|error| format!("EPG 文本解析失败：{error}"))?
+                    let decoded = text_event
+                        .decode()
+                        .map_err(|error| format!("EPG 文本解码失败：{error}"))?;
+                    let text_value = quick_xml::escape::unescape(decoded.as_ref())
+                        .map_err(|error| format!("EPG 文本实体解析失败：{error}"))?
                         .into_owned();
                     if let Some(program) = current.as_mut() {
                         if field == "title" {

@@ -158,23 +158,21 @@ impl Transport {
         })
         .map_err(|error| format!("发送 http_get 宿主调用失败：{error}"))?;
 
-        loop {
-            let line = self
-                .read_line()
-                .map_err(|error| format!("读取 http_get 宿主响应失败：{error}"))?
-                .ok_or_else(|| "http_get 宿主响应提前结束".to_string())?;
-            let response = serde_json::from_str::<HostResponse>(&line)
-                .map_err(|error| format!("http_get 宿主响应不是有效 JSON：{error}"))?;
-            if response.kind != "hostResponse" || response.id != id {
-                return Err("http_get 宿主响应 ID 或类型不匹配".to_string());
-            }
-            if !response.ok {
-                return Err(response
-                    .error
-                    .unwrap_or_else(|| "http_get 宿主调用失败".to_string()));
-            }
-            return Ok(response.value.unwrap_or(Value::Null));
+        let line = self
+            .read_line()
+            .map_err(|error| format!("读取 http_get 宿主响应失败：{error}"))?
+            .ok_or_else(|| "http_get 宿主响应提前结束".to_string())?;
+        let response = serde_json::from_str::<HostResponse>(&line)
+            .map_err(|error| format!("http_get 宿主响应不是有效 JSON：{error}"))?;
+        if response.kind != "hostResponse" || response.id != id {
+            return Err("http_get 宿主响应 ID 或类型不匹配".to_string());
         }
+        if !response.ok {
+            return Err(response
+                .error
+                .unwrap_or_else(|| "http_get 宿主调用失败".to_string()));
+        }
+        Ok(response.value.unwrap_or(Value::Null))
     }
 }
 

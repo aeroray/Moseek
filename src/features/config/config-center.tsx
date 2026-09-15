@@ -128,6 +128,7 @@ import type {
 } from "@/types/moseek";
 
 type SourceFilter = "all" | CapabilityStatus;
+type AdapterFilter = "all" | AdapterExecution;
 type ImportMode = "remote" | "local";
 
 export function ConfigCenter() {
@@ -148,6 +149,7 @@ export function ConfigCenter() {
   const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
   const [query, setQuery] = useState("");
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  const [adapterFilter, setAdapterFilter] = useState<AdapterFilter>("all");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
     null,
   );
@@ -205,6 +207,37 @@ export function ConfigCenter() {
         ),
       })),
     [sources],
+  );
+  const adapterCounts = useMemo(() => {
+    const counts: Record<AdapterExecution, number> = {
+      enabled: 0,
+      partial: 0,
+      "needs-adapter": 0,
+      blocked: 0,
+    };
+    for (const { adapter, sources: matchedSources } of adapterRows) {
+      counts[adapter.execution] += matchedSources.length;
+    }
+    return counts;
+  }, [adapterRows]);
+  const adapterProfileCounts = useMemo(() => {
+    const counts: Record<AdapterExecution, number> = {
+      enabled: 0,
+      partial: 0,
+      "needs-adapter": 0,
+      blocked: 0,
+    };
+    for (const { adapter } of adapterRows) counts[adapter.execution] += 1;
+    return counts;
+  }, [adapterRows]);
+  const visibleAdapterRows = useMemo(
+    () =>
+      adapterFilter === "all"
+        ? adapterRows
+        : adapterRows.filter(
+            ({ adapter }) => adapter.execution === adapterFilter,
+          ),
+    [adapterFilter, adapterRows],
   );
 
   useEffect(() => {
@@ -886,6 +919,7 @@ export function ConfigCenter() {
                         <TableRow className="hover:bg-transparent">
                           <TableHead className="w-[30%] pl-6">资源源</TableHead>
                           <TableHead>能力</TableHead>
+                          <TableHead>适配器</TableHead>
                           <TableHead>支持范围</TableHead>
                           <TableHead>连接测试</TableHead>
                           <TableHead className="text-right">启用</TableHead>
@@ -931,6 +965,21 @@ export function ConfigCenter() {
                             </TableCell>
                             <TableCell>
                               <CapabilityBadge status={source.capability} />
+                            </TableCell>
+                            <TableCell className="max-w-52">
+                              {(() => {
+                                const adapter = getAdapterProfile(source);
+                                return (
+                                  <div className="flex min-w-0 flex-col items-start gap-1.5">
+                                    <span className="max-w-full truncate text-xs font-medium">
+                                      {adapter.label}
+                                    </span>
+                                    <AdapterStatusBadge
+                                      execution={adapter.execution}
+                                    />
+                                  </div>
+                                );
+                              })()}
                             </TableCell>
                             <TableCell className="max-w-80">
                               <p className="truncate text-sm text-muted-foreground">
@@ -1024,16 +1073,64 @@ export function ConfigCenter() {
           </TabsContent>
 
           <TabsContent value="adapters">
+            <div className="grid grid-cols-4 gap-3">
+              <AdapterSummary
+                label="可执行"
+                value={adapterCounts.enabled}
+                detail={`${adapterProfileCounts.enabled} 类适配器`}
+                execution="enabled"
+              />
+              <AdapterSummary
+                label="部分支持"
+                value={adapterCounts.partial}
+                detail={`${adapterProfileCounts.partial} 类适配器`}
+                execution="partial"
+              />
+              <AdapterSummary
+                label="待适配"
+                value={adapterCounts["needs-adapter"]}
+                detail={`${adapterProfileCounts["needs-adapter"]} 类适配器`}
+                execution="needs-adapter"
+              />
+              <AdapterSummary
+                label="已阻止"
+                value={adapterCounts.blocked}
+                detail={`${adapterProfileCounts.blocked} 类适配器`}
+                execution="blocked"
+              />
+            </div>
             <Card>
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Link2 data-icon="inline-start" aria-hidden="true" />
-                  适配器能力矩阵
-                </CardTitle>
-                <CardDescription>
-                  只有内置 CMS
-                  和直播适配器会执行网络请求，其余扩展只做识别和诊断。
-                </CardDescription>
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Link2 data-icon="inline-start" aria-hidden="true" />
+                      适配器能力矩阵
+                    </CardTitle>
+                    <CardDescription>
+                      可执行不等于所有源都可用；源还需要通过能力审计，脚本源还需要启用本地档案。
+                    </CardDescription>
+                  </div>
+                  <Select
+                    value={adapterFilter}
+                    onValueChange={(value) =>
+                      setAdapterFilter(value as AdapterFilter)
+                    }
+                  >
+                    <SelectTrigger className="w-40" aria-label="筛选适配器状态">
+                      <SelectValue placeholder="适配器状态" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="all">全部适配器</SelectItem>
+                        <SelectItem value="enabled">可执行</SelectItem>
+                        <SelectItem value="partial">部分支持</SelectItem>
+                        <SelectItem value="needs-adapter">待适配</SelectItem>
+                        <SelectItem value="blocked">已阻止</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
               </CardHeader>
               <CardContent className="p-0">
                 <Table>
@@ -1047,48 +1144,50 @@ export function ConfigCenter() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {adapterRows.map(({ adapter, sources: matchedSources }) => (
-                      <TableRow key={adapter.id}>
-                        <TableCell className="pl-6">
-                          <div>
-                            <p className="font-medium">{adapter.label}</p>
-                            <p className="mt-1 font-mono text-[11px] text-muted-foreground">
-                              {adapter.id}
-                            </p>
-                          </div>
-                        </TableCell>
-                        <TableCell>
-                          <AdapterStatusBadge execution={adapter.execution} />
-                        </TableCell>
-                        <TableCell>
-                          {adapter.operations.length > 0 ? (
-                            <div className="flex flex-wrap gap-1.5">
-                              {adapter.operations.map((operation) => (
-                                <Badge
-                                  key={operation}
-                                  variant="secondary"
-                                  className="text-[10px]"
-                                >
-                                  {operation}
-                                </Badge>
-                              ))}
+                    {visibleAdapterRows.map(
+                      ({ adapter, sources: matchedSources }) => (
+                        <TableRow key={adapter.id}>
+                          <TableCell className="pl-6">
+                            <div>
+                              <p className="font-medium">{adapter.label}</p>
+                              <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                                {adapter.id}
+                              </p>
                             </div>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">
-                              无执行操作
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">
-                          {matchedSources.length > 0
-                            ? `${matchedSources.length} 个`
-                            : "未使用"}
-                        </TableCell>
-                        <TableCell className="max-w-[360px] pr-6 text-sm text-muted-foreground">
-                          {adapter.reason}
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                          </TableCell>
+                          <TableCell>
+                            <AdapterStatusBadge execution={adapter.execution} />
+                          </TableCell>
+                          <TableCell>
+                            {adapter.operations.length > 0 ? (
+                              <div className="flex flex-wrap gap-1.5">
+                                {adapter.operations.map((operation) => (
+                                  <Badge
+                                    key={operation}
+                                    variant="secondary"
+                                    className="text-[10px]"
+                                  >
+                                    {operation}
+                                  </Badge>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">
+                                无执行操作
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {matchedSources.length > 0
+                              ? `${matchedSources.length} 个`
+                              : "未使用"}
+                          </TableCell>
+                          <TableCell className="max-w-[360px] pr-6 text-sm text-muted-foreground">
+                            {adapter.reason}
+                          </TableCell>
+                        </TableRow>
+                      ),
+                    )}
                   </TableBody>
                 </Table>
               </CardContent>
@@ -1156,7 +1255,7 @@ export function ConfigCenter() {
                     />
                     <ReportLine
                       title="HTTP 解析服务"
-                      detail={`${report.parseServices.filter((service) => service.capability === "supported").length} 个 GET 服务可在播放时尝试，其他服务仅记录`}
+                      detail={`${report.parseServices.filter((service) => service.capability === "supported").length} 个 GET/POST 服务可在播放时尝试，其他方法仅记录`}
                       status={
                         report.parseServices.some(
                           (service) => service.capability === "supported",
@@ -1774,6 +1873,41 @@ function ReportCard({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function AdapterSummary({
+  label,
+  value,
+  detail,
+  execution,
+}: {
+  label: string;
+  value: number;
+  detail: string;
+  execution: AdapterExecution;
+}) {
+  const toneClass = {
+    enabled:
+      "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)]",
+    partial:
+      "border-[color:var(--status-partial-border)] bg-[color:var(--status-partial-bg)]",
+    "needs-adapter":
+      "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)]",
+    blocked:
+      "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)]",
+  }[execution];
+  return (
+    <div className={`rounded-md border p-4 ${toneClass}`}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs text-muted-foreground">{label}源</p>
+          <p className="mt-1 font-display text-2xl font-semibold">{value}</p>
+        </div>
+        <AdapterStatusBadge execution={execution} />
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">{detail}</p>
+    </div>
   );
 }
 

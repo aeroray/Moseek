@@ -58,9 +58,9 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
   },
   "http-parser": {
     label: "HTTP 解析适配器",
-    execution: "partial",
-    operations: ["HTTP 地址解析"],
-    reason: "只允许明确的 HTTP/HTTPS 解析接口，不执行私有协议。",
+    execution: "enabled",
+    operations: ["GET 解析", "POST 解析", "播放地址校验"],
+    reason: "通过受限的 HTTP/HTTPS GET 或 JSON POST 解析接口返回播放地址。",
   },
   "js-extension": {
     label: "JS 扩展源",
@@ -70,10 +70,10 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
   },
   "local-script": {
     label: "本地脚本适配器",
-    execution: "partial",
+    execution: "enabled",
     operations: ["分类", "首页", "搜索", "详情", "iframe 解析"],
     reason:
-      "使用用户明确绑定的本地脚本档案；脚本执行受 sidecar、哈希和 HTTP allowlist 限制。",
+      "用户明确绑定并启用本地脚本档案后，完整调用 CatVod 入口；脚本执行受 sidecar、哈希和 HTTP allowlist 限制。",
   },
   "html-http": {
     label: "声明式 HTML 适配器",

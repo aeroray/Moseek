@@ -13,6 +13,8 @@ import type {
   SourceRecord,
 } from "@/types/moseek";
 
+export const MAX_CONFIG_TEXT_BYTES = 10 * 1024 * 1024;
+
 export interface ParseIssue {
   severity: "error" | "warning";
   path: string;
@@ -57,6 +59,18 @@ export function countParsedCapabilities(sources: SourceRecord[]) {
 }
 
 export function parseConfigText(rawText: string): ParseResult {
+  const sizeIssue = createSizeIssue(rawText);
+  if (sizeIssue) {
+    return {
+      ok: false,
+      sources: [],
+      parseServices: [],
+      configDialect: "tvbox",
+      normalizedConfig: "",
+      liveCount: 0,
+      issues: [sizeIssue],
+    };
+  }
   let parsed: unknown;
   try {
     parsed = JSON5.parse(rawText);
@@ -242,6 +256,10 @@ export function parseParseServices(configText: string): ParseServiceRecord[] {
 }
 
 export function formatConfigText(rawText: string): ConfigTextTransformResult {
+  const sizeIssue = createSizeIssue(rawText);
+  if (sizeIssue) {
+    return { ok: false, text: rawText, changes: [], issue: sizeIssue };
+  }
   try {
     const parsed = JSON5.parse(rawText);
     return {
@@ -261,6 +279,10 @@ export function formatConfigText(rawText: string): ConfigTextTransformResult {
 }
 
 export function repairConfigText(rawText: string): ConfigTextTransformResult {
+  const sizeIssue = createSizeIssue(rawText);
+  if (sizeIssue) {
+    return { ok: false, text: rawText, changes: [], issue: sizeIssue };
+  }
   let repairedText = rawText;
   const changes: string[] = [];
 
@@ -321,6 +343,17 @@ function createParseIssue(error: unknown): ParseIssue {
     message,
     line: position.line,
     column: position.column,
+  };
+}
+
+function createSizeIssue(rawText: string): ParseIssue | null {
+  if (rawText.length <= MAX_CONFIG_TEXT_BYTES) return null;
+  return {
+    severity: "error",
+    path: "$",
+    message: `配置文本超过 ${MAX_CONFIG_TEXT_BYTES / 1024 / 1024} MiB 限制。`,
+    line: null,
+    column: null,
   };
 }
 
@@ -702,26 +735,35 @@ function normalizeParseServices(values: unknown): ParseServiceRecord[] {
     const name =
       textValue(object, ["name", "title"]) || `解析服务 ${index + 1}`;
     const method = (textValue(object, ["method"]) || "GET").toUpperCase();
+    const supportsMethod = method === "GET" || method === "POST";
     const capability = !url
       ? "invalid"
       : !/^https?:\/\//i.test(url)
         ? "blocked"
-        : method !== "GET"
+        : !supportsMethod
           ? "needs-adapter"
           : "supported";
     const capabilityNote = !url
       ? "解析服务缺少 HTTP URL。"
       : !/^https?:\/\//i.test(url)
         ? "解析服务使用非 HTTP 协议，Moseek 默认阻止执行。"
-        : method !== "GET"
-          ? "当前只执行 GET 解析服务，其他方法只记录配置。"
-          : "允许通过受限 GET 请求提交待解析地址。";
+        : !supportsMethod
+          ? "当前只执行 GET 或 POST 解析服务，其他方法只记录配置。"
+          : method === "POST"
+            ? "允许通过受限 JSON POST 请求提交待解析地址。"
+            : "允许通过受限 GET 请求提交待解析地址。";
     return {
       key,
       name,
       url,
       method,
       headers: scalarRecord(object?.headers),
+      body:
+        object?.body &&
+        typeof object.body === "object" &&
+        !Array.isArray(object.body)
+          ? (object.body as Record<string, unknown>)
+          : undefined,
       enabled: capability === "supported" && object?.enabled !== false,
       capability,
       capabilityNote,

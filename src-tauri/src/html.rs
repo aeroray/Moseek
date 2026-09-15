@@ -453,6 +453,35 @@ fn apply_template(template: &str, values: &HtmlTemplateValues<'_>) -> String {
         .replace("{id}", values.id)
 }
 
+fn validate_html_config(config: &HtmlAdapterConfig) -> Result<(), String> {
+    parse_selector(&config.item_selector)?;
+    if let Some(selector) = config.total_selector.as_deref() {
+        parse_selector(selector)?;
+    }
+    validate_field_selectors(&config.fields)?;
+    if let Some(detail) = &config.detail {
+        if let Some(selector) = detail.item_selector.as_deref() {
+            parse_selector(selector)?;
+        }
+        if let Some(fields) = detail.fields.as_ref() {
+            validate_field_selectors(fields)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_field_selectors(fields: &HashMap<String, HtmlFieldSpec>) -> Result<(), String> {
+    for (name, spec) in fields {
+        let selector = match spec {
+            HtmlFieldSpec::Selector(selector) => selector,
+            HtmlFieldSpec::Detailed(config) => &config.selector,
+        };
+        parse_selector(selector)
+            .map_err(|error| format!("HTML 字段「{name}」配置无效：{error}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_catalog, HtmlAdapterConfig};
@@ -528,33 +557,4 @@ mod tests {
         );
         assert_eq!(page.items[0].categories.len(), 2);
     }
-}
-
-fn validate_html_config(config: &HtmlAdapterConfig) -> Result<(), String> {
-    parse_selector(&config.item_selector)?;
-    if let Some(selector) = config.total_selector.as_deref() {
-        parse_selector(selector)?;
-    }
-    validate_field_selectors(&config.fields)?;
-    if let Some(detail) = &config.detail {
-        if let Some(selector) = detail.item_selector.as_deref() {
-            parse_selector(selector)?;
-        }
-        if let Some(fields) = detail.fields.as_ref() {
-            validate_field_selectors(fields)?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_field_selectors(fields: &HashMap<String, HtmlFieldSpec>) -> Result<(), String> {
-    for (name, spec) in fields {
-        let selector = match spec {
-            HtmlFieldSpec::Selector(selector) => selector,
-            HtmlFieldSpec::Detailed(config) => &config.selector,
-        };
-        parse_selector(selector)
-            .map_err(|error| format!("HTML 字段「{name}」配置无效：{error}"))?;
-    }
-    Ok(())
 }

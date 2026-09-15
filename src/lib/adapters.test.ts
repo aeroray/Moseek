@@ -76,6 +76,28 @@ describe("adapter registry", () => {
     expect(profile.execution).toBe("enabled");
   });
 
+  it("treats the safe HTTP parser and bound local scripts as executable adapters", () => {
+    expect(
+      getAdapterProfile(
+        source({
+          sourceType: "parser",
+          key: "parse-post",
+          api: "https://parser.example/resolve",
+        }),
+      ).execution,
+    ).toBe("enabled");
+    expect(
+      getAdapterProfile(
+        source({
+          key: "kitty-js",
+          siteProtocol: "js-extension",
+          capability: "blocked",
+          scriptArchiveId: 7,
+        }),
+      ).execution,
+    ).toBe("enabled");
+  });
+
   it("uses the live adapter for live sources", () => {
     const profile = getAdapterProfile(
       source({ sourceType: "live", capability: "supported" }),
@@ -92,9 +114,7 @@ describe("adapter registry", () => {
         source({ capability: "partial", siteProtocol: "http-extension" }),
       ),
     ).toBe(false);
-    expect(
-      isTestableCmsSource(source({ sourceType: "live" })),
-    ).toBe(false);
+    expect(isTestableCmsSource(source({ sourceType: "live" }))).toBe(false);
     expect(isTestableLiveSource(source({ sourceType: "live" }))).toBe(true);
     expect(isTestableSource(source({ sourceType: "live" }))).toBe(true);
     expect(

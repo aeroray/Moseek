@@ -1,0 +1,712 @@
+use std::collections::{HashMap, HashSet};
+
+use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::Value;
+
+use crate::{cms, ConfigDocument, SourceRecord};
+
+pub(super) fn serialize_sources(sources: &[SourceRecord]) -> Result<String, String> {
+    serde_json::to_string(sources).map_err(|error| format!("配置源快照序列化失败：{error}"))
+}
+
+pub(super) fn deserialize_sources(
+    value: Option<String>,
+) -> Result<Option<Vec<SourceRecord>>, String> {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return Ok(None);
+    };
+    serde_json::from_str(&value)
+        .map(Some)
+        .map_err(|error| format!("配置源快照解析失败：{error}"))
+}
+
+fn ensure_unique_source_keys(sources: &mut [SourceRecord]) {
+    let mut used_keys = HashSet::new();
+    let mut next_suffix_by_base = HashMap::new();
+
+    for source in sources {
+        let original_key = source.key.clone();
+        let mut suffix = next_suffix_by_base.get(&original_key).copied().unwrap_or(2);
+        let mut unique_key = original_key.clone();
+
+        while used_keys.contains(&unique_key) {
+            unique_key = format!("{original_key}-{suffix}");
+            suffix += 1;
+        }
+
+        next_suffix_by_base.insert(original_key, suffix);
+        used_keys.insert(unique_key.clone());
+        source.key = unique_key;
+    }
+}
+
+fn normalize_normalized_source_keys(normalized_config: &str, sources: &[SourceRecord]) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+
+    for (section, is_live) in [("sites", false), ("lives", true)] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let source_iter = sources
+            .iter()
+            .filter(|source| (source.source_type == "live") == is_live);
+        for (item, source) in items.iter_mut().zip(source_iter) {
+            if let Some(object) = item.as_object_mut() {
+                object.insert("key".to_string(), Value::String(source.key.clone()));
+            }
+        }
+    }
+
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
+fn load_legacy_sources(
+    connection: &Connection,
+    document_id: i64,
+) -> Result<Vec<SourceRecord>, String> {
+    let mut statement = connection
+        .prepare("SELECT source_key, name, source_type, api, ext, jar, epg, searchable, filterable, capability, capability_note, enabled, last_checked_at, request_count FROM sources WHERE document_id = ?1 ORDER BY rowid")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![document_id], |row| {
+            Ok(SourceRecord {
+                key: row.get(0)?,
+                name: row.get(1)?,
+                source_type: row.get(2)?,
+                script_archive_id: None,
+                source_dialect: None,
+                site_type: None,
+                site_protocol: None,
+                api: row.get(3)?,
+                logo: None,
+                description: None,
+                nsfw: false,
+                status: true,
+                ext: row.get(4)?,
+                extra: None,
+                jar: row.get(5)?,
+                epg: row.get(6)?,
+                searchable: row.get::<_, i64>(7)? != 0,
+                filterable: row.get::<_, i64>(8)? != 0,
+                capability: row.get(9)?,
+                capability_note: row.get(10)?,
+                test_status: None,
+                test_message: None,
+                tested_at: None,
+                test_item_count: None,
+                test_category_count: None,
+                test_duration_ms: None,
+                test_operations: Vec::new(),
+                enabled: row.get::<_, i64>(11)? != 0,
+                last_checked_at: row.get(12)?,
+                request_count: row.get(13)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn load_config_document(
+    connection: &Connection,
+    document_id: i64,
+) -> Result<Option<ConfigDocument>, String> {
+    let document = connection
+        .query_row(
+            "SELECT id, name, raw_config, normalized_config, sources_json, live_count, imported_at FROM config_documents WHERE id = ?1",
+            params![document_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+
+    let Some((id, name, raw_config, normalized_config, sources_json, live_count, imported_at)) =
+        document
+    else {
+        return Ok(None);
+    };
+    let mut sources = deserialize_sources(sources_json)?
+        .map_or_else(|| load_legacy_sources(connection, id), Ok)?;
+    ensure_unique_source_keys(&mut sources);
+    let normalized_config = normalize_normalized_source_keys(&normalized_config, &sources);
+    Ok(Some(ConfigDocument {
+        id,
+        name,
+        raw_config,
+        normalized_config,
+        source_count: sources.len() as i64,
+        sources,
+        live_count,
+        imported_at,
+    }))
+}
+
+pub(super) fn load_latest_document(
+    connection: &Connection,
+) -> Result<Option<ConfigDocument>, String> {
+    let document_id = connection
+        .query_row(
+            "SELECT id FROM config_documents ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    document_id
+        .map(|id| load_config_document(connection, id))
+        .transpose()
+        .map(|document| document.flatten())
+}
+
+pub(super) fn active_config_id(connection: &Connection) -> Result<Option<i64>, String> {
+    let value = connection
+        .query_row(
+            "SELECT value FROM app_settings WHERE key = 'active_config_document_id'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let Ok(document_id) = value.parse::<i64>() else {
+        return Ok(None);
+    };
+    let exists = connection
+        .query_row(
+            "SELECT 1 FROM config_documents WHERE id = ?1",
+            params![document_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    Ok(exists.then_some(document_id))
+}
+
+pub(super) fn load_active_document(
+    connection: &Connection,
+) -> Result<Option<ConfigDocument>, String> {
+    if let Some(document_id) = active_config_id(connection)? {
+        if let Some(document) = load_config_document(connection, document_id)? {
+            return Ok(Some(document));
+        }
+    }
+    load_latest_document(connection)
+}
+
+fn update_normalized_source_enabled(
+    normalized_config: &str,
+    source_key: &str,
+    enabled: bool,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            if item.get("key").and_then(Value::as_str) != Some(source_key) {
+                continue;
+            }
+            if let Some(object) = item.as_object_mut() {
+                object.insert("enabled".to_string(), Value::Bool(enabled));
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
+fn update_normalized_source_script_archive(
+    normalized_config: &str,
+    source_key: &str,
+    archive_id: Option<i64>,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            if item.get("key").and_then(Value::as_str) != Some(source_key) {
+                continue;
+            }
+            if let Some(object) = item.as_object_mut() {
+                let value = archive_id
+                    .map(|id| Value::Number(id.into()))
+                    .unwrap_or(Value::Null);
+                object.insert("scriptArchiveId".to_string(), value);
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
+fn update_normalized_source_test(
+    normalized_config: &str,
+    source_key: &str,
+    result: &cms::SourceTestResult,
+    request_count: i64,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            if item.get("key").and_then(Value::as_str) != Some(source_key) {
+                continue;
+            }
+            if let Some(object) = item.as_object_mut() {
+                object.insert(
+                    "testStatus".to_string(),
+                    Value::String(result.status.clone()),
+                );
+                object.insert(
+                    "testMessage".to_string(),
+                    Value::String(result.message.clone()),
+                );
+                object.insert(
+                    "testedAt".to_string(),
+                    Value::String(result.tested_at.clone()),
+                );
+                object.insert(
+                    "testItemCount".to_string(),
+                    Value::Number(result.item_count.into()),
+                );
+                object.insert(
+                    "testCategoryCount".to_string(),
+                    Value::Number(result.category_count.into()),
+                );
+                object.insert(
+                    "testDurationMs".to_string(),
+                    Value::Number(result.duration_ms.into()),
+                );
+                object.insert(
+                    "testOperations".to_string(),
+                    serde_json::to_value(&result.operations)
+                        .unwrap_or_else(|_| Value::Array(Vec::new())),
+                );
+                object.insert(
+                    "lastCheckedAt".to_string(),
+                    Value::String(result.tested_at.clone()),
+                );
+                object.insert(
+                    "requestCount".to_string(),
+                    Value::Number(request_count.into()),
+                );
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
+pub(super) fn set_source_enabled_in_connection(
+    connection: &mut Connection,
+    document_id: i64,
+    source_key: &str,
+    enabled: bool,
+) -> Result<ConfigDocument, String> {
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    let source = sources
+        .iter_mut()
+        .find(|source| source.key == source_key)
+        .ok_or_else(|| "配置中找不到该资源源".to_string())?;
+    source.enabled = enabled;
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config =
+        update_normalized_source_enabled(&document.normalized_config, source_key, enabled);
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
+            params![sources_json, normalized_config, document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?.ok_or_else(|| "配置更新后无法读取".to_string())
+}
+
+pub(super) fn set_source_script_archive_in_connection(
+    connection: &mut Connection,
+    document_id: i64,
+    source_key: &str,
+    archive_id: Option<i64>,
+) -> Result<ConfigDocument, String> {
+    if let Some(archive_id) = archive_id {
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM script_archives WHERE id = ?1 AND deleted_at IS NULL",
+                params![archive_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if exists.is_none() {
+            return Err("脚本档案不存在、已删除或不可用".to_string());
+        }
+    }
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    let source = sources
+        .iter_mut()
+        .find(|source| source.key == source_key)
+        .ok_or_else(|| "配置中找不到该资源源".to_string())?;
+    source.script_archive_id = archive_id;
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config = update_normalized_source_script_archive(
+        &document.normalized_config,
+        source_key,
+        archive_id,
+    );
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
+            params![sources_json, normalized_config, document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?
+        .ok_or_else(|| "绑定保存后无法读取配置".to_string())
+}
+
+pub(super) fn set_source_test_in_connection(
+    connection: &mut Connection,
+    document_id: i64,
+    source_key: &str,
+    result: &cms::SourceTestResult,
+) -> Result<ConfigDocument, String> {
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    let request_count = {
+        let source = sources
+            .iter_mut()
+            .find(|source| source.key == source_key)
+            .ok_or_else(|| "配置中找不到该资源源".to_string())?;
+        source.test_status = Some(result.status.clone());
+        source.test_message = Some(result.message.clone());
+        source.tested_at = Some(result.tested_at.clone());
+        source.test_item_count = Some(result.item_count);
+        source.test_category_count = Some(result.category_count);
+        source.test_duration_ms = Some(result.duration_ms);
+        source.test_operations = result.operations.clone();
+        source.last_checked_at = result.tested_at.clone();
+        if result.status != "blocked" {
+            source.request_count += 1;
+        }
+        source.request_count
+    };
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config = update_normalized_source_test(
+        &document.normalized_config,
+        source_key,
+        result,
+        request_count,
+    );
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
+            params![sources_json, normalized_config, document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?
+        .ok_or_else(|| "测试结果保存后无法读取配置".to_string())
+}
+
+pub(crate) fn clear_script_archive_bindings(
+    connection: &mut Connection,
+    archive_id: i64,
+) -> Result<(), String> {
+    let rows = connection
+        .prepare("SELECT id, normalized_config, sources_json FROM config_documents")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    for (document_id, normalized_config, sources_json) in rows {
+        let Some(mut sources) = deserialize_sources(sources_json)? else {
+            continue;
+        };
+        let bound_keys = sources
+            .iter_mut()
+            .filter_map(|source| {
+                if source.script_archive_id == Some(archive_id) {
+                    source.script_archive_id = None;
+                    Some(source.key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        if bound_keys.is_empty() {
+            continue;
+        }
+        let sources_json = serialize_sources(&sources)?;
+        let normalized_config = bound_keys
+            .iter()
+            .fold(normalized_config, |config, source_key| {
+                update_normalized_source_script_archive(&config, source_key, None)
+            });
+        transaction
+            .execute(
+                "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
+                params![sources_json, normalized_config, document_id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn create_test_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE config_documents (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name TEXT NOT NULL,
+                   raw_config TEXT NOT NULL,
+                   normalized_config TEXT NOT NULL,
+                   sources_json TEXT,
+                   live_count INTEGER NOT NULL DEFAULT 0,
+                   imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );",
+            )
+            .unwrap();
+    }
+
+    fn test_source(enabled: bool) -> SourceRecord {
+        test_source_with_key("shared-key", enabled)
+    }
+
+    fn test_source_with_key(key: &str, enabled: bool) -> SourceRecord {
+        SourceRecord {
+            key: key.to_string(),
+            name: "同名源".to_string(),
+            source_type: "cms".to_string(),
+            script_archive_id: None,
+            source_dialect: None,
+            site_type: Some(1),
+            site_protocol: Some("json-http".to_string()),
+            api: "https://example.com/api".to_string(),
+            logo: None,
+            description: None,
+            nsfw: false,
+            status: true,
+            ext: None,
+            extra: None,
+            jar: None,
+            epg: None,
+            searchable: true,
+            filterable: true,
+            capability: "supported".to_string(),
+            capability_note: "test".to_string(),
+            test_status: None,
+            test_message: None,
+            tested_at: None,
+            test_item_count: None,
+            test_category_count: None,
+            test_duration_ms: None,
+            test_operations: Vec::new(),
+            enabled,
+            last_checked_at: "刚刚".to_string(),
+            request_count: 0,
+        }
+    }
+
+    fn insert_test_document(connection: &Connection, name: &str, enabled: bool) -> i64 {
+        let sources_json = serialize_sources(&[test_source(enabled)]).unwrap();
+        let normalized_config = json!({
+            "sites": [{ "key": "shared-key", "enabled": enabled }]
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 0)",
+                params![name, "{}", normalized_config, sources_json],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    fn insert_duplicate_key_document(connection: &Connection) -> i64 {
+        let sources_json = serialize_sources(&[
+            test_source_with_key("duplicate-key", true),
+            test_source_with_key("duplicate-key", true),
+        ])
+        .unwrap();
+        let normalized_config = json!({
+            "sites": [{ "key": "duplicate-key" }, { "key": "duplicate-key" }]
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 0)",
+                params!["重复 key 配置", "{}", normalized_config, sources_json],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn duplicate_source_keys_are_normalized_and_test_updates_one_source() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_duplicate_key_document(&connection);
+
+        let loaded = load_config_document(&connection, document_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded
+                .sources
+                .iter()
+                .map(|source| source.key.as_str())
+                .collect::<Vec<_>>(),
+            ["duplicate-key", "duplicate-key-2"]
+        );
+
+        let result = cms::SourceTestResult {
+            source_key: "duplicate-key-2".to_string(),
+            status: "passed".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "识别到影视内容".to_string(),
+            item_count: 8,
+            category_count: 3,
+            duration_ms: 120,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
+        };
+        let updated =
+            set_source_test_in_connection(&mut connection, document_id, "duplicate-key-2", &result)
+                .unwrap();
+        let updated_value: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+
+        assert_eq!(updated.sources[0].test_status, None);
+        assert_eq!(updated.sources[1].test_status.as_deref(), Some("passed"));
+        assert_eq!(updated_value["sites"][0]["testStatus"], Value::Null);
+        assert_eq!(updated_value["sites"][1]["testStatus"], "passed");
+    }
+
+    #[test]
+    fn documents_can_store_the_same_source_key_independently() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let first_id = insert_test_document(&connection, "主配置", true);
+        let second_id = insert_test_document(&connection, "备用配置", false);
+
+        let first = load_config_document(&connection, first_id)
+            .unwrap()
+            .unwrap();
+        let second = load_config_document(&connection, second_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(first.sources[0].key, second.sources[0].key);
+        assert!(first.sources[0].enabled);
+        assert!(!second.sources[0].enabled);
+    }
+
+    #[test]
+    fn source_enablement_updates_only_the_target_document() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let first_id = insert_test_document(&connection, "主配置", true);
+        let second_id = insert_test_document(&connection, "备用配置", true);
+
+        let updated =
+            set_source_enabled_in_connection(&mut connection, first_id, "shared-key", false)
+                .unwrap();
+        let untouched = load_config_document(&connection, second_id)
+            .unwrap()
+            .unwrap();
+        let updated_value: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+        let untouched_value: Value = serde_json::from_str(&untouched.normalized_config).unwrap();
+
+        assert!(!updated.sources[0].enabled);
+        assert_eq!(updated_value["sites"][0]["enabled"], Value::Bool(false));
+        assert!(untouched.sources[0].enabled);
+        assert_eq!(untouched_value["sites"][0]["enabled"], Value::Bool(true));
+    }
+
+    #[test]
+    fn source_test_updates_only_the_target_document() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let first_id = insert_test_document(&connection, "主配置", true);
+        let second_id = insert_test_document(&connection, "备用配置", true);
+        let result = cms::SourceTestResult {
+            source_key: "shared-key".to_string(),
+            status: "passed".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "识别到影视内容".to_string(),
+            item_count: 8,
+            category_count: 3,
+            duration_ms: 120,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
+        };
+
+        let updated =
+            set_source_test_in_connection(&mut connection, first_id, "shared-key", &result)
+                .unwrap();
+        let untouched = load_config_document(&connection, second_id)
+            .unwrap()
+            .unwrap();
+        let updated_value: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+        let untouched_value: Value = serde_json::from_str(&untouched.normalized_config).unwrap();
+
+        assert_eq!(updated.sources[0].test_status.as_deref(), Some("passed"));
+        assert_eq!(updated.sources[0].test_item_count, Some(8));
+        assert_eq!(updated.sources[0].request_count, 1);
+        assert_eq!(updated_value["sites"][0]["testStatus"], "passed");
+        assert_eq!(updated_value["sites"][0]["testItemCount"], 8);
+        assert_eq!(untouched.sources[0].test_status, None);
+        assert_eq!(untouched_value["sites"][0]["testStatus"], Value::Null);
+    }
+}

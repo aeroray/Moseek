@@ -4,17 +4,19 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::policy::{fetch_text_with_headers, validate_remote_url};
+use crate::policy::{fetch_text_with_headers, fetch_text_with_method, validate_remote_url};
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParseServiceInput {
     pub key: String,
     pub url: String,
-    #[serde(default)]
+    #[serde(default = "default_get_method")]
     pub method: String,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub body: Option<Value>,
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
@@ -31,6 +33,7 @@ pub struct PlaybackResolution {
 }
 
 const DEFAULT_SNIFFER_COMPANION_URL: &str = "http://127.0.0.1:57573/sniffer";
+const MAX_PARSE_REQUEST_BODY_BYTES: usize = 128 * 1024;
 
 #[tauri::command]
 pub async fn resolve_playback(
@@ -54,7 +57,7 @@ pub async fn resolve_playback(
     for service in parse_services {
         if !service.enabled
             || service.capability != "supported"
-            || service.method.to_ascii_uppercase() != "GET"
+            || !is_supported_parser_method(&service.method)
         {
             continue;
         }
@@ -157,15 +160,65 @@ async fn resolve_with_service(
 ) -> Result<String, String> {
     let mut endpoint = reqwest::Url::parse(&service.url).map_err(|error| error.to_string())?;
     validate_remote_url(&endpoint)?;
-    endpoint.query_pairs_mut().append_pair("url", source_url);
-    let headers = service
+    let method = service.method.to_ascii_uppercase();
+    let mut headers = service
         .headers
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<Vec<_>>();
-    let response =
-        fetch_text_with_headers(endpoint, 2 * 1024 * 1024, "解析服务响应", &headers).await?;
+    let body = if method == "GET" {
+        endpoint.query_pairs_mut().append_pair("url", source_url);
+        None
+    } else if method == "POST" {
+        let mut object = service
+            .body
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}))
+            .as_object()
+            .cloned()
+            .ok_or_else(|| "POST 解析服务 body 必须是 JSON 对象".to_string())?;
+        object
+            .entry("url".to_string())
+            .or_insert_with(|| Value::String(source_url.to_string()));
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+        {
+            headers.push(("Content-Type".to_string(), "application/json".to_string()));
+        }
+        Some(
+            serde_json::to_vec(&Value::Object(object))
+                .map_err(|error| format!("POST 解析请求编码失败：{error}"))?,
+        )
+    } else {
+        return Err("解析服务只支持 GET 或 POST 方法".to_string());
+    };
+    let body = body.filter(|body| body.len() <= MAX_PARSE_REQUEST_BODY_BYTES);
+    if method == "POST" && body.is_none() {
+        return Err("POST 解析请求体超过 128 KiB 限制".to_string());
+    }
+    let response = if method == "POST" {
+        fetch_text_with_method(
+            endpoint,
+            reqwest::Method::POST,
+            2 * 1024 * 1024,
+            "解析服务响应",
+            &headers,
+            body,
+        )
+        .await?
+    } else {
+        fetch_text_with_headers(endpoint, 2 * 1024 * 1024, "解析服务响应", &headers).await?
+    };
     extract_resolved_url(&response).ok_or_else(|| "解析服务未返回可播放 HTTP 地址".to_string())
+}
+
+fn default_get_method() -> String {
+    "GET".to_string()
+}
+
+fn is_supported_parser_method(method: &str) -> bool {
+    method.eq_ignore_ascii_case("GET") || method.eq_ignore_ascii_case("POST")
 }
 
 fn extract_resolved_url(text: &str) -> Option<String> {
@@ -228,7 +281,7 @@ fn validate_companion_url(url: &Url) -> Result<(), String> {
 mod tests {
     use serde_json::json;
 
-    use super::{media_kind, validate_companion_url, value_url};
+    use super::{is_supported_parser_method, media_kind, validate_companion_url, value_url};
 
     #[test]
     fn extracts_common_parser_response_shapes() {
@@ -244,5 +297,12 @@ mod tests {
         assert!(validate_companion_url(&"http://127.0.0.1:57573/sniffer".parse().unwrap()).is_ok());
         assert!(validate_companion_url(&"http://localhost:57573/sniffer".parse().unwrap()).is_ok());
         assert!(validate_companion_url(&"https://example.com/sniffer".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn parser_supports_only_safe_get_and_post_methods() {
+        assert!(is_supported_parser_method("GET"));
+        assert!(is_supported_parser_method("post"));
+        assert!(!is_supported_parser_method("PUT"));
     }
 }

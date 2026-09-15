@@ -17,6 +17,8 @@ import type {
   VodItem,
 } from "@/types/moseek";
 
+const sourceToggleQueues = new Map<string, Promise<void>>();
+
 interface AppStore {
   activeView: ViewKey;
   theme: ThemeMode;
@@ -76,44 +78,67 @@ export const useAppStore = create<AppStore>()(
       setSnifferCompanionUrl: (snifferCompanionUrl) =>
         set({ snifferCompanionUrl }),
       toggleSource: async (key) => {
-        const currentState = get();
-        const currentSource = currentState.sources.find(
-          (source) => source.key === key,
-        );
-        if (!currentSource) return;
-        const nextEnabled = !currentSource.enabled;
-        set((state) => ({
-          sources: state.sources.map((source) =>
-            source.key === key ? { ...source, enabled: nextEnabled } : source,
-          ),
-          normalizedConfig: updateNormalizedConfigEnabled(
-            state.normalizedConfig,
-            key,
-            nextEnabled,
-          ),
-        }));
-        if (currentState.activeConfigId === null) return;
+        const initialState = get();
+        if (initialState.activeConfigId === null) return;
+        const queueKey = `${initialState.activeConfigId}:${key}`;
+        const previous = sourceToggleQueues.get(queueKey) ?? Promise.resolve();
+        const operation = previous
+          .catch(() => undefined)
+          .then(async () => {
+            const currentState = get();
+            const activeConfigId = currentState.activeConfigId;
+            const currentSource = currentState.sources.find(
+              (source) => source.key === key,
+            );
+            if (activeConfigId === null || !currentSource) return;
+            const previousEnabled = currentSource.enabled;
+            const nextEnabled = !previousEnabled;
+            set((state) => ({
+              sources: state.sources.map((source) =>
+                source.key === key
+                  ? { ...source, enabled: nextEnabled }
+                  : source,
+              ),
+              normalizedConfig: updateNormalizedConfigEnabled(
+                state.normalizedConfig,
+                key,
+                nextEnabled,
+              ),
+            }));
+            try {
+              const document = await setSourceEnabled(
+                activeConfigId,
+                key,
+                nextEnabled,
+              );
+              if (document && get().activeConfigId === activeConfigId) {
+                get().setConfigDocument(document);
+              }
+            } catch (error) {
+              if (get().activeConfigId === activeConfigId) {
+                set((state) => ({
+                  sources: state.sources.map((source) =>
+                    source.key === key
+                      ? { ...source, enabled: previousEnabled }
+                      : source,
+                  ),
+                  normalizedConfig: updateNormalizedConfigEnabled(
+                    state.normalizedConfig,
+                    key,
+                    previousEnabled,
+                  ),
+                }));
+              }
+              throw error;
+            }
+          });
+        sourceToggleQueues.set(queueKey, operation);
         try {
-          const document = await setSourceEnabled(
-            currentState.activeConfigId,
-            key,
-            nextEnabled,
-          );
-          if (document) get().setConfigDocument(document);
-        } catch (error) {
-          set((state) => ({
-            sources: state.sources.map((source) =>
-              source.key === key
-                ? { ...source, enabled: currentSource.enabled }
-                : source,
-            ),
-            normalizedConfig: updateNormalizedConfigEnabled(
-              state.normalizedConfig,
-              key,
-              currentSource.enabled,
-            ),
-          }));
-          throw error;
+          await operation;
+        } finally {
+          if (sourceToggleQueues.get(queueKey) === operation) {
+            sourceToggleQueues.delete(queueKey);
+          }
         }
       },
       setSourceTestResult: (key, result) =>
