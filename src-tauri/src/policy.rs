@@ -57,8 +57,8 @@ pub(crate) async fn fetch_media_bytes(
     max_bytes: usize,
     resource_name: &str,
     headers: &[(String, String)],
-) -> Result<(Vec<u8>, Option<String>), String> {
-    fetch_response_bytes(url, Method::GET, max_bytes, resource_name, headers, None).await
+) -> Result<(Vec<u8>, Option<String>, Url), String> {
+    fetch_response_bytes(url, Method::GET, max_bytes, resource_name, headers, None, 3).await
 }
 
 pub(crate) async fn fetch_json(
@@ -82,9 +82,9 @@ async fn fetch_bytes_with_request(
     headers: &[(String, String)],
     body: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, String> {
-    fetch_response_bytes(url, method, max_bytes, resource_name, headers, body)
+    fetch_response_bytes(url, method, max_bytes, resource_name, headers, body, 0)
         .await
-        .map(|(body, _)| body)
+        .map(|(body, _, _)| body)
 }
 
 async fn fetch_response_bytes(
@@ -94,71 +94,89 @@ async fn fetch_response_bytes(
     resource_name: &str,
     headers: &[(String, String)],
     body: Option<Vec<u8>>,
-) -> Result<(Vec<u8>, Option<String>), String> {
-    validate_remote_url(&url)?;
-    let client = build_http_client(&url)?;
-    let mut request = client.request(method, url);
-    for (name, value) in headers {
-        if matches!(
-            name.to_ascii_lowercase().as_str(),
-            "host"
-                | "content-length"
-                | "connection"
-                | "transfer-encoding"
-                | "proxy-authorization"
-                | "proxy-authenticate"
-                | "keep-alive"
-                | "te"
-                | "trailer"
-                | "upgrade"
-        ) {
-            return Err(format!("不允许覆盖受保护的 HTTP 请求头：{name}"));
+    max_redirects: usize,
+) -> Result<(Vec<u8>, Option<String>, Url), String> {
+    let mut current_url = url;
+    for redirect_index in 0..=max_redirects {
+        validate_remote_url(&current_url)?;
+        let client = build_http_client(&current_url)?;
+        let mut request = client.request(method.clone(), current_url.clone());
+        for (name, value) in headers {
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "host"
+                    | "content-length"
+                    | "connection"
+                    | "transfer-encoding"
+                    | "proxy-authorization"
+                    | "proxy-authenticate"
+                    | "keep-alive"
+                    | "te"
+                    | "trailer"
+                    | "upgrade"
+            ) {
+                return Err(format!("不允许覆盖受保护的 HTTP 请求头：{name}"));
+            }
+            let header_name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|error| format!("无效的 HTTP 请求头名称：{error}"))?;
+            let header_value = HeaderValue::from_str(value)
+                .map_err(|error| format!("无效的 HTTP 请求头值：{error}"))?;
+            request = request.header(header_name, header_value);
         }
-        let header_name = HeaderName::from_bytes(name.as_bytes())
-            .map_err(|error| format!("无效的 HTTP 请求头名称：{error}"))?;
-        let header_value = HeaderValue::from_str(value)
-            .map_err(|error| format!("无效的 HTTP 请求头值：{error}"))?;
-        request = request.header(header_name, header_value);
-    }
-    if let Some(body) = body {
-        request = request.body(body);
-    }
-    let mut response = request
-        .send()
-        .await
-        .map_err(|error| error.to_string())?
-        .error_for_status()
-        .map_err(|error| error.to_string())?;
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
-    if response
-        .content_length()
-        .is_some_and(|size| size > max_bytes as u64)
-    {
-        return Err(format!(
-            "{resource_name}响应超过 {} MB 限制",
-            max_bytes / 1024 / 1024
-        ));
-    }
-    let mut body = Vec::with_capacity(
-        response
+        if let Some(body) = body.clone() {
+            request = request.body(body);
+        }
+        let response = request.send().await.map_err(|error| error.to_string())?;
+        if response.status().is_redirection() {
+            if redirect_index == max_redirects {
+                return Err(format!("{resource_name}重定向次数超过限制"));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| format!("{resource_name}重定向缺少目标地址"))?
+                .to_str()
+                .map_err(|error| format!("{resource_name}重定向地址无效：{error}"))?;
+            current_url = current_url
+                .join(location)
+                .map_err(|error| format!("{resource_name}重定向地址无法解析：{error}"))?;
+            continue;
+        }
+        let mut response = response
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        if response
             .content_length()
-            .map(|size| size.min(max_bytes as u64) as usize)
-            .unwrap_or_default(),
-    );
-    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
-        if body.len().saturating_add(chunk.len()) > max_bytes {
+            .is_some_and(|size| size > max_bytes as u64)
+        {
             return Err(format!(
                 "{resource_name}响应超过 {} MB 限制",
                 max_bytes / 1024 / 1024
             ));
         }
-        body.extend_from_slice(&chunk);
+        let mut body = Vec::with_capacity(
+            response
+                .content_length()
+                .map(|size| size.min(max_bytes as u64) as usize)
+                .unwrap_or_default(),
+        );
+        while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+            if body.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(format!(
+                    "{resource_name}响应超过 {} MB 限制",
+                    max_bytes / 1024 / 1024
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        return Ok((body, content_type, current_url));
     }
-    Ok((body, content_type))
+    Err(format!("{resource_name}请求未返回有效响应"))
 }
 
 fn build_http_client(url: &Url) -> Result<Client, String> {

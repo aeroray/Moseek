@@ -650,7 +650,9 @@ fn slug(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{deduplicate_channels, parse_epg_json, parse_m3u, parse_txt, parse_xmltv};
+    use super::{
+        deduplicate_channels, make_channel, parse_epg_json, parse_m3u, parse_txt, parse_xmltv,
+    };
 
     #[test]
     fn parses_m3u_groups_logos_and_epg_ids() {
@@ -715,6 +717,33 @@ mod tests {
 
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].stream_urls.len(), 2);
+    }
+
+    #[test]
+    fn preserves_source_channel_metadata_without_guessing_translations() {
+        let known = make_channel(
+            "live-main",
+            "CCTV-1 (1080p)".to_string(),
+            "General".to_string(),
+            String::new(),
+            Some("CCTV1.cn@HD".to_string()),
+            "https://stream.example/cctv1.m3u8".to_string(),
+        )
+        .expect("known channel should parse");
+        let unknown = make_channel(
+            "live-main",
+            "BBC World".to_string(),
+            "Custom Group".to_string(),
+            String::new(),
+            Some("BBCWorld.example@SD".to_string()),
+            "https://stream.example/bbc.m3u8".to_string(),
+        )
+        .expect("unknown channel should parse");
+
+        assert_eq!(known.name, "CCTV-1 (1080p)");
+        assert_eq!(known.group_name, "General");
+        assert_eq!(unknown.name, "BBC World");
+        assert_eq!(unknown.group_name, "Custom Group");
     }
 
     #[test]

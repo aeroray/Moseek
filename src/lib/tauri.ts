@@ -52,6 +52,7 @@ export interface PlaybackResolution {
 export interface MediaResource {
   bodyBase64: string;
   contentType?: string | null;
+  url: string;
 }
 
 export interface ScriptExecutionRequest {

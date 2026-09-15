@@ -40,7 +40,6 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
 import { MediaPlayer } from "@/features/player/media-player";
-import type { MediaStatus } from "@/features/player/media-player";
 
 const maxAutomaticStreamAttempts = 3;
 
@@ -71,7 +70,6 @@ export function LiveView() {
   const [groupId, setGroupId] = useState("");
   const [query, setQuery] = useState("");
   const [selectedChannelId, setSelectedChannelId] = useState("");
-  const [status, setStatus] = useState<MediaStatus>("idle");
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [resolvedStream, setResolvedStream] =
     useState<PlaybackResolution | null>(null);
@@ -92,7 +90,6 @@ export function LiveView() {
     setEpgError(null);
     setGroupId("");
     setSelectedChannelId("");
-    setStatus("idle");
     setDiagnostic(null);
     setResolvedStream(null);
     setIsLoading(Boolean(liveSource));
@@ -167,10 +164,6 @@ export function LiveView() {
     streamIndexRef.current = nextIndex;
     setStreamIndex(nextIndex);
     setResolvedStream(null);
-    setStatus("loading");
-    setDiagnostic(
-      `当前线路不可用，正在尝试第 ${nextIndex + 1} 条线路（最多自动尝试 ${Math.min(streamUrls.length, maxAutomaticStreamAttempts)} 条）。`,
-    );
     return true;
   };
 
@@ -179,7 +172,6 @@ export function LiveView() {
     setDiagnostic(null);
     if (!selectedChannel || !selectedStreamUrl) {
       setResolvedStream(null);
-      setStatus("idle");
       return () => {
         cancelled = true;
       };
@@ -195,7 +187,6 @@ export function LiveView() {
       };
     }
     setResolvedStream(null);
-    setStatus("loading");
     void resolvePlayback(selectedStreamUrl)
       .then((resolution) => {
         if (cancelled) return;
@@ -210,7 +201,6 @@ export function LiveView() {
         setDiagnostic(
           error instanceof Error ? error.message : "播放地址未通过安全检查",
         );
-        setStatus("error");
       });
     return () => {
       cancelled = true;
@@ -239,7 +229,6 @@ export function LiveView() {
   const selectChannel = (channel: LiveChannel) => {
     setSelectedChannelId(channel.id);
     setDiagnostic(null);
-    setStatus("idle");
   };
 
   const stepChannel = (direction: -1 | 1) => {
@@ -249,8 +238,6 @@ export function LiveView() {
       selectChannel(next);
     }
   };
-
-  const canRenderPlayer = !isTauriRuntime() || resolvedStream !== null;
 
   return (
     <ScrollArea className="h-full">
@@ -513,56 +500,29 @@ export function LiveView() {
                     </div>
                   </CardHeader>
                   <CardContent className="flex flex-col gap-3">
-                    {canRenderPlayer ? (
-                      <MediaPlayer
-                        key={resolvedStream?.url ?? selectedStreamUrl}
-                        title={selectedChannel.name}
-                        url={resolvedStream?.url ?? selectedStreamUrl}
-                        kind={
-                          resolvedStream?.mediaKind ?? selectedChannel.mediaKind
+                    <MediaPlayer
+                      title={selectedChannel.name}
+                      url={
+                        resolvedStream?.url ??
+                        selectedStreamUrl ??
+                        selectedChannel.streamUrl
+                      }
+                      isLive
+                      kind={
+                        resolvedStream?.mediaKind ?? selectedChannel.mediaKind
+                      }
+                      onStatus={(nextStatus, message) => {
+                        if (nextStatus === "error" && tryNextStream()) {
+                          return;
                         }
-                        onStatus={(nextStatus, message) => {
-                          if (nextStatus === "error" && tryNextStream()) {
-                            return;
-                          }
-                          setStatus(nextStatus);
-                          if (
-                            nextStatus === "ready" ||
-                            nextStatus === "playing"
-                          ) {
-                            setDiagnostic(null);
-                          } else if (message) {
-                            const attempted = Math.min(
-                              streamIndexRef.current + 1,
-                              streamUrls.length,
-                            );
-                            setDiagnostic(
-                              streamUrls.length > 1
-                                ? `${message} 已尝试 ${attempted} 条线路。`
-                                : message,
-                            );
-                          }
-                        }}
-                      />
-                    ) : (
-                      <div className="flex aspect-video items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
-                        正在校验播放地址...
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span className="flex items-center gap-2">
-                        <span
-                          className={cn(
-                            "size-2 rounded-full",
-                            status === "error"
-                              ? "bg-destructive"
-                              : status === "playing"
-                                ? "bg-[color:var(--status-supported)]"
-                                : "bg-muted-foreground",
-                          )}
-                        />
-                        {statusLabel(status)}
-                      </span>
+                        if (nextStatus === "playing") {
+                          setDiagnostic(null);
+                        } else if (nextStatus === "error" && message) {
+                          setDiagnostic(message);
+                        }
+                      }}
+                    />
+                    <div className="flex justify-end text-xs text-muted-foreground">
                       <div className="flex items-center gap-1">
                         <Button
                           type="button"
@@ -712,17 +672,4 @@ export function LiveView() {
       <ScrollBar />
     </ScrollArea>
   );
-}
-
-function statusLabel(status: MediaStatus) {
-  const labels: Record<MediaStatus, string> = {
-    idle: "等待播放",
-    loading: "正在连接",
-    ready: "已准备",
-    playing: "正在播放",
-    paused: "已暂停",
-    ended: "播放结束",
-    error: "播放失败",
-  };
-  return labels[status];
 }

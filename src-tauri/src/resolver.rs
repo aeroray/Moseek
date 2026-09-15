@@ -40,6 +40,7 @@ pub struct PlaybackResolution {
 pub struct MediaResource {
     pub body_base64: String,
     pub content_type: Option<String>,
+    pub url: String,
 }
 
 const DEFAULT_SNIFFER_COMPANION_URL: &str = "http://127.0.0.1:57573/sniffer";
@@ -52,11 +53,12 @@ pub async fn fetch_media_resource(
 ) -> Result<MediaResource, String> {
     let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
     let header_pairs = headers.into_iter().collect::<Vec<_>>();
-    let (body, content_type) =
+    let (body, content_type, final_url) =
         fetch_media_bytes(parsed_url, 16 * 1024 * 1024, "媒体资源", &header_pairs).await?;
     Ok(MediaResource {
         body_base64: BASE64.encode(body),
         content_type,
+        url: final_url.to_string(),
     })
 }
 
