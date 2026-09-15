@@ -6,11 +6,13 @@ import {
   Moon,
   Play,
   ShieldCheck,
+  ShieldX,
   Sun,
   Trash2,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -572,13 +574,27 @@ export function SettingsView({
                           <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
                             {archive.fileName} · sha256{" "}
                             {archive.sha256.slice(0, 16)}…
-                            {archive.httpHeaderNames.length > 0 &&
-                              ` · headers ${archive.httpHeaderNames.join(", ")}`}
-                            {archive.hasCookie &&
-                              " · Cookie 已保存到 Windows 凭据存储"}
-                            {archive.moduleNames.length > 0 &&
-                              ` · modules ${archive.moduleNames.length}`}
                           </p>
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            <Badge
+                              variant={archive.enabled ? "default" : "outline"}
+                            >
+                              {archive.enabled ? "已启用" : "已停用"}
+                            </Badge>
+                            {archive.httpHeaderNames.length > 0 && (
+                              <Badge variant="outline">
+                                请求头 {archive.httpHeaderNames.length}
+                              </Badge>
+                            )}
+                            {archive.hasCookie && (
+                              <Badge variant="outline">Cookie 已保护</Badge>
+                            )}
+                            {archive.moduleNames.length > 0 && (
+                              <Badge variant="outline">
+                                内存模块 {archive.moduleNames.length}
+                              </Badge>
+                            )}
+                          </div>
                         </div>
                         <Switch
                           checked={archive.enabled}
@@ -609,7 +625,10 @@ export function SettingsView({
                             void handleDeleteScriptArchive(archive)
                           }
                         >
-                          <Trash2 data-icon="inline-start" aria-hidden="true" />
+                          <ShieldX
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
                         </Button>
                         <Button
                           type="button"
@@ -718,12 +737,22 @@ export function SettingsView({
                           key={log.id}
                           className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground"
                         >
-                          <span className="truncate">
-                            {log.status} · {log.phase} · {log.durationMs}ms
-                          </span>
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Badge
+                              variant={diagnosticStatusVariant(log.status)}
+                            >
+                              {diagnosticStatusLabel(log.status)}
+                            </Badge>
+                            <span className="truncate">
+                              {diagnosticPhaseLabel(log.phase)} ·{" "}
+                              {log.durationMs} ms
+                            </span>
+                          </div>
                           <span className="shrink-0 font-mono">
-                            {log.httpCallCount} calls
-                            {log.errorKind ? ` · ${log.errorKind}` : ""}
+                            {log.httpCallCount} 次请求
+                            {log.errorKind
+                              ? ` · ${diagnosticErrorLabel(log.errorKind)}`
+                              : ""}
                           </span>
                         </div>
                       ))}
@@ -778,6 +807,39 @@ export function SettingsView({
       </div>
     </div>
   );
+}
+
+function diagnosticStatusLabel(status: string) {
+  return status === "ok" ? "成功" : "失败";
+}
+
+function diagnosticStatusVariant(status: string) {
+  return status === "ok" ? "default" : "destructive";
+}
+
+function diagnosticPhaseLabel(phase: string) {
+  const labels: Record<string, string> = {
+    complete: "完成",
+    credential: "凭据读取",
+    entry: "入口执行",
+    "host-call": "网络调用",
+    runtime: "运行时",
+    spawn: "启动",
+    timeout: "超时",
+  };
+  return labels[phase] ?? phase;
+}
+
+function diagnosticErrorLabel(errorKind: string) {
+  const labels: Record<string, string> = {
+    credential: "凭据错误",
+    entry: "入口错误",
+    http: "网络错误",
+    runtime: "运行时错误",
+    script: "脚本错误",
+    timeout: "执行超时",
+  };
+  return labels[errorKind] ?? errorKind;
 }
 
 function PreferenceCard({

@@ -179,6 +179,12 @@ export function ConfigCenter() {
   const report = parseResult ?? (rawConfig ? parseConfigText(rawConfig) : null);
   const inspectedSource =
     sources.find((source) => source.key === inspectedSourceKey) ?? null;
+  const boundScriptArchive =
+    inspectedSource?.scriptArchiveId == null
+      ? undefined
+      : (scriptArchives.find(
+          (archive) => archive.id === inspectedSource.scriptArchiveId,
+        ) ?? undefined);
   const reportCounts = countParsedCapabilities(report?.sources ?? []);
   const testableSources = useMemo(
     () => sources.filter(isTestableSource),
@@ -1551,6 +1557,39 @@ export function ConfigCenter() {
                           绑定后只会调用本地档案；远程 JS、JAR 和 Spider
                           仍不会自动执行。
                         </div>
+                        {inspectedSource.scriptArchiveId !== null &&
+                          inspectedSource.scriptArchiveId !== undefined && (
+                            <div className="flex items-start gap-3 rounded-md border p-3">
+                              <Badge
+                                variant={
+                                  boundScriptArchive === undefined
+                                    ? "destructive"
+                                    : boundScriptArchive.enabled
+                                      ? "default"
+                                      : "outline"
+                                }
+                              >
+                                {boundScriptArchive === undefined
+                                  ? "档案缺失"
+                                  : boundScriptArchive.enabled
+                                    ? "可执行"
+                                    : "已绑定但停用"}
+                              </Badge>
+                              <div className="min-w-0 text-xs leading-5">
+                                <p className="font-medium">
+                                  {boundScriptArchive?.name ??
+                                    `档案 #${inspectedSource.scriptArchiveId}`}
+                                </p>
+                                <p className="text-muted-foreground">
+                                  {boundScriptArchive === undefined
+                                    ? "请重新选择一个本地脚本档案。"
+                                    : boundScriptArchive.enabled
+                                      ? "现在可以执行源审计和 CatVod 入口。"
+                                      : "先在设置中启用档案，再执行源审计。"}
+                                </p>
+                              </div>
+                            </div>
+                          )}
                         <Select
                           value={String(
                             inspectedSource.scriptArchiveId ?? "none",
@@ -1572,6 +1611,10 @@ export function ConfigCenter() {
                                 >
                                   {archive.name}
                                   {archive.enabled ? " · 已启用" : " · 已停用"}
+                                  {archive.hasCookie ? " · Cookie 已保护" : ""}
+                                  {archive.moduleNames.length > 0
+                                    ? ` · 模块 ${archive.moduleNames.length}`
+                                    : ""}
                                 </SelectItem>
                               ))}
                             </SelectGroup>
