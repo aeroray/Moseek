@@ -1,4 +1,8 @@
-use std::{fs, sync::Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    sync::Mutex,
+};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -7,9 +11,11 @@ use tauri::{Manager, State};
 
 mod adapters;
 mod cms;
+mod html;
 mod live;
 mod policy;
 mod resolver;
+mod script_runtime;
 
 struct AppDatabase(Mutex<Connection>);
 
@@ -19,10 +25,22 @@ pub struct SourceRecord {
     pub key: String,
     pub name: String,
     pub source_type: String,
+    #[serde(default)]
+    pub source_dialect: Option<String>,
     pub site_type: Option<i64>,
     pub site_protocol: Option<String>,
     pub api: String,
+    #[serde(default)]
+    pub logo: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub nsfw: bool,
+    #[serde(default = "default_true")]
+    pub status: bool,
     pub ext: Option<String>,
+    #[serde(default)]
+    pub extra: Option<String>,
     pub jar: Option<String>,
     pub epg: Option<String>,
     pub searchable: bool,
@@ -41,9 +59,24 @@ pub struct SourceRecord {
     pub test_category_count: Option<u64>,
     #[serde(default)]
     pub test_duration_ms: Option<u64>,
+    #[serde(default)]
+    pub test_operations: Vec<SourceOperationResult>,
     pub enabled: bool,
     pub last_checked_at: String,
     pub request_count: i64,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceOperationResult {
+    pub operation: String,
+    pub status: String,
+    pub message: String,
+    pub duration_ms: u64,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -97,6 +130,48 @@ fn deserialize_sources(value: Option<String>) -> Result<Option<Vec<SourceRecord>
         .map_err(|error| format!("配置源快照解析失败：{error}"))
 }
 
+fn ensure_unique_source_keys(sources: &mut [SourceRecord]) {
+    let mut used_keys = HashSet::new();
+    let mut next_suffix_by_base = HashMap::new();
+
+    for source in sources {
+        let original_key = source.key.clone();
+        let mut suffix = next_suffix_by_base.get(&original_key).copied().unwrap_or(2);
+        let mut unique_key = original_key.clone();
+
+        while used_keys.contains(&unique_key) {
+            unique_key = format!("{original_key}-{suffix}");
+            suffix += 1;
+        }
+
+        next_suffix_by_base.insert(original_key, suffix);
+        used_keys.insert(unique_key.clone());
+        source.key = unique_key;
+    }
+}
+
+fn normalize_normalized_source_keys(normalized_config: &str, sources: &[SourceRecord]) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+
+    for (section, is_live) in [("sites", false), ("lives", true)] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let source_iter = sources
+            .iter()
+            .filter(|source| (source.source_type == "live") == is_live);
+        for (item, source) in items.iter_mut().zip(source_iter) {
+            if let Some(object) = item.as_object_mut() {
+                object.insert("key".to_string(), Value::String(source.key.clone()));
+            }
+        }
+    }
+
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
 fn load_legacy_sources(
     connection: &Connection,
     document_id: i64,
@@ -110,10 +185,16 @@ fn load_legacy_sources(
                 key: row.get(0)?,
                 name: row.get(1)?,
                 source_type: row.get(2)?,
+                source_dialect: None,
                 site_type: None,
                 site_protocol: None,
                 api: row.get(3)?,
+                logo: None,
+                description: None,
+                nsfw: false,
+                status: true,
                 ext: row.get(4)?,
+                extra: None,
                 jar: row.get(5)?,
                 epg: row.get(6)?,
                 searchable: row.get::<_, i64>(7)? != 0,
@@ -126,6 +207,7 @@ fn load_legacy_sources(
                 test_item_count: None,
                 test_category_count: None,
                 test_duration_ms: None,
+                test_operations: Vec::new(),
                 enabled: row.get::<_, i64>(11)? != 0,
                 last_checked_at: row.get(12)?,
                 request_count: row.get(13)?,
@@ -164,8 +246,10 @@ fn load_config_document(
     else {
         return Ok(None);
     };
-    let sources = deserialize_sources(sources_json)?
+    let mut sources = deserialize_sources(sources_json)?
         .map_or_else(|| load_legacy_sources(connection, id), Ok)?;
+    ensure_unique_source_keys(&mut sources);
+    let normalized_config = normalize_normalized_source_keys(&normalized_config, &sources);
     Ok(Some(ConfigDocument {
         id,
         name,
@@ -281,6 +365,11 @@ fn update_normalized_source_test(
                     Value::Number(result.duration_ms.into()),
                 );
                 object.insert(
+                    "testOperations".to_string(),
+                    serde_json::to_value(&result.operations)
+                        .unwrap_or_else(|_| Value::Array(Vec::new())),
+                );
+                object.insert(
                     "lastCheckedAt".to_string(),
                     Value::String(result.tested_at.clone()),
                 );
@@ -344,6 +433,7 @@ fn set_source_test_in_connection(
         source.test_item_count = Some(result.item_count);
         source.test_category_count = Some(result.category_count);
         source.test_duration_ms = Some(result.duration_ms);
+        source.test_operations = result.operations.clone();
         source.last_checked_at = result.tested_at.clone();
         if result.status != "blocked" {
             source.request_count += 1;
@@ -684,11 +774,25 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL,
                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                         );
+                         CREATE TABLE IF NOT EXISTS script_archives (
+                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                             name TEXT NOT NULL,
+                             file_name TEXT NOT NULL,
+                             sha256 TEXT NOT NULL UNIQUE,
+                             script TEXT NOT NULL,
+                             entry TEXT NOT NULL DEFAULT 'main',
+                             http_hosts_json TEXT NOT NULL DEFAULT '[]',
+                             enabled INTEGER NOT NULL DEFAULT 0,
+                             imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                             last_used_at TEXT,
+                             deleted_at TEXT
              );",
         )
         .map_err(|error| error.to_string())?;
     ensure_config_sources_column(&connection)?;
     ensure_sources_epg_column(&connection)?;
+    ensure_script_archives_deleted_at_column(&connection)?;
     Ok(connection)
 }
 
@@ -731,9 +835,28 @@ fn ensure_sources_epg_column(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_script_archives_deleted_at_column(connection: &Connection) -> Result<(), String> {
+    let has_deleted_at = connection
+        .prepare("PRAGMA table_info(script_archives)")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|column| column == "deleted_at");
+    if !has_deleted_at {
+        connection
+            .execute("ALTER TABLE script_archives ADD COLUMN deleted_at TEXT", [])
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let connection =
                 initialize_database(app.handle()).map_err(|error| std::io::Error::other(error))?;
@@ -759,6 +882,14 @@ pub fn run() {
             live::test_live_source,
             live::get_epg,
             resolver::resolve_playback,
+            resolver::sniff_with_companion,
+            script_runtime::execute_script,
+            script_runtime::list_script_archives,
+            script_runtime::save_script_archive,
+            script_runtime::set_script_archive_enabled,
+            script_runtime::delete_script_archive,
+            script_runtime::restore_script_archive,
+            script_runtime::execute_script_archive,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Moseek");
@@ -785,14 +916,24 @@ mod tests {
     }
 
     fn test_source(enabled: bool) -> SourceRecord {
+        test_source_with_key("shared-key", enabled)
+    }
+
+    fn test_source_with_key(key: &str, enabled: bool) -> SourceRecord {
         SourceRecord {
-            key: "shared-key".to_string(),
+            key: key.to_string(),
             name: "同名源".to_string(),
             source_type: "cms".to_string(),
+            source_dialect: None,
             site_type: Some(1),
             site_protocol: Some("json-http".to_string()),
             api: "https://example.com/api".to_string(),
+            logo: None,
+            description: None,
+            nsfw: false,
+            status: true,
             ext: None,
+            extra: None,
             jar: None,
             epg: None,
             searchable: true,
@@ -805,6 +946,7 @@ mod tests {
             test_item_count: None,
             test_category_count: None,
             test_duration_ms: None,
+            test_operations: Vec::new(),
             enabled,
             last_checked_at: "刚刚".to_string(),
             request_count: 0,
@@ -824,6 +966,65 @@ mod tests {
             )
             .unwrap();
         connection.last_insert_rowid()
+    }
+
+    fn insert_duplicate_key_document(connection: &Connection) -> i64 {
+        let sources_json = serialize_sources(&[
+            test_source_with_key("duplicate-key", true),
+            test_source_with_key("duplicate-key", true),
+        ])
+        .unwrap();
+        let normalized_config = serde_json::json!({
+            "sites": [{ "key": "duplicate-key" }, { "key": "duplicate-key" }]
+        })
+        .to_string();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 0)",
+                params!["重复 key 配置", "{}", normalized_config, sources_json],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn duplicate_source_keys_are_normalized_and_test_updates_one_source() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_duplicate_key_document(&connection);
+
+        let loaded = load_config_document(&connection, document_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded
+                .sources
+                .iter()
+                .map(|source| source.key.as_str())
+                .collect::<Vec<_>>(),
+            ["duplicate-key", "duplicate-key-2"]
+        );
+
+        let result = cms::SourceTestResult {
+            source_key: "duplicate-key-2".to_string(),
+            status: "passed".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "识别到影视内容".to_string(),
+            item_count: 8,
+            category_count: 3,
+            duration_ms: 120,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
+        };
+        let updated =
+            set_source_test_in_connection(&mut connection, document_id, "duplicate-key-2", &result)
+                .unwrap();
+        let updated_value: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+
+        assert_eq!(updated.sources[0].test_status, None);
+        assert_eq!(updated.sources[1].test_status.as_deref(), Some("passed"));
+        assert_eq!(updated_value["sites"][0]["testStatus"], Value::Null);
+        assert_eq!(updated_value["sites"][1]["testStatus"], "passed");
     }
 
     #[test]
@@ -882,6 +1083,7 @@ mod tests {
             category_count: 3,
             duration_ms: 120,
             tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
         };
 
         let updated =

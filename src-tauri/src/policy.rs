@@ -3,7 +3,10 @@ use std::{
     time::Duration,
 };
 
-use reqwest::{Client, Url};
+use reqwest::{
+    header::{HeaderName, HeaderValue},
+    Client, Url,
+};
 use serde_json::Value;
 
 pub(crate) fn validate_remote_url(url: &Url) -> Result<(), String> {
@@ -23,8 +26,17 @@ pub(crate) async fn fetch_text(
     max_bytes: usize,
     resource_name: &str,
 ) -> Result<String, String> {
+    fetch_text_with_headers(url, max_bytes, resource_name, &[]).await
+}
+
+pub(crate) async fn fetch_text_with_headers(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+    headers: &[(String, String)],
+) -> Result<String, String> {
     validate_remote_url(&url)?;
-    let body = fetch_bytes(url, max_bytes, resource_name).await?;
+    let body = fetch_bytes_with_headers(url, max_bytes, resource_name, headers).await?;
     String::from_utf8(body).map_err(|_| format!("{resource_name}不是有效的 UTF-8 文本"))
 }
 
@@ -38,10 +50,32 @@ pub(crate) async fn fetch_json(
 }
 
 async fn fetch_bytes(url: Url, max_bytes: usize, resource_name: &str) -> Result<Vec<u8>, String> {
+    fetch_bytes_with_headers(url, max_bytes, resource_name, &[]).await
+}
+
+async fn fetch_bytes_with_headers(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+    headers: &[(String, String)],
+) -> Result<Vec<u8>, String> {
     validate_remote_url(&url)?;
     let client = build_http_client()?;
-    let response = client
-        .get(url)
+    let mut request = client.get(url);
+    for (name, value) in headers {
+        if matches!(
+            name.to_ascii_lowercase().as_str(),
+            "host" | "content-length" | "connection" | "transfer-encoding"
+        ) {
+            return Err(format!("不允许覆盖受保护的 HTTP 请求头：{name}"));
+        }
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| format!("无效的 HTTP 请求头名称：{error}"))?;
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|error| format!("无效的 HTTP 请求头值：{error}"))?;
+        request = request.header(header_name, header_value);
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| error.to_string())?

@@ -15,6 +15,8 @@ export type AdapterId =
   | "builtin-live"
   | "http-extension"
   | "http-parser"
+  | "js-extension"
+  | "html-http"
   | "spider-runtime"
   | "remote-jar"
   | "drpy-js"
@@ -58,6 +60,18 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     execution: "partial",
     operations: ["HTTP 地址解析"],
     reason: "只允许明确的 HTTP/HTTPS 解析接口，不执行私有协议。",
+  },
+  "js-extension": {
+    label: "JS 扩展源",
+    execution: "blocked",
+    operations: ["分类", "首页", "搜索", "详情", "iframe 解析"],
+    reason: "识别小猫/CatVod JS 源契约，但当前没有启用脚本沙箱。",
+  },
+  "html-http": {
+    label: "声明式 HTML 适配器",
+    execution: "enabled",
+    operations: ["列表", "搜索", "详情", "播放链接"],
+    reason: "只请求 HTML 并按 CSS 选择器读取字段，不执行页面 JavaScript。",
   },
   "remote-jar": {
     label: "远程 JAR 依赖",
@@ -120,6 +134,8 @@ export const adapterRegistry: AdapterProfile[] = [
   createProfile("builtin-live", "live"),
   createProfile("http-extension", "cms"),
   createProfile("http-parser", "parser"),
+  createProfile("js-extension", "cms"),
+  createProfile("html-http", "cms"),
   createProfile("spider-runtime", "cms"),
   createProfile("remote-jar", "cms"),
   createProfile("drpy-js", "parser"),
@@ -145,6 +161,10 @@ export function getAdapterProfile(
     id = "builtin-live";
   } else if (source.siteProtocol === "http-extension") {
     id = "http-extension";
+  } else if (source.siteProtocol === "js-extension") {
+    id = "js-extension";
+  } else if (source.siteProtocol === "html-http") {
+    id = "html-http";
   } else if (source.siteProtocol === "spider") {
     if (key.startsWith("drpy_js_") || key.includes("drpy")) {
       id = "drpy-js";
@@ -217,10 +237,7 @@ export function adapterMatchesCapability(
 }
 
 export function isTestableCmsSource(source: SourceRecord) {
-  if (
-    source.sourceType !== "cms" ||
-    source.capability !== "supported"
-  ) {
+  if (source.sourceType !== "cms" || source.capability !== "supported") {
     return false;
   }
   return getAdapterProfile(source).execution === "enabled";

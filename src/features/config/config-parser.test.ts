@@ -19,6 +19,7 @@ describe("Moseek config parser", () => {
     }`);
 
     expect(result.ok).toBe(true);
+    expect(result.configDialect).toBe("tvbox");
     expect(result.sources).toHaveLength(3);
     expect(result.sources[0]?.capability).toBe("supported");
     expect(result.sources[0]?.siteType).toBe(1);
@@ -36,6 +37,100 @@ describe("Moseek config parser", () => {
     expect(countParsedCapabilities(result.sources)).toMatchObject({
       supported: 2,
       blocked: 1,
+    });
+  });
+
+  it("normalizes Kitty arrays and preserves JS source metadata without executing it", () => {
+    const result = parseConfigText(`[
+      {
+        id: "kitty-cms",
+        name: "猫 CMS",
+        type: 0,
+        api: "https://cms.example/api",
+        logo: "https://example.com/logo.png",
+        desc: "测试源",
+        nsfw: true
+      },
+      {
+        id: "kitty-js",
+        name: "猫 JS",
+        type: 1,
+        api: "https://example.com",
+        extra: { js: { search: "getSearch" } },
+        status: false
+      }
+    ]`);
+
+    expect(result.ok).toBe(true);
+    expect(result.configDialect).toBe("kitty");
+    expect(result.sources[0]).toMatchObject({
+      key: "kitty-cms",
+      sourceDialect: "kitty",
+      logo: "https://example.com/logo.png",
+      description: "测试源",
+      nsfw: true,
+      enabled: true,
+    });
+    expect(result.sources[1]).toMatchObject({
+      key: "kitty-js",
+      sourceDialect: "kitty",
+      siteProtocol: "js-extension",
+      capability: "blocked",
+      enabled: false,
+      status: false,
+    });
+    expect(result.sources[1]?.extra).toContain('"js"');
+    expect(result.normalizedConfig).toContain('"configDialect": "kitty"');
+  });
+
+  it("accepts the data alias and normalizes safe GET parse services", () => {
+    const result = parseConfigText(`{
+      data: [{ id: "data-source", name: "数据源", type: 0, api: "https://example.com/api" }],
+      parses: [{ id: "parse-1", name: "解析一", url: "https://parser.example/parse", headers: { Referer: "https://example.com" } }]
+    }`);
+
+    expect(result.ok).toBe(true);
+    expect(result.configDialect).toBe("kitty");
+    expect(result.sources[0]?.key).toBe("data-source");
+    expect(result.parseServices).toMatchObject([
+      {
+        key: "parse-1",
+        capability: "supported",
+        method: "GET",
+        headers: { Referer: "https://example.com" },
+      },
+    ]);
+    expect(result.normalizedConfig).toContain('"parses"');
+  });
+
+  it("classifies declarative HTML mappings without enabling remote scripts", () => {
+    const result = parseConfigText(`{
+      sites: [
+        {
+          key: "html-source",
+          name: "HTML 源",
+          type: 5,
+          api: "https://example.com/search",
+          ext: {
+            adapter: "html",
+            itemSelector: ".item",
+            fields: {
+              id: { selector: "a", attr: "href" },
+              name: { selector: ".title" }
+            }
+          }
+        },
+        { key: "html-incomplete", name: "缺字段", type: "html", api: "https://example.com" }
+      ]
+    }`);
+
+    expect(result.sources[0]).toMatchObject({
+      siteProtocol: "html-http",
+      capability: "supported",
+    });
+    expect(result.sources[1]).toMatchObject({
+      siteProtocol: "html-http",
+      capability: "needs-adapter",
     });
   });
 
@@ -64,6 +159,57 @@ describe("Moseek config parser", () => {
     expect(result.ok).toBe(true);
     expect(result.sources[0]?.capability).toBe("invalid");
     expect(result.issues[0]?.path).toBe("sites.0");
+  });
+
+  it("treats blank text fields as missing instead of failing the whole config", () => {
+    const result = parseConfigText(`{
+      sites: [{
+        key: "",
+        name: "空字段源",
+        api: "https://cms.example/api",
+        ext: "",
+        jar: "",
+        epg: "",
+      }],
+      lives: [{
+        key: "",
+        name: "直播源",
+        url: "https://live.example/channels.m3u",
+        source: "",
+        api: "",
+        ext: "",
+        epg: "",
+      }],
+    }`);
+
+    expect(result.ok).toBe(true);
+    expect(result.sources[0]?.capability).toBe("invalid");
+    expect(result.sources[0]?.ext).toBeUndefined();
+    expect(result.sources[0]?.jar).toBeUndefined();
+    expect(result.sources[1]?.sourceType).toBe("live");
+    expect(result.sources[1]?.api).toBe("https://live.example/channels.m3u");
+  });
+
+  it("makes duplicate source keys unique across CMS and live sources", () => {
+    const result = parseConfigText(`{
+      sites: [
+        { key: "MV_vod", name: "明星 MV", api: "https://one.example/api" },
+        { key: "MV_vod", name: "明星 MV 备用", api: "https://two.example/api" },
+      ],
+      lives: [{ key: "MV_vod", name: "MV 直播", url: "https://live.example/m3u" }],
+    }`);
+
+    expect(result.ok).toBe(true);
+    expect(result.sources.map((source) => source.key)).toEqual([
+      "MV_vod",
+      "MV_vod-2",
+      "MV_vod-3",
+    ]);
+    expect(result.issues.map((issue) => issue.path)).toEqual([
+      "sites.1",
+      "lives.0",
+    ]);
+    expect(result.normalizedConfig).toContain('"key": "MV_vod-2"');
   });
 
   it("accepts numeric TVBox boolean flags and normalizes them", () => {

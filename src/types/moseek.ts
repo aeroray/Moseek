@@ -14,9 +14,50 @@ export type SourceTestStatus =
 
 export type SourceType = "cms" | "live" | "parser";
 
+export type SourceDialect = "tvbox" | "kitty" | "mixed";
+
+export type SourceOperationStatus =
+  | "passed"
+  | "empty"
+  | "failed"
+  | "blocked"
+  | "skipped";
+
+export interface SourceOperationResult {
+  operation: string;
+  status: SourceOperationStatus;
+  message: string;
+  durationMs: number;
+}
+
+export interface ParseServiceRecord {
+  key: string;
+  name: string;
+  url: string;
+  method: string;
+  headers: Record<string, string>;
+  enabled: boolean;
+  capability: CapabilityStatus;
+  capabilityNote: string;
+}
+
+export interface ScriptArchiveSummary {
+  id: number;
+  name: string;
+  fileName: string;
+  sha256: string;
+  entry: string;
+  httpHosts: string[];
+  enabled: boolean;
+  importedAt: string;
+  lastUsedAt?: string | null;
+}
+
 export type SiteProtocol =
   | "xml-http"
   | "json-http"
+  | "js-extension"
+  | "html-http"
   | "spider"
   | "http-extension"
   | "unknown";
@@ -126,10 +167,16 @@ export interface SourceRecord {
   key: string;
   name: string;
   sourceType: SourceType;
+  sourceDialect?: SourceDialect | null;
   siteType?: number | null;
   siteProtocol?: SiteProtocol | null;
   api: string;
+  logo?: string;
+  description?: string;
+  nsfw?: boolean;
+  status?: boolean;
   ext?: string;
+  extra?: string;
   jar?: string;
   epg?: string;
   searchable: boolean;
@@ -142,6 +189,7 @@ export interface SourceRecord {
   testItemCount?: number;
   testCategoryCount?: number;
   testDurationMs?: number;
+  testOperations?: SourceOperationResult[];
   enabled: boolean;
   lastCheckedAt: string;
   requestCount: number;
@@ -156,6 +204,7 @@ export interface SourceTestResult {
   categoryCount: number;
   durationMs: number;
   testedAt: string;
+  operations: SourceOperationResult[];
 }
 
 export interface RecentPlay {

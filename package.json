@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "dev:tauri": "tauri dev",
+    "build:script-runtime": "node scripts/prepare-script-runtime.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "eslint .",
@@ -19,6 +20,7 @@
     "@tanstack/react-query": "^5.90.2",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-opener": "^2.5.5",
+    "@tauri-apps/plugin-shell": "^2.3.6",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

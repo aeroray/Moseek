@@ -5,6 +5,7 @@ pub(crate) enum SiteAdapterKind {
     XmlHttp,
     JsonHttp,
     HttpExtension,
+    Html,
     Spider,
     Unsupported,
 }
@@ -22,6 +23,7 @@ impl SiteAdapterKind {
             Some("xml-http") | Some("0") => Self::XmlHttp,
             Some("json-http") | Some("1") => Self::JsonHttp,
             Some("http-extension") | Some("4") => Self::HttpExtension,
+            Some("html-http") | Some("5") => Self::Html,
             Some("spider") | Some("3") => Self::Spider,
             Some("unknown") => Self::Unsupported,
             _ if source.source_type == "cms" => Self::JsonHttp,
@@ -45,6 +47,7 @@ impl SiteAdapterKind {
             Self::XmlHttp => "xml-http",
             Self::JsonHttp => "json-http",
             Self::HttpExtension => "http-extension",
+            Self::Html => "html-http",
             Self::Spider => "spider-runtime",
             Self::Unsupported => "unknown",
         }
@@ -57,6 +60,7 @@ fn site_type_name(site_type: i64) -> &'static str {
         1 => "1",
         3 => "3",
         4 => "4",
+        5 => "5",
         _ => "unknown",
     }
 }
@@ -71,10 +75,16 @@ mod tests {
             key: "demo".to_string(),
             name: "Demo".to_string(),
             source_type: "cms".to_string(),
+            source_dialect: None,
             site_type,
             site_protocol: site_protocol.map(ToOwned::to_owned),
             api: "https://example.com/api".to_string(),
+            logo: None,
+            description: None,
+            nsfw: false,
+            status: true,
             ext: None,
+            extra: None,
             jar: None,
             epg: None,
             searchable: true,
@@ -87,6 +97,7 @@ mod tests {
             test_item_count: None,
             test_category_count: None,
             test_duration_ms: None,
+            test_operations: Vec::new(),
             enabled: true,
             last_checked_at: "刚刚".to_string(),
             request_count: 0,
@@ -110,6 +121,10 @@ mod tests {
         assert_eq!(
             SiteAdapterKind::from_source(&source(Some(4), None)),
             SiteAdapterKind::HttpExtension
+        );
+        assert_eq!(
+            SiteAdapterKind::from_source(&source(Some(5), None)),
+            SiteAdapterKind::Html
         );
     }
 

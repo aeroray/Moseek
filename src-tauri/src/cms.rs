@@ -6,8 +6,9 @@ use serde_json::{Map, Value};
 
 use crate::{
     adapters::SiteAdapterKind,
+    html,
     policy::{fetch_json, fetch_text, validate_remote_url},
-    SourceRecord,
+    SourceOperationResult, SourceRecord,
 };
 
 #[derive(Clone, Serialize)]
@@ -73,6 +74,7 @@ pub struct SourceTestResult {
     pub category_count: u64,
     pub duration_ms: u64,
     pub tested_at: String,
+    pub operations: Vec<SourceOperationResult>,
 }
 
 #[tauri::command]
@@ -86,6 +88,10 @@ pub async fn browse_source(
     let adapter = SiteAdapterKind::from_source(&source).ensure_executable(&source)?;
     let current_page = page.max(1);
     let current_page_size = page_size.clamp(1, 100);
+    if adapter == SiteAdapterKind::Html {
+        return html::browse_source(source, query, category_id, current_page, current_page_size)
+            .await;
+    }
     let params = match adapter {
         SiteAdapterKind::HttpExtension => extension_params(
             query,
@@ -94,6 +100,7 @@ pub async fn browse_source(
             current_page_size,
             source.ext.clone(),
         ),
+        SiteAdapterKind::Html => unreachable!("HTML 适配器已在参数构造前返回"),
         _ => cms_params(query, category_id, current_page, current_page_size),
     };
     let payload = match adapter {
@@ -101,6 +108,7 @@ pub async fn browse_source(
         SiteAdapterKind::JsonHttp | SiteAdapterKind::HttpExtension => {
             request_json(&source.api, &params).await?
         }
+        SiteAdapterKind::Html => unreachable!("HTML 适配器已在载荷请求前返回"),
         SiteAdapterKind::Spider | SiteAdapterKind::Unsupported => {
             return Err("该源没有可执行的安全站点适配器。".to_string());
         }
@@ -130,10 +138,11 @@ pub async fn test_source(source: SourceRecord) -> Result<SourceTestResult, Strin
             category_count: 0,
             duration_ms: started.elapsed().as_millis() as u64,
             tested_at,
+            operations: Vec::new(),
         });
     }
 
-    match browse_source(source, String::new(), None, 1, 8).await {
+    match browse_source(source.clone(), String::new(), None, 1, 8).await {
         Ok(catalog) => {
             let item_count = catalog
                 .items
@@ -152,38 +161,151 @@ pub async fn test_source(source: SourceRecord) -> Result<SourceTestResult, Strin
                     "请求成功，但响应中没有可识别的影视内容。".to_string(),
                 )
             };
+            let mut operations = vec![SourceOperationResult {
+                operation: "catalog".to_string(),
+                status: status.to_string(),
+                message: message.clone(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            }];
+            operations.push(SourceOperationResult {
+                operation: "category".to_string(),
+                status: if category_count > 0 {
+                    "passed"
+                } else {
+                    "empty"
+                }
+                .to_string(),
+                message: if category_count > 0 {
+                    format!("识别到 {category_count} 个分类。")
+                } else {
+                    "响应中没有分类数据。".to_string()
+                },
+                duration_ms: 0,
+            });
+
+            let detail_operation = if let Some(item) = catalog.items.first() {
+                let detail_started = Instant::now();
+                match get_detail(source.clone(), item.id.clone()).await {
+                    Ok(Some(_)) => SourceOperationResult {
+                        operation: "detail".to_string(),
+                        status: "passed".to_string(),
+                        message: "首条影视内容详情可读取。".to_string(),
+                        duration_ms: detail_started.elapsed().as_millis() as u64,
+                    },
+                    Ok(None) => SourceOperationResult {
+                        operation: "detail".to_string(),
+                        status: "empty".to_string(),
+                        message: "详情请求成功，但没有返回可识别详情。".to_string(),
+                        duration_ms: detail_started.elapsed().as_millis() as u64,
+                    },
+                    Err(error) => SourceOperationResult {
+                        operation: "detail".to_string(),
+                        status: "failed".to_string(),
+                        message: error,
+                        duration_ms: detail_started.elapsed().as_millis() as u64,
+                    },
+                }
+            } else {
+                SourceOperationResult {
+                    operation: "detail".to_string(),
+                    status: "skipped".to_string(),
+                    message: "没有可用于详情探测的影视条目。".to_string(),
+                    duration_ms: 0,
+                }
+            };
+            operations.push(detail_operation);
+
+            let playback_operation = catalog
+                .items
+                .iter()
+                .flat_map(|item| item.play_lines.iter())
+                .flat_map(|line| line.episodes.iter())
+                .next()
+                .map(|episode| {
+                    let status = reqwest::Url::parse(&episode.url)
+                        .ok()
+                        .filter(|url| validate_remote_url(url).is_ok())
+                        .map(|_| "passed")
+                        .unwrap_or("failed");
+                    SourceOperationResult {
+                        operation: "playback".to_string(),
+                        status: status.to_string(),
+                        message: if status == "passed" {
+                            "已识别出可通过媒体安全策略的播放地址。".to_string()
+                        } else {
+                            "播放地址未通过 HTTP/HTTPS 安全策略。".to_string()
+                        },
+                        duration_ms: 0,
+                    }
+                })
+                .unwrap_or_else(|| SourceOperationResult {
+                    operation: "playback".to_string(),
+                    status: "empty".to_string(),
+                    message: "首批影视内容没有可识别的播放地址。".to_string(),
+                    duration_ms: 0,
+                });
+            operations.push(playback_operation);
+            operations.push(SourceOperationResult {
+                operation: "search".to_string(),
+                status: if source.searchable {
+                    "skipped"
+                } else {
+                    "blocked"
+                }
+                .to_string(),
+                message: if source.searchable {
+                    "未提供稳定探测关键词，未发起搜索请求。".to_string()
+                } else {
+                    "源配置将搜索标记为不可用。".to_string()
+                },
+                duration_ms: 0,
+            });
             Ok(SourceTestResult {
                 source_key,
                 status: status.to_string(),
                 adapter_id,
-                message,
+                message: message.clone(),
                 item_count,
                 category_count,
                 duration_ms: started.elapsed().as_millis() as u64,
                 tested_at,
+                operations,
             })
         }
-        Err(error) => Ok(SourceTestResult {
-            source_key,
-            status: "failed".to_string(),
-            adapter_id,
-            message: error,
-            item_count: 0,
-            category_count: 0,
-            duration_ms: started.elapsed().as_millis() as u64,
-            tested_at,
-        }),
+        Err(error) => {
+            let message = error;
+            Ok(SourceTestResult {
+                source_key,
+                status: "failed".to_string(),
+                adapter_id,
+                message: message.clone(),
+                item_count: 0,
+                category_count: 0,
+                duration_ms: started.elapsed().as_millis() as u64,
+                tested_at,
+                operations: vec![SourceOperationResult {
+                    operation: "catalog".to_string(),
+                    status: "failed".to_string(),
+                    message,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                }],
+            })
+        }
     }
 }
 
 #[tauri::command]
 pub async fn get_detail(source: SourceRecord, vod_id: String) -> Result<Option<VodItem>, String> {
     let adapter = SiteAdapterKind::from_source(&source).ensure_executable(&source)?;
+    if adapter == SiteAdapterKind::Html {
+        return html::get_detail(source, vod_id).await;
+    }
     let params = vec![
         ("ac".to_string(), "detail".to_string()),
-        ("ids".to_string(), vod_id),
+        ("ids".to_string(), vod_id.clone()),
     ];
     let payload = match adapter {
+        SiteAdapterKind::Html => unreachable!("HTML 适配器已在详情请求前返回"),
         SiteAdapterKind::XmlHttp => parse_xml_payload(&request_text(&source.api, &params).await?)?,
         SiteAdapterKind::JsonHttp | SiteAdapterKind::HttpExtension => {
             request_json(&source.api, &params).await?

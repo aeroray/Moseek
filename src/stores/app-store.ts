@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import {
+  DEFAULT_SNIFFER_COMPANION_URL,
   setSourceEnabled,
   type ConfigDocumentSummary,
   type StoredConfigDocument,
@@ -19,6 +20,7 @@ import type {
 interface AppStore {
   activeView: ViewKey;
   theme: ThemeMode;
+  snifferCompanionUrl: string;
   configDocuments: ConfigDocumentSummary[];
   configDocumentCache: Record<number, StoredConfigDocument>;
   activeConfigId: number | null;
@@ -32,6 +34,7 @@ interface AppStore {
   liveFavorites: string[];
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
+  setSnifferCompanionUrl: (url: string) => void;
   toggleSource: (key: string) => Promise<void>;
   setSourceTestResult: (key: string, result: SourceTestResult) => void;
   setConfigDocuments: (documents: ConfigDocumentSummary[]) => void;
@@ -56,6 +59,7 @@ export const useAppStore = create<AppStore>()(
     (set, get) => ({
       activeView: "browse",
       theme: "system",
+      snifferCompanionUrl: DEFAULT_SNIFFER_COMPANION_URL,
       configDocuments: [],
       configDocumentCache: {},
       activeConfigId: null,
@@ -69,6 +73,8 @@ export const useAppStore = create<AppStore>()(
       liveFavorites: [],
       setActiveView: (activeView) => set({ activeView }),
       setTheme: (theme) => set({ theme }),
+      setSnifferCompanionUrl: (snifferCompanionUrl) =>
+        set({ snifferCompanionUrl }),
       toggleSource: async (key) => {
         const currentState = get();
         const currentSource = currentState.sources.find(
@@ -122,6 +128,7 @@ export const useAppStore = create<AppStore>()(
                   testItemCount: result.itemCount,
                   testCategoryCount: result.categoryCount,
                   testDurationMs: result.durationMs,
+                  testOperations: result.operations,
                   lastCheckedAt: result.testedAt,
                   requestCount:
                     source.requestCount + (result.status === "blocked" ? 0 : 1),
@@ -154,8 +161,8 @@ export const useAppStore = create<AppStore>()(
         })),
       removeConfigDocument: (documentId) =>
         set((state) => {
-          const { [documentId]: _removed, ...configDocumentCache } =
-            state.configDocumentCache;
+          const configDocumentCache = { ...state.configDocumentCache };
+          delete configDocumentCache[documentId];
           return {
             configDocuments: state.configDocuments.filter(
               (document) => document.id !== documentId,
@@ -243,6 +250,8 @@ export const useAppStore = create<AppStore>()(
         return {
           ...currentState,
           ...persisted,
+          snifferCompanionUrl:
+            persisted?.snifferCompanionUrl ?? currentState.snifferCompanionUrl,
           configDocuments: persisted?.configDocuments ?? [],
           configDocumentCache: persisted?.configDocumentCache ?? {},
           activeConfigId: persisted?.activeConfigId ?? null,
@@ -264,6 +273,7 @@ export const useAppStore = create<AppStore>()(
       partialize: (state) => ({
         activeView: state.activeView,
         theme: state.theme,
+        snifferCompanionUrl: state.snifferCompanionUrl,
         configDocuments: state.configDocuments,
         configDocumentCache: state.configDocumentCache,
         activeConfigId: state.activeConfigId,

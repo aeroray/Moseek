@@ -119,6 +119,7 @@ import {
 import { useAppStore } from "@/stores/app-store";
 import type {
   CapabilityStatus,
+  SourceOperationStatus,
   SourceRecord,
   SourceTestStatus,
 } from "@/types/moseek";
@@ -311,7 +312,7 @@ export function ConfigCenter() {
       }
       setParseState({
         type: result.status === "passed" ? "success" : "error",
-        title: `${source.sourceType === "live" ? "直播" : "CMS"} 测试完成`,
+        title: `${source.sourceType === "live" ? "直播" : "CMS"} 源审计完成`,
         message: `${source.name}：${result.message}`,
       });
       return result;
@@ -332,7 +333,7 @@ export function ConfigCenter() {
     if (testableSources.length === 0) {
       setParseState({
         type: "error",
-        message: "当前配置没有可测试的 CMS 或直播源。",
+        message: "当前配置没有可审计的 CMS 或直播源。",
       });
       return;
     }
@@ -350,8 +351,8 @@ export function ConfigCenter() {
         passedCount === testableSources.length
           ? "success"
           : "error",
-      title: "源测试完成",
-      message: `已完成 ${results.length}/${testableSources.length} 个支持源测试，其中 ${passedCount} 个通过。通过测试的 CMS 可进入影视库，直播源可进入直播。`,
+      title: "源审计完成",
+      message: `已完成 ${results.length}/${testableSources.length} 个源审计，其中 ${passedCount} 个通过。通过审计的 CMS 可进入影视库，直播源可进入直播。`,
     });
   };
 
@@ -570,7 +571,7 @@ export function ConfigCenter() {
               type="button"
               variant="outline"
               className="gap-2"
-                disabled={testableSources.length === 0 || testingKeys.size > 0}
+              disabled={testableSources.length === 0 || testingKeys.size > 0}
               onClick={() => void handleTestAll()}
             >
               {testingKeys.size > 0 ? (
@@ -583,8 +584,8 @@ export function ConfigCenter() {
                 <FlaskConical data-icon="inline-start" aria-hidden="true" />
               )}
               {testingKeys.size > 0
-                  ? `测试中 ${testingKeys.size}/${testableSources.length}`
-                  : `测试支持源（${testableSources.length}）`}
+                ? `测试中 ${testingKeys.size}/${testableSources.length}`
+                : `测试支持源（${testableSources.length}）`}
             </Button>
             <Button
               type="button"
@@ -768,7 +769,8 @@ export function ConfigCenter() {
                   <div>
                     <CardTitle className="text-base">源能力清单</CardTitle>
                     <CardDescription>
-                      只有完全支持的 CMS 和直播源会出现测试入口；CMS 通过后才会进入影视库。
+                      只有完全支持的 CMS 和直播源会出现测试入口；CMS
+                      通过后才会进入影视库。
                     </CardDescription>
                   </div>
                   <div className="flex items-center gap-2">
@@ -812,7 +814,8 @@ export function ConfigCenter() {
                 </div>
                 <div className="mt-4 flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
                   <span>
-                    影视库：{testedCmsCount} 个 CMS 通过 · 直播：{testedLiveCount} 个通过
+                    影视库：{testedCmsCount} 个 CMS 通过 · 直播：
+                    {testedLiveCount} 个通过
                   </span>
                   <span>
                     {testableSources.length > 0
@@ -1091,6 +1094,28 @@ export function ConfigCenter() {
                       title="普通 CMS"
                       detail={`${reportCounts.supported} 个源可以直接进入搜索与详情流程`}
                       status="通过"
+                    />
+                    <ReportLine
+                      title="配置方言"
+                      detail={`识别为 ${report.configDialect}，已统一转换为 Moseek 标准源模型`}
+                      status="已归一化"
+                    />
+                    <ReportLine
+                      title="HTTP 解析服务"
+                      detail={`${report.parseServices.filter((service) => service.capability === "supported").length} 个 GET 服务可在播放时尝试，其他服务仅记录`}
+                      status={
+                        report.parseServices.some(
+                          (service) => service.capability === "supported",
+                        )
+                          ? "可用"
+                          : "未配置"
+                      }
+                      warning={
+                        report.parseServices.length > 0 &&
+                        !report.parseServices.some(
+                          (service) => service.capability === "supported",
+                        )
+                      }
                     />
                     <ReportLine
                       title="远程依赖"
@@ -1417,6 +1442,24 @@ export function ConfigCenter() {
                       mono
                     />
                     <DetailRow
+                      label="sourceDialect"
+                      value={inspectedSource.sourceDialect ?? "unknown"}
+                      mono
+                    />
+                    {inspectedSource.description && (
+                      <DetailRow
+                        label="description"
+                        value={inspectedSource.description}
+                      />
+                    )}
+                    <DetailRow
+                      label="status"
+                      value={
+                        inspectedSource.status === false ? "false" : "true"
+                      }
+                      mono
+                    />
+                    <DetailRow
                       label="searchable"
                       value={inspectedSource.searchable ? "true" : "false"}
                       mono
@@ -1451,6 +1494,32 @@ export function ConfigCenter() {
                     )}
                   </DetailSection>
                   <AdapterDetail source={inspectedSource} />
+                  {inspectedSource.testOperations &&
+                    inspectedSource.testOperations.length > 0 && (
+                      <DetailSection title="能力审计">
+                        {inspectedSource.testOperations.map((operation) => (
+                          <div
+                            key={`${operation.operation}-${operation.message}`}
+                            className="flex items-start justify-between gap-3 rounded-md border bg-muted/20 p-3"
+                          >
+                            <div className="min-w-0">
+                              <p className="font-medium">
+                                {operation.operation}
+                              </p>
+                              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                {operation.message}
+                              </p>
+                            </div>
+                            <Badge
+                              variant="outline"
+                              className={operationStatusClass(operation.status)}
+                            >
+                              {operationStatusLabel(operation.status)}
+                            </Badge>
+                          </div>
+                        ))}
+                      </DetailSection>
+                    )}
                   <DetailSection title="远程地址">
                     <DetailRow label="api" value={inspectedSource.api} mono />
                     {inspectedSource.ext && (
@@ -1517,7 +1586,8 @@ export function ConfigCenter() {
                             aria-hidden="true"
                           />
                         )}
-                        测试 {inspectedSource.sourceType === "live" ? "直播" : "CMS"}
+                        审计{" "}
+                        {inspectedSource.sourceType === "live" ? "直播" : "CMS"}
                       </Button>
                     )}
                     <Button
@@ -1683,6 +1753,30 @@ function SourceTestBadge({ source }: { source: SourceRecord }) {
       <span>{display.label}</span>
     </div>
   );
+}
+
+function operationStatusLabel(status: SourceOperationStatus) {
+  return {
+    passed: "通过",
+    empty: "无数据",
+    failed: "失败",
+    blocked: "阻止",
+    skipped: "跳过",
+  }[status];
+}
+
+function operationStatusClass(status: SourceOperationStatus) {
+  return {
+    passed:
+      "border-[color:var(--status-supported-border)] text-[color:var(--status-supported)]",
+    empty:
+      "border-[color:var(--status-partial-border)] text-[color:var(--status-partial)]",
+    failed:
+      "border-[color:var(--status-blocked-border)] text-[color:var(--status-blocked)]",
+    blocked:
+      "border-[color:var(--status-blocked-border)] text-[color:var(--status-blocked)]",
+    skipped: "text-muted-foreground",
+  }[status];
 }
 
 function DetailRow({

@@ -1,13 +1,18 @@
+import { useEffect, useRef, useState } from "react";
 import {
   Check,
+  FileUp,
   MonitorCog,
   Moon,
+  Play,
   ShieldCheck,
   Sun,
   Trash2,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Card,
   CardContent,
@@ -26,14 +31,228 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { ThemeMode } from "@/types/moseek";
+import {
+  deleteScriptArchive,
+  executeScript,
+  executeScriptArchive,
+  isTauriRuntime,
+  listScriptArchives,
+  restoreScriptArchive,
+  saveScriptArchive,
+  setScriptArchiveEnabled,
+} from "@/lib/tauri";
+import type { ScriptArchiveSummary, ThemeMode } from "@/types/moseek";
 
 interface SettingsViewProps {
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
+  snifferCompanionUrl: string;
+  onSnifferCompanionUrlChange: (url: string) => void;
 }
 
-export function SettingsView({ theme, onThemeChange }: SettingsViewProps) {
+export function SettingsView({
+  theme,
+  onThemeChange,
+  snifferCompanionUrl,
+  onSnifferCompanionUrlChange,
+}: SettingsViewProps) {
+  const [runtimeScript, setRuntimeScript] = useState(
+    "function main(input) { return { title: input.title.toUpperCase(), fetchType: typeof fetch }; }",
+  );
+  const [runtimeInput, setRuntimeInput] = useState('{"title":"demo"}');
+  const [runtimeHosts, setRuntimeHosts] = useState("");
+  const [runtimeOutput, setRuntimeOutput] = useState("");
+  const [isExecutingScript, setIsExecutingScript] = useState(false);
+  const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
+    [],
+  );
+  const [isLoadingArchives, setIsLoadingArchives] = useState(false);
+  const [archiveMessage, setArchiveMessage] = useState("");
+  const [deletedArchiveId, setDeletedArchiveId] = useState<number | null>(null);
+  const [archiveEntry, setArchiveEntry] = useState("main");
+  const [archiveHttpHosts, setArchiveHttpHosts] = useState("");
+  const scriptFileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    setIsLoadingArchives(true);
+    void listScriptArchives()
+      .then((archives) => setScriptArchives(archives ?? []))
+      .catch((error) => {
+        setArchiveMessage(
+          error instanceof Error ? error.message : "无法读取脚本档案",
+        );
+      })
+      .finally(() => setIsLoadingArchives(false));
+  }, []);
+
+  const handleExecuteScript = async () => {
+    if (isExecutingScript) return;
+    setIsExecutingScript(true);
+    try {
+      const input = JSON.parse(runtimeInput) as unknown;
+      const result = await executeScript({
+        script: runtimeScript,
+        entry: "main",
+        input,
+        httpHosts: runtimeHosts
+          .split(",")
+          .map((host) => host.trim())
+          .filter(Boolean),
+      });
+      if (!result) {
+        throw new Error(
+          "浏览器预览不会执行脚本运行时，请在 Tauri 桌面应用中使用。 ",
+        );
+      }
+      setRuntimeOutput(
+        JSON.stringify(
+          {
+            ok: true,
+            value: result.value,
+            adapterId: result.adapterId,
+            httpCallCount: result.httpCallCount,
+          },
+          null,
+          2,
+        ),
+      );
+    } catch (error) {
+      setRuntimeOutput(
+        JSON.stringify(
+          {
+            ok: false,
+            error: error instanceof Error ? error.message : "脚本执行失败",
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      setIsExecutingScript(false);
+    }
+  };
+
+  const handleImportScriptArchive = async (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setArchiveMessage("");
+    try {
+      const saved = await saveScriptArchive({
+        name: file.name.replace(/\.(m?js|txt)$/i, "") || file.name,
+        fileName: file.name,
+        script: await file.text(),
+        entry: archiveEntry.trim() || "main",
+        httpHosts: archiveHttpHosts
+          .split(",")
+          .map((host) => host.trim())
+          .filter(Boolean),
+      });
+      if (!saved)
+        throw new Error(
+          "浏览器预览不会保存脚本档案，请在 Tauri 桌面应用中使用。",
+        );
+      setScriptArchives((archives) => [saved, ...archives]);
+      setDeletedArchiveId(null);
+      setArchiveMessage(`已导入「${saved.name}」，默认保持停用。`);
+    } catch (error) {
+      setArchiveMessage(
+        error instanceof Error ? error.message : "脚本档案导入失败",
+      );
+    }
+  };
+
+  const handleToggleScriptArchive = async (
+    archive: ScriptArchiveSummary,
+    enabled: boolean,
+  ) => {
+    try {
+      const updated = await setScriptArchiveEnabled(archive.id, enabled);
+      if (!updated) throw new Error("浏览器预览不会修改脚本档案。");
+      setScriptArchives((archives) =>
+        archives.map((item) => (item.id === updated.id ? updated : item)),
+      );
+      setArchiveMessage(
+        enabled ? `已启用「${archive.name}」。` : `已停用「${archive.name}」。`,
+      );
+    } catch (error) {
+      setArchiveMessage(
+        error instanceof Error ? error.message : "脚本档案状态保存失败",
+      );
+    }
+  };
+
+  const handleDeleteScriptArchive = async (archive: ScriptArchiveSummary) => {
+    if (!window.confirm(`确认删除本地脚本档案「${archive.name}」？`)) return;
+    try {
+      const archives = await deleteScriptArchive(archive.id);
+      if (!archives) throw new Error("浏览器预览不会删除脚本档案。");
+      setScriptArchives(archives);
+      setDeletedArchiveId(archive.id);
+      setArchiveMessage(`已删除「${archive.name}」；原始配置没有变化。`);
+    } catch (error) {
+      setArchiveMessage(
+        error instanceof Error ? error.message : "脚本档案删除失败",
+      );
+    }
+  };
+
+  const handleRestoreScriptArchive = async () => {
+    if (deletedArchiveId === null) return;
+    try {
+      const archives = await restoreScriptArchive(deletedArchiveId);
+      if (!archives) throw new Error("浏览器预览不会恢复脚本档案。");
+      setScriptArchives(archives);
+      setDeletedArchiveId(null);
+      setArchiveMessage("已撤销删除，脚本档案已恢复并保持原启用状态。");
+    } catch (error) {
+      setArchiveMessage(
+        error instanceof Error ? error.message : "脚本档案恢复失败",
+      );
+    }
+  };
+
+  const handleExecuteScriptArchive = async (archive: ScriptArchiveSummary) => {
+    if (isExecutingScript || !archive.enabled) return;
+    setIsExecutingScript(true);
+    try {
+      const input = JSON.parse(runtimeInput) as unknown;
+      const result = await executeScriptArchive(archive.id, input);
+      if (!result) throw new Error("浏览器预览不会执行脚本档案。");
+      setRuntimeOutput(
+        JSON.stringify(
+          {
+            ok: true,
+            archive: archive.name,
+            value: result.value,
+            adapterId: result.adapterId,
+            httpCallCount: result.httpCallCount,
+          },
+          null,
+          2,
+        ),
+      );
+      const archives = await listScriptArchives();
+      if (archives) setScriptArchives(archives);
+    } catch (error) {
+      setRuntimeOutput(
+        JSON.stringify(
+          {
+            ok: false,
+            error: error instanceof Error ? error.message : "脚本档案执行失败",
+          },
+          null,
+          2,
+        ),
+      );
+    } finally {
+      setIsExecutingScript(false);
+    }
+  };
+
   return (
     <div className="h-full overflow-auto">
       <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-6 px-8 py-8">
@@ -193,6 +412,195 @@ export function SettingsView({ theme, onThemeChange }: SettingsViewProps) {
                   />
                   外部播放器只在用户主动触发时打开
                 </p>
+              </CardContent>
+            </Card>
+            <PreferenceCard
+              title="本地嗅探伴侣"
+              description="仅连接本机回环地址，不会把嗅探请求发送到远程服务"
+            >
+              <Input
+                value={snifferCompanionUrl}
+                onChange={(event) =>
+                  onSnifferCompanionUrlChange(event.target.value)
+                }
+                placeholder="http://127.0.0.1:57573/sniffer"
+                aria-label="本地嗅探伴侣地址"
+              />
+            </PreferenceCard>
+            <Card className="col-span-2">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <FileUp data-icon="inline-start" aria-hidden="true" />
+                  本地脚本档案
+                </CardTitle>
+                <CardDescription>
+                  导入后默认停用；档案按 SHA-256
+                  去重，删除只影响本地档案，不会修改原始配置。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                <input
+                  ref={scriptFileInputRef}
+                  type="file"
+                  accept=".js,.mjs,.txt,text/javascript"
+                  className="hidden"
+                  onChange={(event) => void handleImportScriptArchive(event)}
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs text-muted-foreground">
+                    {isLoadingArchives
+                      ? "正在读取档案..."
+                      : `${scriptArchives.length} 个本地档案`}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="gap-2"
+                    onClick={() => scriptFileInputRef.current?.click()}
+                    disabled={!isTauriRuntime() || isLoadingArchives}
+                  >
+                    <FileUp data-icon="inline-start" aria-hidden="true" />
+                    导入本地脚本
+                  </Button>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <Input
+                    value={archiveEntry}
+                    onChange={(event) => setArchiveEntry(event.target.value)}
+                    placeholder="入口函数，例如 main"
+                    aria-label="脚本档案入口函数"
+                    className="font-mono text-xs"
+                  />
+                  <Input
+                    value={archiveHttpHosts}
+                    onChange={(event) =>
+                      setArchiveHttpHosts(event.target.value)
+                    }
+                    placeholder="HTTP allowlist，逗号分隔；留空禁止网络"
+                    aria-label="脚本档案 HTTP allowlist"
+                    className="font-mono text-xs"
+                  />
+                </div>
+                {scriptArchives.length > 0 && (
+                  <div className="flex flex-col divide-y rounded-md border">
+                    {scriptArchives.map((archive) => (
+                      <div
+                        key={archive.id}
+                        className="flex items-center gap-3 px-3 py-3"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium">
+                            {archive.name}
+                          </p>
+                          <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
+                            {archive.fileName} · sha256{" "}
+                            {archive.sha256.slice(0, 16)}…
+                          </p>
+                        </div>
+                        <Switch
+                          checked={archive.enabled}
+                          onCheckedChange={(enabled) =>
+                            void handleToggleScriptArchive(archive, enabled)
+                          }
+                          aria-label={`${archive.enabled ? "停用" : "启用"} ${archive.name}`}
+                        />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          disabled={!archive.enabled || isExecutingScript}
+                          onClick={() =>
+                            void handleExecuteScriptArchive(archive)
+                          }
+                        >
+                          <Play data-icon="inline-start" aria-hidden="true" />
+                          执行
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          aria-label={`删除 ${archive.name}`}
+                          onClick={() =>
+                            void handleDeleteScriptArchive(archive)
+                          }
+                        >
+                          <Trash2 data-icon="inline-start" aria-hidden="true" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {archiveMessage && (
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-xs text-muted-foreground">
+                      {archiveMessage}
+                    </p>
+                    {deletedArchiveId !== null && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => void handleRestoreScriptArchive()}
+                      >
+                        撤销删除
+                      </Button>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+            <Card className="col-span-2">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <ShieldCheck data-icon="inline-start" aria-hidden="true" />
+                  受限脚本运行时
+                </CardTitle>
+                <CardDescription>
+                  只运行当前输入的脚本；无文件、Shell、DOM 和默认网络权限。HTTP
+                  主机必须显式列入 allowlist。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col gap-3">
+                  <Textarea
+                    value={runtimeScript}
+                    onChange={(event) => setRuntimeScript(event.target.value)}
+                    className="min-h-36 font-mono text-xs"
+                    aria-label="运行时脚本"
+                  />
+                  <Input
+                    value={runtimeInput}
+                    onChange={(event) => setRuntimeInput(event.target.value)}
+                    placeholder='{"title":"demo"}'
+                    aria-label="脚本 JSON 输入"
+                    className="font-mono text-xs"
+                  />
+                  <Input
+                    value={runtimeHosts}
+                    onChange={(event) => setRuntimeHosts(event.target.value)}
+                    placeholder="允许的 HTTP 主机，逗号分隔；留空表示禁止网络"
+                    aria-label="脚本 HTTP 主机 allowlist"
+                    className="font-mono text-xs"
+                  />
+                  <Button
+                    type="button"
+                    className="w-fit gap-2"
+                    onClick={() => void handleExecuteScript()}
+                    disabled={isExecutingScript || !isTauriRuntime()}
+                  >
+                    <Check data-icon="inline-start" aria-hidden="true" />
+                    {isExecutingScript ? "执行中..." : "执行本地脚本"}
+                  </Button>
+                </div>
+                <Textarea
+                  value={runtimeOutput}
+                  readOnly
+                  className="min-h-56 font-mono text-xs"
+                  placeholder="执行结果会显示在这里"
+                  aria-label="脚本执行结果"
+                />
               </CardContent>
             </Card>
           </TabsContent>

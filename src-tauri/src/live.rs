@@ -8,7 +8,7 @@ use serde_json::Value;
 use crate::{
     cms::SourceTestResult,
     policy::{fetch_text, validate_remote_url},
-    SourceRecord,
+    SourceOperationResult, SourceRecord,
 };
 
 #[derive(Clone, Serialize)]
@@ -103,10 +103,16 @@ pub async fn test_live_source(source: SourceRecord) -> Result<SourceTestResult, 
             category_count: 0,
             duration_ms: started.elapsed().as_millis() as u64,
             tested_at,
+            operations: vec![SourceOperationResult {
+                operation: "catalog".to_string(),
+                status: "blocked".to_string(),
+                message: "该源不满足可执行的直播适配器条件。".to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            }],
         });
     }
 
-    match load_live_source(source).await {
+    match load_live_source(source.clone()).await {
         Ok(catalog) => {
             let item_count = catalog.channels.len() as u64;
             let category_count = catalog.groups.len() as u64;
@@ -121,27 +127,101 @@ pub async fn test_live_source(source: SourceRecord) -> Result<SourceTestResult, 
                     "请求成功，但响应中没有可识别的直播频道。".to_string(),
                 )
             };
+            let mut operations = vec![SourceOperationResult {
+                operation: "catalog".to_string(),
+                status: status.to_string(),
+                message: message.clone(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            }];
+            let playback_operation = catalog
+                .channels
+                .first()
+                .map(|channel| {
+                    let status = reqwest::Url::parse(&channel.stream_url)
+                        .ok()
+                        .filter(|url| validate_remote_url(url).is_ok())
+                        .map(|_| "passed")
+                        .unwrap_or("failed");
+                    SourceOperationResult {
+                        operation: "playback".to_string(),
+                        status: status.to_string(),
+                        message: if status == "passed" {
+                            "首个频道播放地址通过 HTTP/HTTPS 安全策略。".to_string()
+                        } else {
+                            "首个频道播放地址未通过安全策略。".to_string()
+                        },
+                        duration_ms: 0,
+                    }
+                })
+                .unwrap_or_else(|| SourceOperationResult {
+                    operation: "playback".to_string(),
+                    status: "empty".to_string(),
+                    message: "没有可用于播放探测的频道。".to_string(),
+                    duration_ms: 0,
+                });
+            operations.push(playback_operation);
+            let epg_operation = if let Some(epg_url) = source.epg.clone() {
+                let epg_started = Instant::now();
+                match get_epg(epg_url, "auto".to_string()).await {
+                    Ok(epg) if !epg.programs.is_empty() => SourceOperationResult {
+                        operation: "epg".to_string(),
+                        status: "passed".to_string(),
+                        message: format!("识别到 {} 条节目单。", epg.programs.len()),
+                        duration_ms: epg_started.elapsed().as_millis() as u64,
+                    },
+                    Ok(_) => SourceOperationResult {
+                        operation: "epg".to_string(),
+                        status: "empty".to_string(),
+                        message: "EPG 请求成功，但没有节目单数据。".to_string(),
+                        duration_ms: epg_started.elapsed().as_millis() as u64,
+                    },
+                    Err(error) => SourceOperationResult {
+                        operation: "epg".to_string(),
+                        status: "failed".to_string(),
+                        message: error,
+                        duration_ms: epg_started.elapsed().as_millis() as u64,
+                    },
+                }
+            } else {
+                SourceOperationResult {
+                    operation: "epg".to_string(),
+                    status: "skipped".to_string(),
+                    message: "源没有配置 EPG 地址。".to_string(),
+                    duration_ms: 0,
+                }
+            };
+            operations.push(epg_operation);
             Ok(SourceTestResult {
                 source_key,
                 status: status.to_string(),
                 adapter_id: "builtin-live".to_string(),
-                message,
+                message: message.clone(),
                 item_count,
                 category_count,
                 duration_ms: started.elapsed().as_millis() as u64,
                 tested_at,
+                operations,
             })
         }
-        Err(error) => Ok(SourceTestResult {
-            source_key,
-            status: "failed".to_string(),
-            adapter_id: "builtin-live".to_string(),
-            message: error,
-            item_count: 0,
-            category_count: 0,
-            duration_ms: started.elapsed().as_millis() as u64,
-            tested_at,
-        }),
+        Err(error) => {
+            let message = error;
+            Ok(SourceTestResult {
+                source_key,
+                status: "failed".to_string(),
+                adapter_id: "builtin-live".to_string(),
+                message: message.clone(),
+                item_count: 0,
+                category_count: 0,
+                duration_ms: started.elapsed().as_millis() as u64,
+                tested_at,
+                operations: vec![SourceOperationResult {
+                    operation: "catalog".to_string(),
+                    status: "failed".to_string(),
+                    message,
+                    duration_ms: started.elapsed().as_millis() as u64,
+                }],
+            })
+        }
     }
 }
 

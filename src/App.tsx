@@ -18,8 +18,12 @@ import type { ViewKey } from "@/types/moseek";
 function App() {
   const activeView = useAppStore((state) => state.activeView);
   const theme = useAppStore((state) => state.theme);
+  const snifferCompanionUrl = useAppStore((state) => state.snifferCompanionUrl);
   const setActiveView = useAppStore((state) => state.setActiveView);
   const setTheme = useAppStore((state) => state.setTheme);
+  const setSnifferCompanionUrl = useAppStore(
+    (state) => state.setSnifferCompanionUrl,
+  );
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
   const setConfigDocument = useAppStore((state) => state.setConfigDocument);
   const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
@@ -69,7 +73,12 @@ function App() {
     <AppShell activeView={activeView} onNavigate={navigate}>
       {activeView === "config" && <ConfigCenter />}
       {activeView === "settings" && (
-        <SettingsView theme={theme} onThemeChange={setTheme} />
+        <SettingsView
+          theme={theme}
+          onThemeChange={setTheme}
+          snifferCompanionUrl={snifferCompanionUrl}
+          onSnifferCompanionUrlChange={setSnifferCompanionUrl}
+        />
       )}
       {activeView === "browse" && <BrowseView onNavigate={navigate} />}
       {activeView === "live" && <LiveView />}

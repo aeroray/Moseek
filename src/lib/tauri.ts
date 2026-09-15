@@ -5,6 +5,8 @@ import type {
   CatalogPage,
   EpgCatalog,
   LiveCatalog,
+  ParseServiceRecord,
+  ScriptArchiveSummary,
   SourceRecord,
   SourceTestResult,
   VodItem,
@@ -41,7 +43,31 @@ export interface PlaybackResolution {
   url: string;
   mediaKind: "hls" | "mp4" | "unknown";
   adapterId: string;
+  parseServiceId?: string | null;
 }
+
+export interface ScriptExecutionRequest {
+  script: string;
+  entry?: string;
+  input?: unknown;
+  httpHosts?: string[];
+}
+
+export interface ScriptExecutionResult {
+  value: unknown;
+  adapterId: string;
+  httpCallCount: number;
+}
+
+export interface SaveScriptArchiveInput {
+  name: string;
+  fileName: string;
+  script: string;
+  entry?: string;
+  httpHosts?: string[];
+}
+
+export const DEFAULT_SNIFFER_COMPANION_URL = "http://127.0.0.1:57573/sniffer";
 
 export function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -126,7 +152,8 @@ export async function browseSource(
 }
 
 export async function testSource(source: SourceRecord) {
-  const command = source.sourceType === "live" ? "test_live_source" : "test_source";
+  const command =
+    source.sourceType === "live" ? "test_live_source" : "test_source";
   return invokeCommand<SourceTestResult>(command, {
     source,
   });
@@ -147,12 +174,70 @@ export async function getEpg(sourceUrl: string, format: string) {
   return invokeCommand<EpgCatalog>("get_epg", { sourceUrl, format });
 }
 
-export async function resolvePlayback(url: string) {
-  return invokeCommand<PlaybackResolution>("resolve_playback", { url });
+export async function resolvePlayback(
+  url: string,
+  parseServices: ParseServiceRecord[] = [],
+) {
+  return invokeCommand<PlaybackResolution>("resolve_playback", {
+    url,
+    parseServices,
+  });
 }
 
-export async function openExternalUrl(url: string) {
-  const resolved = await resolvePlayback(url);
+export async function sniffWithCompanion(
+  targetUrl: string,
+  companionUrl = DEFAULT_SNIFFER_COMPANION_URL,
+) {
+  return invokeCommand<PlaybackResolution>("sniff_with_companion", {
+    targetUrl,
+    companionUrl,
+    timeoutMs: 15_000,
+  });
+}
+
+export async function executeScript(request: ScriptExecutionRequest) {
+  return invokeCommand<ScriptExecutionResult>("execute_script", { request });
+}
+
+export async function listScriptArchives() {
+  return invokeCommand<ScriptArchiveSummary[]>("list_script_archives");
+}
+
+export async function saveScriptArchive(input: SaveScriptArchiveInput) {
+  return invokeCommand<ScriptArchiveSummary>("save_script_archive", { input });
+}
+
+export async function setScriptArchiveEnabled(id: number, enabled: boolean) {
+  return invokeCommand<ScriptArchiveSummary>("set_script_archive_enabled", {
+    archiveId: id,
+    enabled,
+  });
+}
+
+export async function deleteScriptArchive(id: number) {
+  return invokeCommand<ScriptArchiveSummary[]>("delete_script_archive", {
+    archiveId: id,
+  });
+}
+
+export async function restoreScriptArchive(id: number) {
+  return invokeCommand<ScriptArchiveSummary[]>("restore_script_archive", {
+    archiveId: id,
+  });
+}
+
+export async function executeScriptArchive(id: number, input: unknown) {
+  return invokeCommand<ScriptExecutionResult>("execute_script_archive", {
+    archiveId: id,
+    input,
+  });
+}
+
+export async function openExternalUrl(
+  url: string,
+  parseServices: ParseServiceRecord[] = [],
+) {
+  const resolved = await resolvePlayback(url, parseServices);
   const targetUrl = resolved?.url ?? url;
   const parsedUrl = new URL(targetUrl);
   if (!matchesHttpProtocol(parsedUrl.protocol)) {

@@ -8,9 +8,11 @@ import {
   Info,
   ListVideo,
   Play,
+  ScanSearch,
 } from "lucide-react";
 
 import { CapabilityBadge } from "@/components/capability-badge";
+import { parseParseServices } from "@/features/config/config-parser";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,6 +30,7 @@ import {
   isTauriRuntime,
   openExternalUrl,
   resolvePlayback,
+  sniffWithCompanion,
   type PlaybackResolution,
 } from "@/lib/tauri";
 import type {
@@ -56,11 +59,14 @@ export function PlayerView({
   const { item, source } = request;
   const addHistory = useAppStore((state) => state.addHistory);
   const playbackProgress = useAppStore((state) => state.playbackProgress);
+  const normalizedConfig = useAppStore((state) => state.normalizedConfig);
+  const snifferCompanionUrl = useAppStore((state) => state.snifferCompanionUrl);
   const setPlaybackProgress = useAppStore((state) => state.setPlaybackProgress);
   const [activeLineId, setActiveLineId] = useState(request.line.id);
   const [activeEpisodeId, setActiveEpisodeId] = useState(request.episode.id);
   const [status, setStatus] = useState<MediaStatus>("idle");
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [isSniffing, setIsSniffing] = useState(false);
   const [resolvedPlayback, setResolvedPlayback] =
     useState<PlaybackResolution | null>(
       isTauriRuntime()
@@ -102,7 +108,10 @@ export function PlayerView({
     }
     setResolvedPlayback(null);
     setStatus("loading");
-    void resolvePlayback(activeEpisode.url)
+    void resolvePlayback(
+      activeEpisode.url,
+      parseParseServices(normalizedConfig),
+    )
       .then((resolution) => {
         if (cancelled) return;
         setResolvedPlayback(resolution);
@@ -117,7 +126,7 @@ export function PlayerView({
     return () => {
       cancelled = true;
     };
-  }, [activeEpisode.url]);
+  }, [activeEpisode.url, normalizedConfig]);
 
   const selectEpisode = (line: VodPlayLine, episode: VodEpisode) => {
     setActiveLineId(line.id);
@@ -139,12 +148,37 @@ export function PlayerView({
 
   const handleExternalPlayer = async () => {
     try {
-      await openExternalUrl(activeEpisode.url);
+      await openExternalUrl(
+        activeEpisode.url,
+        parseParseServices(normalizedConfig),
+      );
       setDiagnostic("已按用户操作打开外部播放地址。");
     } catch (error) {
       setDiagnostic(
         error instanceof Error ? error.message : "无法打开外部播放地址",
       );
+    }
+  };
+
+  const handleLocalSniff = async () => {
+    if (isSniffing || !isTauriRuntime()) return;
+    setIsSniffing(true);
+    setDiagnostic(null);
+    setStatus("loading");
+    try {
+      const resolved = await sniffWithCompanion(
+        activeEpisode.url,
+        snifferCompanionUrl,
+      );
+      if (!resolved) throw new Error("桌面运行时未返回嗅探结果");
+      setResolvedPlayback(resolved);
+      setStatus("idle");
+      setDiagnostic("本地嗅探伴侣已返回通过安全检查的播放地址。");
+    } catch (error) {
+      setStatus("error");
+      setDiagnostic(error instanceof Error ? error.message : "本地嗅探失败");
+    } finally {
+      setIsSniffing(false);
     }
   };
 
@@ -165,6 +199,16 @@ export function PlayerView({
             返回详情
           </Button>
           <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-2"
+              disabled={!isTauriRuntime() || isSniffing}
+              onClick={() => void handleLocalSniff()}
+            >
+              <ScanSearch data-icon="inline-start" aria-hidden="true" />
+              {isSniffing ? "嗅探中..." : "本地嗅探"}
+            </Button>
             <Button
               type="button"
               variant="outline"

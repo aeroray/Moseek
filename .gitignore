@@ -11,6 +11,8 @@ test-results/
 .DS_Store
 *.tsbuildinfo
 src-tauri/target/
+src-tauri/**/target/
+src-tauri/binaries/
 src-tauri/gen/
 .env
 .env.*
