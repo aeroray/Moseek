@@ -40,6 +40,8 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
 import { MediaPlayer } from "@/features/player/media-player";
+import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
+import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
 const maxAutomaticStreamAttempts = 3;
 
@@ -71,6 +73,8 @@ export function LiveView() {
   const [query, setQuery] = useState("");
   const [selectedChannelId, setSelectedChannelId] = useState("");
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [mediaDiagnostic, setMediaDiagnostic] =
+    useState<MediaDiagnosticSnapshot | null>(null);
   const [resolvedStream, setResolvedStream] =
     useState<PlaybackResolution | null>(null);
   const [streamIndex, setStreamIndex] = useState(0);
@@ -91,6 +95,7 @@ export function LiveView() {
     setGroupId("");
     setSelectedChannelId("");
     setDiagnostic(null);
+    setMediaDiagnostic(null);
     setResolvedStream(null);
     setIsLoading(Boolean(liveSource));
     if (!liveSource) {
@@ -229,6 +234,7 @@ export function LiveView() {
   const selectChannel = (channel: LiveChannel) => {
     setSelectedChannelId(channel.id);
     setDiagnostic(null);
+    setMediaDiagnostic(null);
   };
 
   const stepChannel = (direction: -1 | 1) => {
@@ -511,16 +517,15 @@ export function LiveView() {
                       kind={
                         resolvedStream?.mediaKind ?? selectedChannel.mediaKind
                       }
-                      onStatus={(nextStatus, message) => {
+                      onStatus={(nextStatus) => {
                         if (nextStatus === "error" && tryNextStream()) {
                           return;
                         }
                         if (nextStatus === "playing") {
                           setDiagnostic(null);
-                        } else if (nextStatus === "error" && message) {
-                          setDiagnostic(message);
                         }
                       }}
+                      onDiagnostic={setMediaDiagnostic}
                     />
                     <div className="flex justify-end text-xs text-muted-foreground">
                       <div className="flex items-center gap-1">
@@ -555,16 +560,10 @@ export function LiveView() {
                         </Button>
                       </div>
                     </div>
-                    {diagnostic && (
-                      <Alert variant="destructive">
-                        <CircleAlert
-                          data-icon="inline-start"
-                          aria-hidden="true"
-                        />
-                        <AlertTitle>频道播放诊断</AlertTitle>
-                        <AlertDescription>{diagnostic}</AlertDescription>
-                      </Alert>
-                    )}
+                    <MediaDiagnosticPanel
+                      snapshot={mediaDiagnostic}
+                      note={diagnostic}
+                    />
                   </CardContent>
                 </Card>
 

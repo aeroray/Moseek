@@ -102,3 +102,20 @@ pub struct ConfigDocument {
     pub imported_at: String,
     pub source_base_url: Option<String>,
 }
+
+/// A previously stored document that the configuration about to be imported resembles.
+/// Detection is deliberately generous: the caller asks the user to choose between skipping
+/// and importing anyway, so a false positive costs one click, while a missed match makes the
+/// user save a configuration they already had.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDuplicateMatch {
+    pub document_id: i64,
+    pub document_name: String,
+    /// `identical` (same text), `derived` (one source set contains the other), or
+    /// `same-origin` (imported from the same address).
+    pub kind: String,
+    pub candidate_source_count: usize,
+    pub document_source_count: usize,
+    pub shared_source_count: usize,
+}

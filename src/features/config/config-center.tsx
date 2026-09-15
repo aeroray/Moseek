@@ -96,6 +96,11 @@ import {
   type ParseResult,
 } from "@/features/config/config-parser";
 import {
+  shouldResetDrafts,
+  type DraftSource,
+} from "@/features/config/config-drafts";
+import { describeDuplicateMatch } from "@/features/config/config-duplicate";
+import {
   adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
@@ -109,6 +114,7 @@ import {
   deleteConfigDocument,
   exportConfig,
   fetchConfigUrl,
+  findConfigDuplicate,
   isTauriRuntime,
   loadActiveConfig,
   listScriptArchives,
@@ -119,6 +125,7 @@ import {
   testSource,
   updateSourceTest,
   type ConfigDocumentSummary,
+  type ConfigDuplicateMatch,
   type StoredConfigDocument,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
@@ -174,6 +181,12 @@ export function ConfigCenter() {
   const [isApplyingBaseUrl, setIsApplyingBaseUrl] = useState(false);
   const [selectedFileName, setSelectedFileName] = useState("");
   const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [duplicateMatch, setDuplicateMatch] =
+    useState<ConfigDuplicateMatch | null>(null);
+  const draftSourceRef = useRef<DraftSource>({
+    documentId: null,
+    rawConfig: "",
+  });
   const [isFetchingRemote, setIsFetchingRemote] = useState(false);
   const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set());
   const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
@@ -265,7 +278,15 @@ export function ConfigCenter() {
     setSourceBaseUrlDraft(sourceBaseUrl ?? "");
   }, [activeDocument?.id, activeDocument?.sourceBaseUrl]);
 
+  // Reset the editors when the active document changes, or when its stored content changes
+  // (live-source recovery, base URL repair, source toggles). A base URL change on its own
+  // must not reset them: the remote import flow sets the base URL right before loading the
+  // fetched text into `importText`, and resetting there would replace that text with the
+  // document that is already open. See `shouldResetDrafts`.
   useEffect(() => {
+    const next = { documentId: activeConfigId, rawConfig, configBaseUrl };
+    if (!shouldResetDrafts(draftSourceRef.current, next)) return;
+    draftSourceRef.current = next;
     setRawDraft(rawConfig);
     setImportText(rawConfig);
     setParseResult(
@@ -673,6 +694,46 @@ export function ConfigCenter() {
     });
   };
 
+  const saveParseError = (error: unknown) => {
+    const message =
+      error instanceof Error ? error.message : "本地数据库写入失败";
+    setParseState({
+      type: "error",
+      message: `解析成功，但保存失败：${message}`,
+    });
+  };
+
+  const commitParsedConfig = async (result: ParseResult) => {
+    const parsedCounts = countParsedCapabilities(result.sources);
+    const name = configName.trim() || `配置 ${configDocuments.length + 1}`;
+    const savedDocument = await saveConfigDocument({
+      name,
+      rawConfig: importText,
+      normalizedConfig: result.normalizedConfig,
+      sources: result.sources,
+      liveCount: result.liveCount,
+      sourceBaseUrl: configBaseUrl ?? null,
+    });
+    const document: StoredConfigDocument = savedDocument ?? {
+      id: -Date.now(),
+      name,
+      rawConfig: importText,
+      normalizedConfig: result.normalizedConfig,
+      sources: result.sources,
+      sourceCount: result.sources.length,
+      liveCount: result.liveCount,
+      importedAt: new Date().toISOString(),
+      sourceBaseUrl: configBaseUrl ?? null,
+    };
+    setConfigDocument(document);
+    setParseState({
+      type: "success",
+      message: `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`,
+    });
+    setImportOpen(false);
+    setDuplicateMatch(null);
+  };
+
   const handleParse = async () => {
     setIsParsing(true);
     const result = parseConfigText(importText, configBaseUrl);
@@ -691,45 +752,48 @@ export function ConfigCenter() {
       return;
     }
 
-    const parsedCounts = countParsedCapabilities(result.sources);
-    const name = configName.trim() || `配置 ${configDocuments.length + 1}`;
-
     try {
-      const savedDocument = await saveConfigDocument({
-        name,
+      // Ask before creating a configuration the user probably already has. The check runs
+      // here rather than inside the save so the choice stays with the user.
+      const match = await findConfigDuplicate({
         rawConfig: importText,
-        normalizedConfig: result.normalizedConfig,
-        sources: result.sources,
-        liveCount: result.liveCount,
+        sourceKeys: result.sources.map((source) => source.key),
         sourceBaseUrl: configBaseUrl ?? null,
       });
-      const document: StoredConfigDocument = savedDocument ?? {
-        id: -Date.now(),
-        name,
-        rawConfig: importText,
-        normalizedConfig: result.normalizedConfig,
-        sources: result.sources,
-        sourceCount: result.sources.length,
-        liveCount: result.liveCount,
-        importedAt: new Date().toISOString(),
-        sourceBaseUrl: configBaseUrl ?? null,
-      };
-      setConfigDocument(document);
-      setParseState({
-        type: "success",
-        message: `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`,
-      });
-      setImportOpen(false);
+      if (match) {
+        setDuplicateMatch(match);
+        setParseState({ type: "idle", message: "" });
+        return;
+      }
+      await commitParsedConfig(result);
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "本地数据库写入失败";
-      setParseState({
-        type: "error",
-        message: `解析成功，但保存失败：${message}`,
-      });
+      saveParseError(error);
     } finally {
       setIsParsing(false);
     }
+  };
+
+  const handleConfirmDuplicateImport = async () => {
+    if (!parseResult?.ok) return;
+    setIsParsing(true);
+    try {
+      await commitParsedConfig(parseResult);
+    } catch (error) {
+      saveParseError(error);
+    } finally {
+      setIsParsing(false);
+    }
+  };
+
+  const handleSkipDuplicateImport = () => {
+    const name = duplicateMatch?.documentName ?? "已有配置";
+    setDuplicateMatch(null);
+    setImportOpen(false);
+    setParseState({
+      type: "success",
+      title: "已跳过导入",
+      message: `没有创建新配置：它与「${name}」重复，现有配置保持不变。`,
+    });
   };
 
   const handleExport = async () => {
@@ -1482,7 +1546,13 @@ export function ConfigCenter() {
         </Tabs>
       </div>
 
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+      <Dialog
+        open={importOpen}
+        onOpenChange={(open) => {
+          setImportOpen(open);
+          if (!open) setDuplicateMatch(null);
+        }}
+      >
         <DialogContent className="flex h-[min(46rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)] max-w-4xl flex-col overflow-hidden sm:max-w-4xl">
           <DialogHeader className="shrink-0">
             <DialogTitle>导入配置</DialogTitle>
@@ -1642,6 +1712,18 @@ export function ConfigCenter() {
                 aria-label="配置文本"
               />
             </div>
+            {duplicateMatch && (
+              <Alert>
+                <Info data-icon="inline-start" aria-hidden="true" />
+                <AlertTitle>检测到重复配置</AlertTitle>
+                <AlertDescription className="flex flex-col gap-1.5">
+                  <span>{describeDuplicateMatch(duplicateMatch)}</span>
+                  <span className="text-xs">
+                    跳过不会改动现有配置；继续导入会另外新建一份配置档。
+                  </span>
+                </AlertDescription>
+              </Alert>
+            )}
             {parseState.type !== "idle" && (
               <Alert
                 variant={
@@ -1663,22 +1745,46 @@ export function ConfigCenter() {
             )}
           </div>
           <DialogFooter className="shrink-0">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setImportOpen(false)}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              className="gap-2"
-              onClick={handleParse}
-              disabled={isParsing || !importText.trim()}
-            >
-              <FileJson data-icon="inline-start" aria-hidden="true" />
-              {isParsing ? "解析中..." : "解析配置"}
-            </Button>
+            {duplicateMatch ? (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleSkipDuplicateImport}
+                >
+                  <X data-icon="inline-start" aria-hidden="true" />
+                  跳过
+                </Button>
+                <Button
+                  type="button"
+                  className="gap-2"
+                  onClick={() => void handleConfirmDuplicateImport()}
+                  disabled={isParsing}
+                >
+                  <FileJson data-icon="inline-start" aria-hidden="true" />
+                  {isParsing ? "导入中..." : "继续导入"}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setImportOpen(false)}
+                >
+                  取消
+                </Button>
+                <Button
+                  type="button"
+                  className="gap-2"
+                  onClick={handleParse}
+                  disabled={isParsing || !importText.trim()}
+                >
+                  <FileJson data-icon="inline-start" aria-hidden="true" />
+                  {isParsing ? "解析中..." : "解析配置"}
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

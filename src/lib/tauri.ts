@@ -41,6 +41,21 @@ export interface SaveConfigDocumentInput {
   sourceBaseUrl?: string | null;
 }
 
+export interface ConfigDuplicateMatch {
+  documentId: number;
+  documentName: string;
+  kind: "identical" | "derived" | "same-origin";
+  candidateSourceCount: number;
+  documentSourceCount: number;
+  sharedSourceCount: number;
+}
+
+export interface FindConfigDuplicateInput {
+  rawConfig: string;
+  sourceKeys: string[];
+  sourceBaseUrl?: string | null;
+}
+
 export interface PlaybackResolution {
   url: string;
   mediaKind: "hls" | "mp4" | "unknown";
@@ -139,6 +154,17 @@ export async function deleteConfigDocument(documentId: number) {
 
 export async function saveConfigDocument(input: SaveConfigDocumentInput) {
   return invokeCommand<StoredConfigDocument>("save_config_document", { input });
+}
+
+/**
+ * Looks for an existing document that the configuration about to be imported resembles, so
+ * the import can offer the user a choice instead of silently creating a near-duplicate.
+ * Returns null when nothing similar is stored, and also in browser preview.
+ */
+export async function findConfigDuplicate(input: FindConfigDuplicateInput) {
+  return invokeCommand<ConfigDuplicateMatch | null>("find_config_duplicate", {
+    ...input,
+  });
 }
 
 export async function setSourceEnabled(

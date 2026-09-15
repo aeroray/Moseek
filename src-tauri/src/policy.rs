@@ -38,6 +38,31 @@ pub(crate) async fn fetch_text_with_headers(
     fetch_text_with_method(url, Method::GET, max_bytes, resource_name, headers, None).await
 }
 
+/// Text fetch that follows a bounded number of redirects, matching the media path.
+/// The live channel probe uses it because its job is to predict whether playback would
+/// succeed: refusing a redirect the player would happily follow would report a policy
+/// limit as a dead channel. `fetch_text` keeps redirects disabled on purpose, so this is
+/// deliberately a separate entry point rather than a change to that policy.
+pub(crate) async fn fetch_text_following_redirects(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+    max_redirects: usize,
+) -> Result<String, String> {
+    validate_remote_url(&url)?;
+    let (body, _, _) = fetch_response_bytes(
+        url,
+        Method::GET,
+        max_bytes,
+        resource_name,
+        &[],
+        None,
+        max_redirects,
+    )
+    .await?;
+    String::from_utf8(body).map_err(|_| format!("{resource_name}不是有效的 UTF-8 文本"))
+}
+
 pub(crate) async fn fetch_text_with_method(
     url: Url,
     method: Method,
@@ -126,10 +151,22 @@ async fn fetch_response_bytes(
         if let Some(body) = body.clone() {
             request = request.body(body);
         }
-        let response = request.send().await.map_err(|error| error.to_string())?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| describe_http_error(format!("{resource_name}请求失败"), &error))?;
         if response.status().is_redirection() {
+            // Text fetches pass `max_redirects = 0` on purpose, so "redirect limit
+            // exceeded" would be misleading: the hop was never followed. Say what
+            // actually happened instead.
+            if max_redirects == 0 {
+                return Err(format!(
+                    "{resource_name}返回了重定向（HTTP {}），当前策略不跟随重定向",
+                    response.status().as_u16()
+                ));
+            }
             if redirect_index == max_redirects {
-                return Err(format!("{resource_name}重定向次数超过限制"));
+                return Err(format!("{resource_name}重定向次数超过 {max_redirects} 次"));
             }
             let location = response
                 .headers()
@@ -144,7 +181,7 @@ async fn fetch_response_bytes(
         }
         let mut response = response
             .error_for_status()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| describe_http_error(format!("{resource_name}返回错误状态"), &error))?;
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -177,6 +214,21 @@ async fn fetch_response_bytes(
         return Ok((body, content_type, current_url));
     }
     Err(format!("{resource_name}请求未返回有效响应"))
+}
+
+/// Builds an operator-facing message from a reqwest error, walking the cause chain.
+/// reqwest's own `Display` only reports the outermost layer ("error sending request
+/// for url (...)"), which hides whether the peer closed the connection, the DNS
+/// lookup failed, or TLS was rejected. The frontend surfaces this text in the
+/// playback diagnostic panel, so the underlying cause has to survive.
+fn describe_http_error(message: String, error: &reqwest::Error) -> String {
+    let mut described = format!("{message}：{error}");
+    let mut cause = std::error::Error::source(error);
+    while let Some(source) = cause {
+        described.push_str(&format!("；{source}"));
+        cause = source.source();
+    }
+    described
 }
 
 fn build_http_client(url: &Url) -> Result<Client, String> {

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -7,7 +10,7 @@ use serde_json::Value;
 
 use crate::{
     cms::SourceTestResult,
-    policy::{fetch_text, validate_remote_url},
+    policy::{fetch_text, fetch_text_following_redirects, validate_remote_url},
     SourceOperationResult, SourceRecord,
 };
 
@@ -90,6 +93,35 @@ pub async fn load_live_source(source: SourceRecord) -> Result<LiveCatalog, Strin
     Ok(LiveCatalog { channels, groups })
 }
 
+const CHANNEL_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const CHANNEL_PROBE_MAX_BYTES: usize = 512 * 1024;
+
+/// Requests one channel's manifest so a source test can tell "the playlist parses" apart
+/// from "the playlist actually plays". Fetching the catalog only proves the list itself
+/// is reachable: in public IPTV lists individual channels are routinely dead,
+/// carrier-locked, or serving an HTML error page instead of HLS, and that is only
+/// visible by asking for one of them. The probe is bounded so a silent host cannot make
+/// the test hang, and it deliberately stays outside the catalog fetch so a failing
+/// sample never hides a successfully parsed list.
+async fn probe_channel_manifest(channel: &LiveChannel) -> Result<(), String> {
+    let url = reqwest::Url::parse(&channel.stream_url).map_err(|error| error.to_string())?;
+    let fetch = fetch_text_following_redirects(url, CHANNEL_PROBE_MAX_BYTES, "频道清单", 3);
+    let text = tokio::time::timeout(CHANNEL_PROBE_TIMEOUT, fetch)
+        .await
+        .map_err(|_| format!("请求超过 {} 秒未返回", CHANNEL_PROBE_TIMEOUT.as_secs()))??;
+    if !is_hls_manifest(&text) {
+        return Err("返回的内容不是 HLS 清单，该地址可能已失效或返回了错误页".to_string());
+    }
+    Ok(())
+}
+
+/// Some upstreams serve the manifest with a UTF-8 BOM, which `trim_start` alone does not
+/// remove because U+FEFF is a format character rather than whitespace.
+fn is_hls_manifest(text: &str) -> bool {
+    text.trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
+        .starts_with("#EXTM3U")
+}
+
 #[tauri::command]
 pub async fn test_live_source(source: SourceRecord) -> Result<SourceTestResult, String> {
     let source_key = source.key.clone();
@@ -135,33 +167,46 @@ pub async fn test_live_source(source: SourceRecord) -> Result<SourceTestResult, 
                 message: message.clone(),
                 duration_ms: started.elapsed().as_millis() as u64,
             }];
-            let playback_operation = catalog
-                .channels
-                .first()
-                .map(|channel| {
-                    let status = reqwest::Url::parse(&channel.stream_url)
-                        .ok()
-                        .filter(|url| validate_remote_url(url).is_ok())
-                        .map(|_| "passed")
-                        .unwrap_or("failed");
-                    SourceOperationResult {
-                        operation: "playback".to_string(),
-                        status: status.to_string(),
-                        message: if status == "passed" {
-                            "首个频道播放地址通过 HTTP/HTTPS 安全策略。".to_string()
-                        } else {
-                            "首个频道播放地址未通过安全策略。".to_string()
+            let playback_operation = match catalog.channels.first() {
+                Some(channel) => {
+                    let probe_started = Instant::now();
+                    let outcome = probe_channel_manifest(channel).await;
+                    let duration_ms = probe_started.elapsed().as_millis() as u64;
+                    match outcome {
+                        Ok(()) => SourceOperationResult {
+                            operation: "playback".to_string(),
+                            status: "passed".to_string(),
+                            message: format!(
+                                "首个频道「{}」返回了可用的 HLS 清单（仅抽样 1 个频道）。",
+                                channel.name
+                            ),
+                            duration_ms,
                         },
-                        duration_ms: 0,
+                        Err(error) => SourceOperationResult {
+                            operation: "playback".to_string(),
+                            status: "failed".to_string(),
+                            message: format!(
+                                "首个频道「{}」无法播放：{error}。频道目录可用，但列表中的地址可能已失效或只对特定网络开放。",
+                                channel.name
+                            ),
+                            duration_ms,
+                        },
                     }
-                })
-                .unwrap_or_else(|| SourceOperationResult {
+                }
+                None => SourceOperationResult {
                     operation: "playback".to_string(),
                     status: "empty".to_string(),
                     message: "没有可用于播放探测的频道。".to_string(),
                     duration_ms: 0,
-                });
+                },
+            };
+            let playback_failed = playback_operation.status == "failed";
             operations.push(playback_operation);
+            let message = if playback_failed {
+                format!("{message} 首个频道当前无法播放，实际可用频道数可能少于目录数量。")
+            } else {
+                message
+            };
             let epg_operation = if let Some(epg_url) = source.epg.clone() {
                 let epg_started = Instant::now();
                 match get_epg(epg_url, "auto".to_string()).await {
@@ -641,18 +686,49 @@ fn normalize_time(value: &str) -> String {
 }
 
 fn slug(value: &str) -> String {
-    value
+    let trimmed = value.trim();
+    let ascii = trimmed
         .chars()
         .filter(|character| character.is_ascii_alphanumeric())
         .collect::<String>()
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    if trimmed.is_ascii() {
+        return ascii;
+    }
+    // Non-ASCII group names (CJK channel groups, for example) lose every character
+    // above, which used to collapse unrelated groups into one empty id. Keep the
+    // readable ASCII prefix and append a stable hash so distinct groups stay distinct.
+    if ascii.is_empty() {
+        format!("g{:016x}", fnv1a(trimmed))
+    } else {
+        format!("{ascii}-{:016x}", fnv1a(trimmed))
+    }
+}
+
+fn fnv1a(value: &str) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        deduplicate_channels, make_channel, parse_epg_json, parse_m3u, parse_txt, parse_xmltv,
+        collect_groups, deduplicate_channels, is_hls_manifest, make_channel, parse_epg_json,
+        parse_m3u, parse_txt, parse_xmltv,
     };
+
+    #[test]
+    fn only_accepts_hls_manifests_for_the_channel_probe() {
+        assert!(is_hls_manifest("#EXTM3U\n#EXT-X-TARGETDURATION:6\n"));
+        assert!(is_hls_manifest("\u{feff}\n  #EXTM3U\n"));
+        assert!(!is_hls_manifest("<html><body>403 Forbidden</body></html>"));
+        assert!(!is_hls_manifest("{\"error\":\"expired\"}"));
+        assert!(!is_hls_manifest(""));
+    }
 
     #[test]
     fn parses_m3u_groups_logos_and_epg_ids() {
@@ -744,6 +820,23 @@ mod tests {
         assert_eq!(known.group_name, "General");
         assert_eq!(unknown.name, "BBC World");
         assert_eq!(unknown.group_name, "Custom Group");
+    }
+
+    #[test]
+    fn keeps_non_ascii_group_names_in_distinct_groups() {
+        let catalog = parse_m3u(
+            "#EXTM3U\n#EXTINF:-1 group-title=\"央视高清\",CCTV1\nhttp://[2409:8087::2]/live/cctv1.m3u8\n#EXTINF:-1 group-title=\"卫视高清\",CCTV2\nhttp://[2409:8087::2]/live/cctv2.m3u8\n",
+            "ipv6",
+        );
+
+        assert_eq!(catalog.len(), 2);
+        assert!(catalog.iter().all(|channel| !channel.group_id.is_empty()));
+        assert_ne!(catalog[0].group_id, catalog[1].group_id);
+
+        let groups = collect_groups(&catalog);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "央视高清");
+        assert_eq!(groups[1].name, "卫视高清");
     }
 
     #[test]

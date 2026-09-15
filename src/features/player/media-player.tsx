@@ -1,27 +1,37 @@
 import { useEffect, useRef, useState } from "react";
 import Hls, {
   LoadStats,
+  type ErrorData,
   type HlsConfig,
   type Loader,
   type LoaderCallbacks,
   type LoaderConfiguration,
   type LoaderContext,
 } from "hls.js";
+import { CircleAlert, RotateCw } from "lucide-react";
 import Plyr from "plyr";
 import "plyr/dist/plyr.css";
 
+import { Button } from "@/components/ui/button";
 import { fetchMediaResource, isTauriRuntime } from "@/lib/tauri";
 import { getByteRangeHeader } from "@/features/player/media-range";
+import {
+  createDiagnosticRecorder,
+  describeHlsError,
+  describeMediaElement,
+  describePipeline,
+  extractUpstreamStatus,
+  formatHlsError,
+  mediaStatusLabels,
+  probeMediaEnvironment,
+  type MediaDiagnosticSnapshot,
+  type MediaEnvironmentReport,
+  type MediaPipelineSnapshot,
+  type MediaStatus,
+} from "@/features/player/media-diagnostics";
 import type { MediaKind } from "@/types/moseek";
 
-export type MediaStatus =
-  | "idle"
-  | "loading"
-  | "ready"
-  | "playing"
-  | "paused"
-  | "ended"
-  | "error";
+export type { MediaStatus };
 
 interface MediaPlayerProps {
   title: string;
@@ -33,6 +43,18 @@ interface MediaPlayerProps {
   resumeAt?: number;
   onProgress?: (seconds: number) => void;
   onStatus?: (status: MediaStatus, message?: string) => void;
+  onDiagnostic?: (snapshot: MediaDiagnosticSnapshot) => void;
+}
+
+let cachedTransmuxWorkerSupport: boolean | null = null;
+
+function shouldStartWithTransmuxWorker() {
+  return cachedTransmuxWorkerSupport !== false;
+}
+
+function truncateForDiagnostics(value: string | undefined, limit = 96) {
+  if (!value) return "未知";
+  return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
 interface MediaSourceState {
@@ -137,7 +159,7 @@ class TauriMediaLoader implements Loader<LoaderContext> {
           callbacks.onTimeout(this.stats, context, null);
         } else {
           callbacks.onError(
-            { code: 0, text: message },
+            { code: extractUpstreamStatus(message), text: message },
             context,
             null,
             this.stats,
@@ -227,12 +249,16 @@ export function MediaPlayer({
   resumeAt = 0,
   onProgress,
   onStatus,
+  onDiagnostic,
 }: MediaPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<Plyr | null>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const callbackRef = useRef({ onProgress, onStatus });
+  const callbackRef = useRef({ onProgress, onStatus, onDiagnostic });
   const resumeRef = useRef(resumeAt);
+  const recorderRef = useRef(createDiagnosticRecorder());
+  const environmentRef = useRef<MediaEnvironmentReport | null>(null);
+  const retryRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<MediaSourceState>({
     url,
     kind,
@@ -244,11 +270,12 @@ export function MediaPlayer({
     null,
   );
   const [isBuffering, setIsBuffering] = useState(isLive);
+  const [hasFailed, setHasFailed] = useState(false);
 
   useEffect(() => {
-    callbackRef.current = { onProgress, onStatus };
+    callbackRef.current = { onProgress, onStatus, onDiagnostic };
     resumeRef.current = resumeAt;
-  }, [onProgress, onStatus, resumeAt]);
+  }, [onDiagnostic, onProgress, onStatus, resumeAt]);
 
   useEffect(() => {
     const source = { url, kind, isLive, headers, poster };
@@ -261,12 +288,15 @@ export function MediaPlayer({
     if (!video) return;
     const initialSource = sourceRef.current;
     const liveMode = initialSource.isLive;
+    const recorder = recorderRef.current;
 
     let lastProgress = -1;
     let disposed = false;
     let liveRecoveryTimer: ReturnType<typeof setTimeout> | null = null;
     let startupWatchdog: ReturnType<typeof setTimeout> | null = null;
     let playbackRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    let diagnosticTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastDiagnosticFlush = 0;
     let livePlayer: Plyr | null = null;
     let hasBufferedFragment = false;
     let playerReady = false;
@@ -274,10 +304,93 @@ export function MediaPlayer({
     let playbackAttemptInFlight = false;
     let playbackAttempts = 0;
     let sourceVersion = 0;
-    const report = (status: MediaStatus, message?: string) => {
-      if (liveMode && status === "error") setIsBuffering(false);
-      callbackRef.current.onStatus?.(status, message);
+    let pipelineMode: MediaPipelineSnapshot["mode"] = "native";
+    let attachedMediaSource: MediaSource | null = null;
+    let status: MediaStatus = "idle";
+    let lastMessage: string | null = null;
+
+    const buildSnapshot = (): MediaDiagnosticSnapshot => ({
+      status,
+      message: lastMessage,
+      source: {
+        url: sourceRef.current.url,
+        kind: sourceRef.current.kind,
+        isLive: sourceRef.current.isLive,
+        headers: sourceRef.current.headers ?? {},
+      },
+      environment: environmentRef.current,
+      media: describeMediaElement(video),
+      pipeline: describePipeline(
+        hlsRef.current,
+        pipelineMode,
+        video,
+        attachedMediaSource,
+      ),
+      events: recorder.list(),
+    });
+    const flushDiagnostics = () => {
+      diagnosticTimer = null;
+      lastDiagnosticFlush = Date.now();
+      callbackRef.current.onDiagnostic?.(buildSnapshot());
     };
+    const scheduleDiagnosticFlush = (immediate = false) => {
+      if (!callbackRef.current.onDiagnostic) return;
+      if (immediate) {
+        if (diagnosticTimer !== null) {
+          clearTimeout(diagnosticTimer);
+          diagnosticTimer = null;
+        }
+        flushDiagnostics();
+        return;
+      }
+      if (diagnosticTimer !== null) return;
+      const wait = Math.max(0, 300 - (Date.now() - lastDiagnosticFlush));
+      diagnosticTimer = setTimeout(flushDiagnostics, wait);
+    };
+    const report = (nextStatus: MediaStatus, message?: string) => {
+      status = nextStatus;
+      lastMessage = message ?? null;
+      if (liveMode && nextStatus === "error") setIsBuffering(false);
+      if (nextStatus === "error") setHasFailed(true);
+      if (nextStatus === "playing") setHasFailed(false);
+      recorder.push(`播放状态：${mediaStatusLabels[nextStatus]}`, message);
+      callbackRef.current.onStatus?.(nextStatus, message);
+      scheduleDiagnosticFlush(nextStatus === "error");
+    };
+
+    // Plyr wraps the <video> element in its own DOM and hls.js attaches a MediaSource
+    // to it. Neither can be constructed twice on the same element, but React StrictMode
+    // mounts, unmounts and remounts effects in development, which would build both
+    // libraries twice and leave the player DOM torn down: a black player surface with
+    // no media events and playback that never starts. Deferring the construction by one
+    // macrotask lets the StrictMode unmount cancel it, so it happens exactly once.
+    let bootTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleBoot = (task: () => void) => {
+      if (bootTimer !== null) clearTimeout(bootTimer);
+      bootTimer = setTimeout(() => {
+        bootTimer = null;
+        if (disposed) return;
+        recorder.push(
+          "开始装载媒体",
+          `${initialSource.kind} · ${initialSource.url}`,
+        );
+        void probeMediaEnvironment().then((environment) => {
+          if (disposed) return;
+          environmentRef.current = environment;
+          cachedTransmuxWorkerSupport = environment.transmuxWorkerSupported;
+          recorder.push(
+            "运行环境探测",
+            `MediaSource=${environment.mediaSourceSupported} hls.js=${environment.hlsJsSupported} 转封装线程=${environment.transmuxWorkerSupported}`,
+          );
+          if (!environment.transmuxWorkerSupported) {
+            recorder.push("环境提示", environment.transmuxWorkerNote);
+          }
+          scheduleDiagnosticFlush(true);
+        });
+        task();
+      }, 0);
+    };
+
     const requestLivePlayback = async () => {
       if (
         !liveMode ||
@@ -299,10 +412,19 @@ export function MediaPlayer({
         playbackRequested = false;
         playbackAttempts = 0;
         setIsBuffering(false);
+        recorder.push(
+          "播放请求已接受",
+          `readyState=${video.readyState} buffered=${describeMediaElement(video).buffered}`,
+        );
+        scheduleDiagnosticFlush(true);
         return;
       }
       playbackRequested = true;
       playbackAttempts += 1;
+      recorder.push(
+        "播放请求被拒绝",
+        `第 ${playbackAttempts} 次 · readyState=${video.readyState} networkState=${video.networkState}`,
+      );
       if (playbackAttempts >= 5) {
         report("error", "直播播放器未能启动，请点击播放按钮或切换频道重试。");
         return;
@@ -377,6 +499,7 @@ export function MediaPlayer({
         startBufferedLivePlayback();
       });
       player.on("play", () => {
+        recorder.push("媒体元素开始播放请求");
         if (liveMode) {
           playbackRequested = true;
           setIsBuffering(true);
@@ -389,9 +512,13 @@ export function MediaPlayer({
         report("playing");
       });
       player.on("waiting", () => {
+        recorder.push("缓冲等待");
+        scheduleDiagnosticFlush();
         if (liveMode) setIsBuffering(true);
       });
       player.on("stalled", () => {
+        recorder.push("数据停滞", `networkState=${video.networkState}`);
+        scheduleDiagnosticFlush();
         if (liveMode) setIsBuffering(true);
       });
       player.on("pause", () => {
@@ -400,7 +527,15 @@ export function MediaPlayer({
       player.on("ended", () => {
         if (!liveMode) report("ended");
       });
-      player.on("error", () => report("error", "Plyr 无法播放当前媒体地址。"));
+      player.on("error", () => {
+        const mediaError = video.error;
+        report(
+          "error",
+          mediaError
+            ? `媒体元素解码失败（code ${mediaError.code}：${mediaError.message || "无详细信息"}）。`
+            : "Plyr 无法播放当前媒体地址。",
+        );
+      });
       player.on("timeupdate", () => {
         const currentTime = player.currentTime;
         if (Number.isFinite(currentTime) && currentTime - lastProgress >= 5) {
@@ -420,32 +555,11 @@ export function MediaPlayer({
     video.preload = "auto";
     const isHls = isHlsSource(initialSource);
     if (isHls && Hls.isSupported()) {
-      const hlsConfig: Partial<HlsConfig> = {
-        enableWorker: true,
-        lowLatencyMode: liveMode,
-        startPosition: liveMode ? -1 : 0,
-        liveDurationInfinity: liveMode,
-        liveSyncMode: "edge",
-        liveSyncDurationCount: 2,
-        liveMaxLatencyDurationCount: 4,
-        maxBufferLength: liveMode ? 10 : 30,
-        backBufferLength: liveMode ? 20 : Infinity,
-        startFragPrefetch: liveMode,
-      };
-      if (isTauriRuntime()) {
-        hlsConfig.loader = createTauriMediaLoader(sourceRef);
-      } else {
-        hlsConfig.xhrSetup = (xhr) => {
-          Object.entries(sourceRef.current.headers ?? {}).forEach(
-            ([name, value]) => {
-              xhr.setRequestHeader(name, value);
-            },
-          );
-        };
-      }
-      const hls = new Hls(hlsConfig);
-      hlsRef.current = hls;
+      let hls: Hls | null = null;
       let liveRecoveryAttempts = 0;
+      let workerFallbackUsed = false;
+      let playerCreated = false;
+
       const markMediaBuffered = () => {
         liveRecoveryAttempts = 0;
         hasBufferedFragment = true;
@@ -455,27 +569,33 @@ export function MediaPlayer({
         }
         startBufferedLivePlayback();
       };
-      hls.on(Hls.Events.FRAG_BUFFERED, markMediaBuffered);
-      hls.on(Hls.Events.BUFFER_APPENDED, markMediaBuffered);
       const armStartupWatchdog = () => {
         if (!liveMode || disposed || hasBufferedFragment) return;
         if (startupWatchdog !== null) clearTimeout(startupWatchdog);
         startupWatchdog = setTimeout(() => {
           startupWatchdog = null;
-          if (!hasBufferedFragment && !recoverLiveWindow()) {
-            report(
-              "error",
-              "直播流长时间没有收到可播放分片，请切换频道或稍后重试。",
+          if (!hasBufferedFragment) {
+            recorder.push(
+              "启动看门狗触发",
+              "10 秒内没有收到可播放分片",
             );
+            if (!recoverLiveWindow()) {
+              report(
+                "error",
+                "直播流长时间没有收到可播放分片，请切换频道或稍后重试。",
+              );
+            }
           }
         }, 10_000);
       };
       function recoverLiveWindow() {
+        const instance = hls;
         if (
           !liveMode ||
           liveRecoveryAttempts >= 2 ||
           disposed ||
-          liveRecoveryTimer !== null
+          liveRecoveryTimer !== null ||
+          !instance
         ) {
           return false;
         }
@@ -483,43 +603,189 @@ export function MediaPlayer({
         playbackRequested = true;
         playbackAttempts = 0;
         hasBufferedFragment = false;
-        hls.stopLoad();
+        instance.stopLoad();
+        recorder.push("尝试刷新直播窗口", `第 ${liveRecoveryAttempts} 次`);
+        scheduleDiagnosticFlush(true);
         liveRecoveryTimer = setTimeout(() => {
           liveRecoveryTimer = null;
           if (disposed) return;
-          hls.loadSource(sourceRef.current.url);
-          hls.startLoad(-1);
+          instance.loadSource(sourceRef.current.url);
+          instance.startLoad(-1);
           armStartupWatchdog();
         }, 600);
         return true;
       }
-      armStartupWatchdog();
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        if (data.fatal) {
+      const handleHlsError = (_event: unknown, data: ErrorData) => {
+        recorder.push(
+          data.fatal ? "HLS 致命错误" : "HLS 非致命错误",
+          describeHlsError(data),
+        );
+        if (!data.fatal) {
+          // hls.js only clears its own `enableWorker` flag when the injected
+          // transmuxer worker fails asynchronously (a CSP without `worker-src blob:`
+          // does exactly that). It never re-queues the pending fragment, so the
+          // pipeline goes quiet until the startup watchdog gives up.
           if (
-            [
-              "fragLoadError",
-              "fragLoadTimeOut",
-              "fragParsingError",
-              "bufferAppendError",
-            ].includes(data.details) &&
-            recoverLiveWindow()
+            data.details === "internalException" &&
+            data.event === "demuxerWorker"
           ) {
-            return;
+            if (!workerFallbackUsed && !disposed) {
+              workerFallbackUsed = true;
+              recorder.push(
+                "转封装线程不可用",
+                "改用主线程转封装并重新装载当前地址",
+              );
+              restartPipeline(false);
+              return;
+            }
+            report("error", "当前运行环境无法启动 HLS 转封装线程，直播流无法解码。");
           }
-          report("error", formatHlsError(data.details, data.response?.code));
+          scheduleDiagnosticFlush();
+          return;
         }
-      });
-      createPlayer();
-      hls.loadSource(initialSource.url);
-      hls.attachMedia(video);
-      loadSourceRef.current = (source) => {
-        if (!isHlsSource(source)) return;
+        if (
+          [
+            "fragLoadError",
+            "fragLoadTimeOut",
+            "fragParsingError",
+            "bufferAppendError",
+          ].includes(data.details) &&
+          recoverLiveWindow()
+        ) {
+          return;
+        }
+        report(
+          "error",
+          formatHlsError(data.details, data.response?.code, data.response?.text),
+        );
+      };
+      const createHlsInstanceNow = (enableWorker: boolean) => {
+        const hlsConfig: Partial<HlsConfig> = {
+          enableWorker,
+          lowLatencyMode: liveMode,
+          startPosition: liveMode ? -1 : 0,
+          liveDurationInfinity: liveMode,
+          liveSyncMode: "edge",
+          liveSyncDurationCount: 2,
+          liveMaxLatencyDurationCount: 4,
+          maxBufferLength: liveMode ? 10 : 30,
+          backBufferLength: liveMode ? 20 : Infinity,
+          startFragPrefetch: liveMode,
+        };
+        if (isTauriRuntime()) {
+          hlsConfig.loader = createTauriMediaLoader(sourceRef);
+        } else {
+          hlsConfig.xhrSetup = (xhr) => {
+            Object.entries(sourceRef.current.headers ?? {}).forEach(
+              ([name, value]) => {
+                xhr.setRequestHeader(name, value);
+              },
+            );
+          };
+        }
+        const instance = new Hls(hlsConfig);
+        hls = instance;
+        hlsRef.current = instance;
+        pipelineMode = enableWorker ? "hls-worker" : "hls-inline";
+        recorder.push(
+          "创建 hls.js 实例",
+          `enableWorker=${enableWorker}`,
+        );
+        instance.on(Hls.Events.MANIFEST_LOADING, () => {
+          recorder.push("请求媒体清单", truncateForDiagnostics(sourceRef.current.url));
+        });
+        instance.on(Hls.Events.MANIFEST_LOADED, (_event, data) => {
+          recorder.push(
+            "清单已返回",
+            `码率档位 ${data.levels?.length ?? 0} · 音频轨 ${data.audioTracks?.length ?? 0}`,
+          );
+        });
+        instance.on(Hls.Events.MANIFEST_PARSED, (_event, data) => {
+          recorder.push(
+            "清单已解析",
+            `码率档位 ${data.levels?.length ?? 0}`,
+          );
+        });
+        instance.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
+          recorder.push(
+            "码率清单已加载",
+            `起始序号 ${data.details?.startSN ?? "未知"} · 分片 ${data.details?.fragments?.length ?? 0} · live=${Boolean(data.details?.live)}`,
+          );
+        });
+        instance.on(Hls.Events.FRAG_LOADING, (_event, data) => {
+          recorder.push("请求分片", `序号 ${data.frag?.sn ?? "未知"}`);
+        });
+        instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
+          recorder.push(
+            "分片已返回",
+            `序号 ${data.frag?.sn ?? "未知"} · ${data.payload?.byteLength ?? 0} 字节`,
+          );
+        });
+        instance.on(Hls.Events.MEDIA_ATTACHED, (_event, data) => {
+          attachedMediaSource = data.mediaSource ?? null;
+          recorder.push(
+            "媒体元素已挂载 MediaSource",
+            `readyState=${attachedMediaSource?.readyState ?? "未创建"}`,
+          );
+        });
+        instance.on(Hls.Events.FRAG_BUFFERED, markMediaBuffered);
+        instance.on(Hls.Events.BUFFER_APPENDED, markMediaBuffered);
+        instance.on(Hls.Events.ERROR, handleHlsError);
+        if (!playerCreated) {
+          createPlayer();
+          playerCreated = true;
+        }
+        instance.loadSource(sourceRef.current.url);
+        instance.attachMedia(video);
+        return instance;
+      };
+      const restartPipeline = (enableWorker: boolean) => {
+        const previous = hls;
         if (liveRecoveryTimer !== null) {
           clearTimeout(liveRecoveryTimer);
           liveRecoveryTimer = null;
         }
-        if (startupWatchdog !== null) clearTimeout(startupWatchdog);
+        if (startupWatchdog !== null) {
+          clearTimeout(startupWatchdog);
+          startupWatchdog = null;
+        }
+        hasBufferedFragment = false;
+        liveRecoveryAttempts = 0;
+        playbackAttempts = 0;
+        playbackAttemptInFlight = false;
+        playbackRequested = liveMode;
+        sourceVersion += 1;
+        attachedMediaSource = null;
+        setIsBuffering(liveMode);
+        previous?.destroy();
+        if (disposed) return;
+        createHlsInstanceNow(enableWorker);
+        armStartupWatchdog();
+      };
+      const retryCurrentSource = () => {
+        setHasFailed(false);
+        status = "loading";
+        lastMessage = null;
+        recorder.push("用户重试", "重新装载当前地址");
+        restartPipeline(workerFallbackUsed ? false : shouldStartWithTransmuxWorker());
+      };
+
+      const startWithTransmuxWorker = shouldStartWithTransmuxWorker();
+      pipelineMode = startWithTransmuxWorker ? "hls-worker" : "hls-inline";
+      armStartupWatchdog();
+      scheduleBoot(() => createHlsInstanceNow(startWithTransmuxWorker));
+      retryRef.current = retryCurrentSource;
+      loadSourceRef.current = (source) => {
+        const instance = hls;
+        if (!instance || !isHlsSource(source)) return;
+        if (liveRecoveryTimer !== null) {
+          clearTimeout(liveRecoveryTimer);
+          liveRecoveryTimer = null;
+        }
+        if (startupWatchdog !== null) {
+          clearTimeout(startupWatchdog);
+          startupWatchdog = null;
+        }
         liveRecoveryAttempts = 0;
         sourceVersion += 1;
         playbackAttempts = 0;
@@ -527,9 +793,12 @@ export function MediaPlayer({
         hasBufferedFragment = false;
         playbackRequested = source.isLive;
         setIsBuffering(source.isLive);
+        setHasFailed(false);
         video.poster = source.poster ?? "";
-        hls.loadSource(source.url);
-        hls.startLoad(-1);
+        recorder.push("切换播放地址", truncateForDiagnostics(source.url));
+        instance.loadSource(source.url);
+        instance.startLoad(-1);
+        scheduleDiagnosticFlush(true);
       };
     } else if (isHls && !video.canPlayType("application/vnd.apple.mpegurl")) {
       report(
@@ -537,28 +806,48 @@ export function MediaPlayer({
         "当前运行环境不支持 HLS 播放，且无法使用 hls.js 接管该频道。",
       );
     } else {
-      createPlayer();
+      pipelineMode = "native";
       loadSourceRef.current = (source) => {
         if (isHlsSource(source)) return;
         setIsBuffering(false);
+        setHasFailed(false);
         video.poster = source.poster ?? "";
+        recorder.push("原生装载地址", truncateForDiagnostics(source.url));
         video.src = source.url;
         video.load();
       };
-      loadSourceRef.current(initialSource);
+      retryRef.current = () => {
+        setHasFailed(false);
+        recorder.push("用户重试", "重新装载当前地址");
+        video.poster = sourceRef.current.poster ?? "";
+        video.src = sourceRef.current.url;
+        video.load();
+      };
+      scheduleBoot(() => {
+        createPlayer();
+        loadSourceRef.current?.(initialSource);
+      });
     }
+
+    scheduleDiagnosticFlush(true);
 
     return () => {
       disposed = true;
+      if (bootTimer !== null) {
+        clearTimeout(bootTimer);
+        bootTimer = null;
+      }
       if (liveRecoveryTimer !== null) clearTimeout(liveRecoveryTimer);
       if (startupWatchdog !== null) clearTimeout(startupWatchdog);
       if (playbackRetryTimer !== null) clearTimeout(playbackRetryTimer);
+      if (diagnosticTimer !== null) clearTimeout(diagnosticTimer);
       hlsRef.current?.destroy();
       hlsRef.current = null;
       playerRef.current?.destroy();
       playerRef.current = null;
       livePlayer = null;
       loadSourceRef.current = null;
+      retryRef.current = null;
       video.removeAttribute("src");
       video.load();
     };
@@ -570,7 +859,7 @@ export function MediaPlayer({
       style={{ "--plyr-color-main": "var(--primary)" } as React.CSSProperties}
     >
       <video ref={videoRef} className="aspect-video w-full" playsInline />
-      {isLive && isBuffering && (
+      {isLive && isBuffering && !hasFailed && (
         <div
           className="pointer-events-none absolute inset-0 flex items-center justify-center"
           aria-label="直播缓冲中"
@@ -578,35 +867,33 @@ export function MediaPlayer({
           <span className="size-8 animate-spin rounded-full border-2 border-white/30 border-t-white" />
         </div>
       )}
+      {hasFailed && (
+        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/85 px-8 text-center">
+          <CircleAlert
+            className="size-7 text-white/70"
+            aria-hidden="true"
+          />
+          <p className="text-sm font-medium text-white">无法播放当前内容</p>
+          <p className="max-w-md text-xs leading-5 text-white/70">
+            {isLive
+              ? "已尝试可用的线路，但仍未能取得可播放的画面。"
+              : "播放器未能取得可播放的画面。"}
+            常见原因是上游地址已失效、本机网络无法访问该地址，或当前播放环境不支持该媒体格式。
+            具体环节见下方「播放诊断」。
+          </p>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => retryRef.current?.()}
+          >
+            <RotateCw data-icon="inline-start" aria-hidden="true" />
+            重试
+          </Button>
+        </div>
+      )}
     </div>
   );
-}
-
-function formatHlsError(details?: string, statusCode?: number) {
-  const status = statusCode ? `（HTTP ${statusCode}）` : "";
-  switch (details) {
-    case "manifestLoadError":
-      if (statusCode === 415) {
-        return "当前频道返回了 HTTP 200，但正文不是有效的 HLS 清单，已跳过该线路。";
-      }
-      return `当前频道的 HLS 清单请求失败${status}。频道目录可用，但上游播放地址可能已失效、拒绝访问或不允许跨域。`;
-    case "manifestLoadTimeOut":
-      return "当前频道的 HLS 清单请求超时。请稍后重试或切换其他频道。";
-    case "fragLoadError":
-      return `当前频道的 HLS 媒体分片请求失败${status}。清单已找到，但上游没有持续提供媒体数据。`;
-    case "fragLoadTimeOut":
-      return "当前频道的 HLS 媒体分片请求超时，直播窗口可能已经推进。";
-    case "manifestParsingError":
-      return `当前频道返回了无法解析的 HLS 清单${status}。上游可能返回了 HTML、JSON 错误页或其他非 M3U8 内容。`;
-    case "fragParsingError":
-      return "当前频道的 HLS 媒体分片已返回，但编码无法解析；可能是过期分片或上游编码不兼容。";
-    case "bufferAppendError":
-      return "当前频道的媒体分片无法加入播放缓冲区，正在等待新的直播窗口。";
-    case "levelLoadError":
-      return `当前频道的 HLS 码率清单请求失败${status}。上游播放地址可能已失效或拒绝访问。`;
-    default:
-      return `HLS 播放失败${status}：${details || "媒体流错误"}`;
-  }
 }
 
 async function startLivePlayback(

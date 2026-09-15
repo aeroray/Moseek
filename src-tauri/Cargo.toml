@@ -13,6 +13,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Incremental compilation is disabled on purpose. On Windows, real-time antivirus
+# scanning (observed with Huorong HIPS) intermittently denies writes inside
+# `target/debug/incremental`, and rustc 1.98 panics instead of degrading when it
+# cannot write incremental metadata. A full crate rebuild costs seconds here, while
+# the incremental cache also grew past 7 GB before it was cleared.
+[profile.dev]
+incremental = false
+
 [dependencies]
 base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

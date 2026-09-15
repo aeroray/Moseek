@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::policy::validate_remote_url;
-use crate::{cms, ConfigDocument, SourceRecord};
+use crate::{cms, ConfigDocument, ConfigDuplicateMatch, SourceRecord};
 
 pub(super) fn serialize_sources(sources: &[SourceRecord]) -> Result<String, String> {
     serde_json::to_string(sources).map_err(|error| format!("配置源快照序列化失败：{error}"))
@@ -679,6 +679,104 @@ pub(crate) fn clear_script_archive_bindings(
     transaction.commit().map_err(|error| error.to_string())
 }
 
+/// Finds a stored document that the configuration about to be imported resembles, so the
+/// caller can let the user decide between skipping the import and importing anyway.
+///
+/// Text equality alone is not enough. The interesting case is a configuration that was
+/// imported once and then trimmed by hand: re-importing the untouched original produces
+/// different text, so it looks brand new even though the user already has it. Comparing the
+/// source key sets catches that, because a trimmed document's keys are a subset of the
+/// original's. Matching is intentionally generous — the user is asked, not blocked — so a
+/// false positive costs one click while a missed match silently duplicates a configuration.
+pub(crate) fn find_config_duplicate(
+    connection: &Connection,
+    raw_config: &str,
+    source_keys: &[String],
+    source_base_url: Option<&str>,
+) -> Result<Option<ConfigDuplicateMatch>, String> {
+    let rows = connection
+        .prepare(
+            "SELECT id, name, raw_config, sources_json, source_base_url FROM config_documents ORDER BY id",
+        )
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let candidate_keys = source_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let mut best_derived: Option<ConfigDuplicateMatch> = None;
+    let mut same_origin: Option<ConfigDuplicateMatch> = None;
+
+    for (document_id, document_name, stored_raw, stored_sources, stored_base) in rows {
+        let document_keys = deserialize_sources(stored_sources)?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|source| source.key)
+            .collect::<HashSet<_>>();
+        let shared_source_count = candidate_keys
+            .iter()
+            .filter(|key| document_keys.contains(**key))
+            .count();
+
+        if stored_raw == raw_config {
+            return Ok(Some(ConfigDuplicateMatch {
+                document_id,
+                document_name,
+                kind: "identical".to_string(),
+                candidate_source_count: candidate_keys.len(),
+                document_source_count: document_keys.len(),
+                shared_source_count,
+            }));
+        }
+
+        let one_contains_the_other = shared_source_count > 0
+            && (shared_source_count == candidate_keys.len()
+                || shared_source_count == document_keys.len());
+        let beats_previous = match &best_derived {
+            Some(best) => shared_source_count > best.shared_source_count,
+            None => true,
+        };
+        if one_contains_the_other && beats_previous {
+            best_derived = Some(ConfigDuplicateMatch {
+                document_id,
+                document_name: document_name.clone(),
+                kind: "derived".to_string(),
+                candidate_source_count: candidate_keys.len(),
+                document_source_count: document_keys.len(),
+                shared_source_count,
+            });
+        }
+
+        if same_origin.is_none()
+            && source_base_url.is_some()
+            && source_base_url == stored_base.as_deref()
+        {
+            same_origin = Some(ConfigDuplicateMatch {
+                document_id,
+                document_name,
+                kind: "same-origin".to_string(),
+                candidate_source_count: candidate_keys.len(),
+                document_source_count: document_keys.len(),
+                shared_source_count,
+            });
+        }
+    }
+
+    Ok(best_derived.or(same_origin))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -942,5 +1040,161 @@ mod tests {
             serde_json::from_str::<Value>(&updated.normalized_config).unwrap()["lives"][0]["api"],
             "https://example.com/config/libs/tv/tvlive.txt"
         );
+    }
+
+    fn insert_document_with_sources(
+        connection: &Connection,
+        name: &str,
+        raw_config: &str,
+        keys: &[&str],
+        source_base_url: Option<&str>,
+    ) -> i64 {
+        let sources = keys
+            .iter()
+            .map(|key| test_source_with_key(key, true))
+            .collect::<Vec<_>>();
+        let sources_json = serialize_sources(&sources).unwrap();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, source_base_url, live_count) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                params![name, raw_config, "{}", sources_json, source_base_url],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn duplicate_detection_reports_identical_content() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(&connection, "配置 A", "{\"a\":1}", &["a", "b"], None);
+
+        let found = find_config_duplicate(
+            &connection,
+            "{\"a\":1}",
+            &["a".to_string(), "b".to_string()],
+            None,
+        )
+        .unwrap()
+        .expect("identical content should match");
+
+        assert_eq!(found.kind, "identical");
+        assert_eq!(found.document_name, "配置 A");
+        assert_eq!(found.shared_source_count, 2);
+    }
+
+    #[test]
+    fn duplicate_detection_catches_a_trimmed_copy_of_an_imported_configuration() {
+        // The user imported a configuration, deleted the sources they did not want, and now
+        // re-imports the untouched original. The text differs, so only the source sets reveal
+        // that they already have it.
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(
+            &connection,
+            "配置 A",
+            "{\"trimmed\":true}",
+            &["a", "b"],
+            None,
+        );
+
+        let found = find_config_duplicate(
+            &connection,
+            "{\"original\":true}",
+            &["a".to_string(), "b".to_string(), "c".to_string()],
+            None,
+        )
+        .unwrap()
+        .expect("a superset of a stored document should match");
+
+        assert_eq!(found.kind, "derived");
+        assert_eq!(found.shared_source_count, 2);
+        assert_eq!(found.candidate_source_count, 3);
+        assert_eq!(found.document_source_count, 2);
+    }
+
+    #[test]
+    fn duplicate_detection_catches_an_import_that_is_a_trimmed_copy() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(&connection, "配置 A", "{\"a\":1}", &["a", "b", "c"], None);
+
+        let found = find_config_duplicate(
+            &connection,
+            "{\"b\":2}",
+            &["a".to_string(), "b".to_string()],
+            None,
+        )
+        .unwrap()
+        .expect("a subset of a stored document should match");
+
+        assert_eq!(found.kind, "derived");
+        assert_eq!(found.shared_source_count, 2);
+        assert_eq!(found.document_source_count, 3);
+    }
+
+    #[test]
+    fn duplicate_detection_prefers_the_closest_source_overlap() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(&connection, "小的", "{\"a\":1}", &["a"], None);
+        insert_document_with_sources(&connection, "大的", "{\"b\":1}", &["a", "b"], None);
+
+        let found = find_config_duplicate(
+            &connection,
+            "{\"c\":2}",
+            &["a".to_string(), "b".to_string(), "c".to_string()],
+            None,
+        )
+        .unwrap()
+        .expect("both documents are subsets, the larger overlap wins");
+
+        assert_eq!(found.document_name, "大的");
+        assert_eq!(found.shared_source_count, 2);
+    }
+
+    #[test]
+    fn duplicate_detection_falls_back_to_the_import_address() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(
+            &connection,
+            "配置 A",
+            "{\"a\":1}",
+            &["a"],
+            Some("https://example.com/tv/x.json"),
+        );
+
+        let found = find_config_duplicate(
+            &connection,
+            "{\"b\":2}",
+            &["z".to_string()],
+            Some("https://example.com/tv/x.json"),
+        )
+        .unwrap()
+        .expect("the same import address should match");
+
+        assert_eq!(found.kind, "same-origin");
+    }
+
+    #[test]
+    fn duplicate_detection_stays_quiet_for_unrelated_configurations() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(&connection, "配置 A", "{\"a\":1}", &["a", "b"], None);
+
+        assert!(
+            find_config_duplicate(&connection, "{\"c\":3}", &["x".to_string()], None)
+                .unwrap()
+                .is_none()
+        );
+        assert!(find_config_duplicate(
+            &connection,
+            "{\"c\":3}",
+            &["x".to_string()],
+            Some("https://example.com/other.json")
+        )
+        .unwrap()
+        .is_none());
     }
 }

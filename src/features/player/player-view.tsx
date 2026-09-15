@@ -43,6 +43,8 @@ import type {
   VodPlayLine,
 } from "@/types/moseek";
 import { MediaPlayer, type MediaStatus } from "@/features/player/media-player";
+import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
+import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
 export interface VodPlayerRequest {
   item: VodItem;
@@ -68,6 +70,8 @@ export function PlayerView({
   const [activeEpisodeId, setActiveEpisodeId] = useState(request.episode.id);
   const [status, setStatus] = useState<MediaStatus>("idle");
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [mediaDiagnostic, setMediaDiagnostic] =
+    useState<MediaDiagnosticSnapshot | null>(null);
   const [isSniffing, setIsSniffing] = useState(false);
   const [resolvedPlayback, setResolvedPlayback] =
     useState<PlaybackResolution | null>(
@@ -98,6 +102,7 @@ export function PlayerView({
   useEffect(() => {
     let cancelled = false;
     setDiagnostic(null);
+    setMediaDiagnostic(null);
     if (!isTauriRuntime()) {
       setResolvedPlayback({
         url: activeEpisode.url,
@@ -313,6 +318,7 @@ export function PlayerView({
                   setStatus(nextStatus);
                   if (message) setDiagnostic(message);
                 }}
+                onDiagnostic={setMediaDiagnostic}
               />
             ) : (
               <div className="flex aspect-video items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
@@ -337,6 +343,7 @@ export function PlayerView({
                 <AlertDescription>{diagnostic}</AlertDescription>
               </Alert>
             )}
+            <MediaDiagnosticPanel snapshot={mediaDiagnostic} />
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">

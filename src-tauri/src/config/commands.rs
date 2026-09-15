@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use tauri::State;
 
 use crate::{
-    cms, policy, AppDatabase, ConfigDocument, ConfigDocumentSummary, SaveConfigDocumentInput,
+    cms, policy, AppDatabase, ConfigDocument, ConfigDocumentSummary, ConfigDuplicateMatch,
+    SaveConfigDocumentInput,
 };
 
 use super::storage;
@@ -59,6 +60,22 @@ pub fn set_config_source_base_url(
 ) -> Result<ConfigDocument, String> {
     let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     storage::set_config_source_base_url(&mut connection, document_id, &source_base_url)
+}
+
+#[tauri::command]
+pub fn find_config_duplicate(
+    raw_config: String,
+    source_keys: Vec<String>,
+    source_base_url: Option<String>,
+    state: State<'_, AppDatabase>,
+) -> Result<Option<ConfigDuplicateMatch>, String> {
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    storage::find_config_duplicate(
+        &connection,
+        &raw_config,
+        &source_keys,
+        source_base_url.as_deref(),
+    )
 }
 
 #[tauri::command]

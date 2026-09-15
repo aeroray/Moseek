@@ -13,8 +13,8 @@ use tauri::Manager;
 
 pub(crate) use models::AppDatabase;
 pub use models::{
-    ConfigDocument, ConfigDocumentSummary, SaveConfigDocumentInput, SourceOperationResult,
-    SourceRecord,
+    ConfigDocument, ConfigDocumentSummary, ConfigDuplicateMatch, SaveConfigDocumentInput,
+    SourceOperationResult, SourceRecord,
 };
 
 #[tauri::command]
@@ -38,6 +38,7 @@ pub fn run() {
             config::commands::load_latest_config,
             config::commands::load_active_config,
             config::commands::list_config_documents,
+            config::commands::find_config_duplicate,
             config::commands::activate_config_document,
             config::commands::delete_config_document,
             config::commands::set_source_enabled,
