@@ -34,6 +34,8 @@ pub struct ScriptExecutionRequest {
     pub http_hosts: Vec<String>,
     #[serde(default)]
     pub http_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub modules: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -42,6 +44,48 @@ pub struct ScriptExecutionResult {
     pub value: Value,
     pub adapter_id: String,
     pub http_call_count: u32,
+    pub diagnostics: ScriptExecutionDiagnostics,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptExecutionDiagnostics {
+    pub status: String,
+    pub phase: String,
+    pub duration_ms: u64,
+    pub http_call_count: u32,
+    pub http_hosts: Vec<String>,
+    pub http_calls: Vec<ScriptHttpDiagnostic>,
+    pub error_kind: Option<String>,
+    pub timed_out: bool,
+    pub credential_lookup_failed: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptExecutionLog {
+    pub id: i64,
+    pub archive_id: Option<i64>,
+    pub entry: String,
+    pub status: String,
+    pub phase: String,
+    pub duration_ms: u64,
+    pub http_call_count: u32,
+    pub http_hosts: Vec<String>,
+    pub http_calls: Vec<ScriptHttpDiagnostic>,
+    pub error_kind: Option<String>,
+    pub timed_out: bool,
+    pub credential_lookup_failed: bool,
+    pub created_at: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptHttpDiagnostic {
+    pub host: String,
+    pub duration_ms: u64,
+    pub status: String,
+    pub error_kind: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -56,6 +100,8 @@ pub struct SaveScriptArchiveInput {
     pub http_hosts: Vec<String>,
     #[serde(default)]
     pub http_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub modules: HashMap<String, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -68,6 +114,7 @@ pub struct ScriptArchiveSummary {
     pub entry: String,
     pub http_hosts: Vec<String>,
     pub http_header_names: Vec<String>,
+    pub module_names: Vec<String>,
     pub has_cookie: bool,
     pub enabled: bool,
     pub imported_at: String,
@@ -78,6 +125,13 @@ struct StoredScriptArchive {
     summary: ScriptArchiveSummary,
     script: String,
     http_headers: HashMap<String, String>,
+    modules: HashMap<String, String>,
+}
+
+struct ScriptRunOutcome {
+    value: Result<Value, String>,
+    http_call_count: u32,
+    http_calls: Vec<ScriptHttpDiagnostic>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,14 +168,37 @@ struct RuntimeResponse {
 pub async fn execute_script(
     app: AppHandle,
     request: ScriptExecutionRequest,
+    state: State<'_, AppDatabase>,
 ) -> Result<ScriptExecutionResult, String> {
-    run_script(app, request).await
+    run_script(app, request, &state.0, None).await
 }
 
 async fn run_script(
     app: AppHandle,
     request: ScriptExecutionRequest,
+    database: &Mutex<rusqlite::Connection>,
+    archive_id: Option<i64>,
 ) -> Result<ScriptExecutionResult, String> {
+    let started = Instant::now();
+    let entry = request.entry.clone();
+    let result = run_script_inner(app, request).await;
+    let diagnostics = diagnostics_for_result(&result, started.elapsed());
+    record_script_execution_log(database, archive_id, &entry, &diagnostics);
+    match result {
+        Ok(outcome) => Ok(ScriptExecutionResult {
+            value: outcome.value?,
+            adapter_id: "quickjs-sidecar".to_string(),
+            http_call_count: outcome.http_call_count,
+            diagnostics,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+async fn run_script_inner(
+    app: AppHandle,
+    request: ScriptExecutionRequest,
+) -> Result<ScriptRunOutcome, String> {
     if request.script.trim().is_empty() {
         return Err("脚本内容不能为空".to_string());
     }
@@ -143,6 +220,7 @@ async fn run_script(
 
     let mut stdout_buffer = String::new();
     let mut http_call_count = 0;
+    let mut http_calls = Vec::new();
     let mut final_result: Option<Result<Value, String>> = None;
     let deadline = Instant::now() + MAX_SCRIPT_EXECUTION_TIME;
     loop {
@@ -171,6 +249,7 @@ async fn run_script(
                     if value.get("kind").and_then(Value::as_str) == Some("host_call") {
                         let call: HostCall = serde_json::from_value(value)
                             .map_err(|error| format!("host-call 格式无效：{error}"))?;
+                        let call_started = Instant::now();
                         let response = match timeout(
                             MAX_HOST_CALL_TIME
                                 .min(deadline.saturating_duration_since(Instant::now())),
@@ -183,6 +262,11 @@ async fn run_script(
                         };
                         if call.method == "http_get" {
                             http_call_count += 1;
+                            http_calls.push(script_http_diagnostic(
+                                &call.url,
+                                &response,
+                                call_started.elapsed(),
+                            ));
                         }
                         child
                             .write(
@@ -229,10 +313,10 @@ async fn run_script(
     }
     let result = final_result.unwrap_or_else(|| Err("脚本运行时没有返回结果".to_string()));
     let _ = child.kill();
-    Ok(ScriptExecutionResult {
-        value: result?,
-        adapter_id: "quickjs-sidecar".to_string(),
+    Ok(ScriptRunOutcome {
+        value: result,
         http_call_count,
+        http_calls,
     })
 }
 
@@ -243,7 +327,7 @@ pub fn list_script_archives(
     let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let rows = connection
         .prepare(
-            "SELECT id, name, file_name, sha256, entry, http_hosts_json, http_headers_json, cookie_present, enabled, imported_at, last_used_at FROM script_archives WHERE deleted_at IS NULL ORDER BY id DESC",
+            "SELECT id, name, file_name, sha256, entry, http_hosts_json, http_headers_json, modules_json, cookie_present, enabled, imported_at, last_used_at FROM script_archives WHERE deleted_at IS NULL ORDER BY id DESC",
         )
         .map_err(|error| error.to_string())?
         .query_map([], |row| {
@@ -255,16 +339,73 @@ pub fn list_script_archives(
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, bool>(7)?,
+                row.get::<_, String>(7)?,
                 row.get::<_, bool>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, Option<String>>(10)?,
+                row.get::<_, bool>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
             ))
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     rows.into_iter().map(summary_from_row).collect()
+}
+
+#[tauri::command]
+pub fn list_script_execution_logs(
+    limit: Option<u32>,
+    state: State<'_, AppDatabase>,
+) -> Result<Vec<ScriptExecutionLog>, String> {
+    let limit = i64::from(limit.unwrap_or(20).clamp(1, 100));
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, archive_id, entry, status, phase, duration_ms, http_call_count, http_hosts_json, http_calls_json, error_kind, timed_out, credential_lookup_failed, created_at FROM script_execution_logs ORDER BY id DESC LIMIT ?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, bool>(10)?,
+                row.get::<_, bool>(11)?,
+                row.get::<_, String>(12)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ScriptExecutionLog {
+                id: row.0,
+                archive_id: row.1,
+                entry: row.2,
+                status: row.3,
+                phase: row.4,
+                duration_ms: row.5.max(0) as u64,
+                http_call_count: row.6.max(0) as u32,
+                http_hosts: serde_json::from_str(&row.7)
+                    .map_err(|error| format!("脚本日志 host 列表损坏：{error}"))?,
+                http_calls: serde_json::from_str(&row.8)
+                    .map_err(|error| format!("脚本日志 HTTP 明细损坏：{error}"))?,
+                error_kind: row.9,
+                timed_out: row.10,
+                credential_lookup_failed: row.11,
+                created_at: row.12,
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -289,11 +430,13 @@ pub fn save_script_archive(
     };
     let sha256 = script_sha256(&input.script);
     let http_hosts = normalize_host_list(&input.http_hosts);
+    validate_script_modules(&input.modules)?;
     let mut http_headers = normalize_http_headers(&input.http_headers)?;
     let cookie = http_headers.remove("Cookie");
     let http_hosts_json = serde_json::to_string(&http_hosts).map_err(|error| error.to_string())?;
     let http_headers_json =
         serde_json::to_string(&http_headers).map_err(|error| error.to_string())?;
+    let modules_json = serde_json::to_string(&input.modules).map_err(|error| error.to_string())?;
     let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     let duplicate = connection
         .query_row(
@@ -308,7 +451,7 @@ pub fn save_script_archive(
     }
     connection
         .execute(
-            "INSERT INTO script_archives (name, file_name, sha256, script, entry, http_hosts_json, http_headers_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO script_archives (name, file_name, sha256, script, entry, http_hosts_json, http_headers_json, modules_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 name,
                 file_name,
@@ -316,7 +459,8 @@ pub fn save_script_archive(
                 input.script,
                 input.entry,
                 http_hosts_json,
-                http_headers_json
+                http_headers_json,
+                modules_json
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -397,6 +541,40 @@ pub fn restore_script_archive(
 }
 
 #[tauri::command]
+pub fn purge_script_archive(
+    archive_id: i64,
+    state: State<'_, AppDatabase>,
+) -> Result<Vec<ScriptArchiveSummary>, String> {
+    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let row = connection
+        .query_row(
+            "SELECT enabled, cookie_present FROM script_archives WHERE id = ?1",
+            params![archive_id],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "脚本档案不存在或已被删除".to_string())?;
+    if row.0 {
+        return Err("请先停用脚本档案，再永久删除其凭据和内容。".to_string());
+    }
+    if row.1 {
+        delete_cookie_secret(archive_id)?;
+    }
+    let deleted = connection
+        .execute(
+            "DELETE FROM script_archives WHERE id = ?1",
+            params![archive_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if deleted == 0 {
+        return Err("脚本档案不存在或已被删除".to_string());
+    }
+    drop(connection);
+    list_script_archives(state)
+}
+
+#[tauri::command]
 pub async fn execute_script_archive(
     app: AppHandle,
     archive_id: i64,
@@ -421,19 +599,47 @@ pub(crate) async fn run_script_archive(
     if !stored.summary.enabled {
         return Err("脚本档案尚未启用，请先明确开启后再执行。".to_string());
     }
+    let execution_entry = entry.unwrap_or_else(|| stored.summary.entry.clone());
     let mut http_headers = stored.http_headers;
     if stored.summary.has_cookie {
-        http_headers.insert("Cookie".to_string(), load_cookie_secret(archive_id)?);
+        match load_cookie_secret(archive_id) {
+            Ok(cookie) => {
+                http_headers.insert("Cookie".to_string(), cookie);
+            }
+            Err(error) => {
+                let diagnostics = ScriptExecutionDiagnostics {
+                    status: "failed".to_string(),
+                    phase: "credential".to_string(),
+                    duration_ms: 0,
+                    http_call_count: 0,
+                    http_hosts: Vec::new(),
+                    http_calls: Vec::new(),
+                    error_kind: Some("credential".to_string()),
+                    timed_out: false,
+                    credential_lookup_failed: true,
+                };
+                record_script_execution_log(
+                    database,
+                    Some(archive_id),
+                    &execution_entry,
+                    &diagnostics,
+                );
+                return Err(error);
+            }
+        }
     }
     let result = run_script(
         app,
         ScriptExecutionRequest {
             script: stored.script,
-            entry: entry.unwrap_or(stored.summary.entry),
+            entry: execution_entry,
             input,
             http_hosts: stored.summary.http_hosts,
             http_headers,
+            modules: stored.modules,
         },
+        database,
+        Some(archive_id),
     )
     .await?;
     let connection = database.lock().map_err(|_| "数据库锁定失败".to_string())?;
@@ -550,7 +756,7 @@ fn load_script_archive(
 ) -> Result<StoredScriptArchive, String> {
     let row = connection
         .query_row(
-            "SELECT id, name, file_name, sha256, script, entry, http_hosts_json, http_headers_json, cookie_present, enabled, imported_at, last_used_at FROM script_archives WHERE id = ?1 AND deleted_at IS NULL",
+            "SELECT id, name, file_name, sha256, script, entry, http_hosts_json, http_headers_json, modules_json, cookie_present, enabled, imported_at, last_used_at FROM script_archives WHERE id = ?1 AND deleted_at IS NULL",
             params![archive_id],
             |row| {
                 Ok((
@@ -562,10 +768,11 @@ fn load_script_archive(
                     row.get::<_, String>(5)?,
                     row.get::<_, String>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, bool>(8)?,
+                    row.get::<_, String>(8)?,
                     row.get::<_, bool>(9)?,
-                    row.get::<_, String>(10)?,
-                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, bool>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             },
         )
@@ -580,22 +787,26 @@ fn load_script_archive(
         row.5,
         row.6,
         row.7.clone(),
-        row.8,
+        row.8.clone(),
         row.9,
         row.10,
         row.11,
+        row.12,
     ))?;
     Ok(StoredScriptArchive {
         summary,
         script: row.4,
         http_headers: serde_json::from_str(&row.7)
             .map_err(|error| format!("脚本档案请求头损坏：{error}"))?,
+        modules: serde_json::from_str(&row.8)
+            .map_err(|error| format!("脚本档案模块映射损坏：{error}"))?,
     })
 }
 
 fn summary_from_row(
     row: (
         i64,
+        String,
         String,
         String,
         String,
@@ -612,8 +823,13 @@ fn summary_from_row(
         .map_err(|error| format!("脚本档案 HTTP allowlist 损坏：{error}"))?;
     let http_headers: HashMap<String, String> =
         serde_json::from_str(&row.6).map_err(|error| format!("脚本档案请求头损坏：{error}"))?;
+    let mut module_names = serde_json::from_str::<HashMap<String, String>>(&row.7)
+        .map_err(|error| format!("脚本档案模块映射损坏：{error}"))?
+        .into_keys()
+        .collect::<Vec<_>>();
+    module_names.sort_unstable();
     let mut http_header_names = http_headers.keys().cloned().collect::<Vec<_>>();
-    if row.7 && !http_header_names.iter().any(|name| name == "Cookie") {
+    if row.8 && !http_header_names.iter().any(|name| name == "Cookie") {
         http_header_names.push("Cookie".to_string());
     }
     http_header_names.sort_unstable();
@@ -625,10 +841,11 @@ fn summary_from_row(
         entry: row.4,
         http_hosts,
         http_header_names,
-        has_cookie: row.7,
-        enabled: row.8,
-        imported_at: row.9,
-        last_used_at: row.10,
+        module_names,
+        has_cookie: row.8,
+        enabled: row.9,
+        imported_at: row.10,
+        last_used_at: row.11,
     })
 }
 
@@ -654,6 +871,27 @@ fn normalize_host_list(hosts: &[String]) -> Vec<String> {
     let mut normalized = normalize_hosts(hosts).into_iter().collect::<Vec<_>>();
     normalized.sort_unstable();
     normalized
+}
+
+fn validate_script_modules(modules: &HashMap<String, String>) -> Result<(), String> {
+    if modules.len() > 32 {
+        return Err("脚本模块数量超过 32 个限制".to_string());
+    }
+    let mut total_bytes = 0;
+    for (name, source) in modules {
+        let name = name.trim();
+        if name.is_empty() || name.contains('\\') || name.contains(':') || name.starts_with('/') {
+            return Err(format!("脚本模块名无效：{name}"));
+        }
+        if source.len() > 256 * 1024 {
+            return Err(format!("脚本模块 {name} 超过 256 KiB 限制"));
+        }
+        total_bytes += source.len();
+        if total_bytes > 512 * 1024 {
+            return Err("脚本模块总大小超过 512 KiB 限制".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn normalize_http_headers(
@@ -694,6 +932,14 @@ fn load_cookie_secret(archive_id: i64) -> Result<String, String> {
     cookie_entry(archive_id)?
         .get_password()
         .map_err(|error| format!("读取脚本 Cookie 凭据失败：{error}"))
+}
+
+fn delete_cookie_secret(archive_id: i64) -> Result<(), String> {
+    match cookie_entry(archive_id)?.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(format!("删除 Windows 凭据失败：{error}")),
+    }
 }
 
 pub(crate) fn migrate_script_archive_cookies(
@@ -779,6 +1025,144 @@ async fn handle_host_call(
     }
 }
 
+fn diagnostics_for_result(
+    result: &Result<ScriptRunOutcome, String>,
+    duration: Duration,
+) -> ScriptExecutionDiagnostics {
+    match result {
+        Ok(outcome) => match &outcome.value {
+            Ok(_) => ScriptExecutionDiagnostics {
+                status: "ok".to_string(),
+                phase: "complete".to_string(),
+                duration_ms: duration.as_millis() as u64,
+                http_call_count: outcome.http_call_count,
+                http_hosts: unique_hosts(&outcome.http_calls),
+                http_calls: outcome.http_calls.clone(),
+                error_kind: None,
+                timed_out: false,
+                credential_lookup_failed: false,
+            },
+            Err(error) => failed_diagnostics(
+                error,
+                duration,
+                outcome.http_call_count,
+                &outcome.http_calls,
+            ),
+        },
+        Err(error) => failed_diagnostics(error, duration, 0, &[]),
+    }
+}
+
+fn failed_diagnostics(
+    error: &str,
+    duration: Duration,
+    http_call_count: u32,
+    http_calls: &[ScriptHttpDiagnostic],
+) -> ScriptExecutionDiagnostics {
+    let error_kind = classify_script_error(error);
+    ScriptExecutionDiagnostics {
+        status: "failed".to_string(),
+        phase: script_error_phase(error, &error_kind).to_string(),
+        duration_ms: duration.as_millis() as u64,
+        http_call_count,
+        http_hosts: unique_hosts(http_calls),
+        http_calls: http_calls.to_vec(),
+        timed_out: error_kind == "timeout",
+        credential_lookup_failed: error_kind == "credential",
+        error_kind: Some(error_kind),
+    }
+}
+
+fn script_http_diagnostic(
+    url: &str,
+    response: &HostResponse,
+    duration: Duration,
+) -> ScriptHttpDiagnostic {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_else(|| "<invalid>".to_string());
+    ScriptHttpDiagnostic {
+        host,
+        duration_ms: duration.as_millis() as u64,
+        status: if response.ok {
+            "ok".to_string()
+        } else {
+            "error".to_string()
+        },
+        error_kind: response.error.as_deref().map(classify_script_error),
+    }
+}
+
+fn unique_hosts(calls: &[ScriptHttpDiagnostic]) -> Vec<String> {
+    let mut hosts = calls
+        .iter()
+        .map(|call| call.host.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    hosts.sort_unstable();
+    hosts
+}
+
+fn classify_script_error(error: &str) -> String {
+    if error.contains("Cookie") || error.contains("凭据") {
+        "credential".to_string()
+    } else if error.contains("超过") || error.to_ascii_lowercase().contains("timeout") {
+        "timeout".to_string()
+    } else if error.contains("HTTP") || error.contains("http_get") || error.contains("host-call") {
+        "http".to_string()
+    } else if error.contains("入口") {
+        "entry".to_string()
+    } else if error.contains("脚本") {
+        "script".to_string()
+    } else {
+        "runtime".to_string()
+    }
+}
+
+fn script_error_phase(error: &str, error_kind: &str) -> &'static str {
+    match error_kind {
+        "credential" => "credential",
+        "timeout" => "timeout",
+        "http" => "host-call",
+        "entry" => "entry",
+        _ if error.contains("启动") || error.contains("发送") => "spawn",
+        _ => "runtime",
+    }
+}
+
+fn record_script_execution_log(
+    database: &Mutex<rusqlite::Connection>,
+    archive_id: Option<i64>,
+    entry: &str,
+    diagnostics: &ScriptExecutionDiagnostics,
+) {
+    let Ok(connection) = database.lock() else {
+        return;
+    };
+    let http_hosts_json =
+        serde_json::to_string(&diagnostics.http_hosts).unwrap_or_else(|_| "[]".to_string());
+    let http_calls_json =
+        serde_json::to_string(&diagnostics.http_calls).unwrap_or_else(|_| "[]".to_string());
+    let _ = connection.execute(
+        "INSERT INTO script_execution_logs (archive_id, entry, status, phase, duration_ms, http_call_count, http_hosts_json, http_calls_json, error_kind, timed_out, credential_lookup_failed) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            archive_id,
+            entry,
+            diagnostics.status,
+            diagnostics.phase,
+            diagnostics.duration_ms,
+            diagnostics.http_call_count,
+            http_hosts_json,
+            http_calls_json,
+            diagnostics.error_kind,
+            diagnostics.timed_out,
+            diagnostics.credential_lookup_failed,
+        ],
+    );
+}
+
 fn host_error(id: u64, error: &str) -> HostResponse {
     HostResponse {
         kind: "hostResponse",
@@ -811,9 +1195,11 @@ fn default_entry() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        normalize_hosts, normalize_http_headers, sanitize_file_name, script_sha256, take_line,
+        diagnostics_for_result, normalize_hosts, normalize_http_headers, sanitize_file_name,
+        script_http_diagnostic, script_sha256, take_line, HostResponse, ScriptRunOutcome,
     };
     use std::collections::HashMap;
+    use std::time::Duration;
 
     #[test]
     fn normalizes_http_host_allowlist() {
@@ -855,5 +1241,32 @@ mod tests {
         assert!(normalize_http_headers(&invalid).is_err());
         let line_break = HashMap::from([("User-Agent".to_string(), "demo\nnext".to_string())]);
         assert!(normalize_http_headers(&line_break).is_err());
+    }
+
+    #[test]
+    fn diagnostics_keep_only_host_and_classify_script_failures() {
+        let response = HostResponse {
+            kind: "hostResponse",
+            id: 1,
+            ok: true,
+            value: None,
+            error: None,
+        };
+        let call = script_http_diagnostic(
+            "https://Example.com/api?token=secret",
+            &response,
+            Duration::from_millis(4),
+        );
+        let result = Ok(ScriptRunOutcome {
+            value: Err("脚本入口执行失败".to_string()),
+            http_call_count: 1,
+            http_calls: vec![call],
+        });
+        let diagnostics = diagnostics_for_result(&result, Duration::from_millis(8));
+        assert_eq!(diagnostics.status, "failed");
+        assert_eq!(diagnostics.error_kind.as_deref(), Some("entry"));
+        assert_eq!(diagnostics.http_call_count, 1);
+        assert_eq!(diagnostics.http_hosts, vec!["example.com"]);
+        assert_eq!(diagnostics.http_calls[0].status, "ok");
     }
 }

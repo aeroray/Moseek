@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, BufWriter, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -8,7 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rquickjs::{Context, Function, Runtime};
+use rquickjs::{
+    loader::{ImportAttributes, Loader, Resolver},
+    Context, Ctx, Error, Function, Module, Runtime,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -18,6 +21,10 @@ const MAX_OUTPUT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STACK_BYTES: usize = 256 * 1024;
 const MAX_EXECUTION_TIME: Duration = Duration::from_millis(1_500);
+const MAX_MODULE_COUNT: usize = 32;
+const MAX_MODULE_SOURCE_BYTES: usize = 256 * 1024;
+const MAX_MODULE_TOTAL_BYTES: usize = 512 * 1024;
+const ENTRY_MODULE_NAME: &str = "__moseek_entry__.js";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -32,6 +39,52 @@ struct RuntimeRequest {
     #[serde(default)]
     #[serde(rename = "httpHeaders")]
     _http_headers: HashMap<String, String>,
+    #[serde(default)]
+    modules: HashMap<String, String>,
+}
+
+struct MemoryResolver {
+    modules: HashSet<String>,
+}
+
+struct MemoryLoader {
+    modules: HashMap<String, String>,
+}
+
+impl Resolver for MemoryResolver {
+    fn resolve<'js>(
+        &mut self,
+        _ctx: &Ctx<'js>,
+        base: &str,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> Result<String, Error> {
+        let resolved = resolve_module_name(base, name);
+        if self.modules.contains(&resolved) {
+            Ok(resolved)
+        } else {
+            Err(Error::new_resolving_message(
+                base,
+                name,
+                "模块不在本次脚本执行的内存 allowlist 中",
+            ))
+        }
+    }
+}
+
+impl Loader for MemoryLoader {
+    fn load<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        name: &str,
+        _attributes: Option<ImportAttributes<'js>>,
+    ) -> Result<Module<'js>, Error> {
+        let source = self
+            .modules
+            .get(name)
+            .ok_or_else(|| Error::new_loading_message(name, "模块不在内存 allowlist 中"))?;
+        Module::declare(ctx.clone(), name, source.as_str())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -182,10 +235,17 @@ fn execute_request(
     if input_json.len() > MAX_INPUT_BYTES {
         return Err("脚本输入超过 512 KiB 限制".to_string());
     }
+    let modules = normalize_module_sources(&request.modules)?;
 
     let runtime = Runtime::new().map_err(|error| format!("创建 JS 运行时失败：{error}"))?;
     runtime.set_memory_limit(MAX_MEMORY_BYTES);
     runtime.set_max_stack_size(MAX_STACK_BYTES);
+    runtime.set_loader(
+        MemoryResolver {
+            modules: modules.keys().cloned().collect(),
+        },
+        MemoryLoader { modules },
+    );
     let interrupted = Arc::new(AtomicBool::new(false));
     let interrupt_flag = Arc::clone(&interrupted);
     let deadline = Instant::now() + timeout;
@@ -235,16 +295,19 @@ fn execute_request(
                 .set("http_get", http_get)
                 .map_err(|error| format!("注入 http_get 宿主 API 失败：{error}"))?;
         }
-        let prepared_script = prepare_script(&request.script);
-        ctx.eval::<(), _>(prepared_script.as_str())
-            .map_err(|error| format!("脚本执行失败：{error}"))?;
-        let invocation = format!(
-            "(function() {{ const result = {entry}(JSON.parse(__moseek_input_json)); return JSON.stringify(result === undefined ? null : result); }})()",
-            entry = request.entry
-        );
-        let output: String = ctx
-            .eval(invocation.as_str())
-            .map_err(|error| format!("脚本入口执行失败：{error}"))?;
+        let output = if contains_module_syntax(&request.script) {
+            execute_module(ctx.clone(), &request.script, &request.entry)?
+        } else {
+            let prepared_script = prepare_script(&request.script);
+            ctx.eval::<(), _>(prepared_script.as_str())
+                .map_err(|error| format!("脚本执行失败：{error}"))?;
+            let invocation = format!(
+                "(function() {{ const result = {entry}(JSON.parse(__moseek_input_json)); return JSON.stringify(result === undefined ? null : result); }})()",
+                entry = request.entry
+            );
+            ctx.eval(invocation.as_str())
+                .map_err(|error| format!("脚本入口执行失败：{error}"))?
+        };
         if output.len() > MAX_OUTPUT_BYTES {
             return Err("脚本输出超过 2 MiB 限制".to_string());
         }
@@ -271,6 +334,95 @@ fn is_allowed_http_url(url: &str, allowed_hosts: &[String]) -> bool {
     allowed_hosts
         .iter()
         .any(|allowed| host.eq_ignore_ascii_case(allowed.trim_end_matches('.')))
+}
+
+fn normalize_module_sources(
+    modules: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    if modules.len() > MAX_MODULE_COUNT {
+        return Err(format!("模块数量超过 {MAX_MODULE_COUNT} 个限制"));
+    }
+    let mut normalized = HashMap::new();
+    let mut total_bytes = 0;
+    for (name, source) in modules {
+        let name = name.trim();
+        if name.is_empty() || name.contains('\\') || name.contains(':') || name.starts_with('/') {
+            return Err(format!("模块名无效：{name}"));
+        }
+        if source.len() > MAX_MODULE_SOURCE_BYTES {
+            return Err(format!("模块 {name} 超过 256 KiB 限制"));
+        }
+        total_bytes += source.len();
+        if total_bytes > MAX_MODULE_TOTAL_BYTES {
+            return Err("模块总大小超过 512 KiB 限制".to_string());
+        }
+        let resolved_name = resolve_module_name(ENTRY_MODULE_NAME, name);
+        if resolved_name.is_empty() || resolved_name == ENTRY_MODULE_NAME {
+            return Err(format!("模块名无效：{name}"));
+        }
+        if normalized.insert(resolved_name, source.clone()).is_some() {
+            return Err(format!("模块名重复：{name}"));
+        }
+    }
+    Ok(normalized)
+}
+
+fn contains_module_syntax(script: &str) -> bool {
+    script.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("import ")
+            || line.starts_with("import{")
+            || line.starts_with("import(")
+            || line.starts_with("export ")
+            || line.starts_with("export{")
+    })
+}
+
+fn execute_module<'js>(ctx: Ctx<'js>, script: &str, entry: &str) -> Result<String, String> {
+    let module = Module::declare(ctx.clone(), ENTRY_MODULE_NAME, script)
+        .map_err(|error| format!("声明脚本模块失败：{error}"))?;
+    let (evaluated, promise) = module
+        .eval()
+        .map_err(|error| format!("加载脚本模块失败：{error}"))?;
+    promise
+        .finish::<()>()
+        .map_err(|error| format!("执行脚本模块失败：{error}"))?;
+    let entry_function: Function = match evaluated.get(entry) {
+        Ok(function) => function,
+        Err(error) if entry != "default" => evaluated
+            .get("default")
+            .map_err(|_| format!("脚本模块没有可执行入口 {entry}：{error}"))?,
+        Err(error) => return Err(format!("脚本模块没有可执行入口 {entry}：{error}")),
+    };
+    ctx.globals()
+        .set("__moseek_entry", entry_function)
+        .map_err(|error| format!("注入脚本模块入口失败：{error}"))?;
+    let invocation = "(function() { const result = __moseek_entry(JSON.parse(__moseek_input_json)); return JSON.stringify(result === undefined ? null : result); })()";
+    ctx.eval(invocation)
+        .map_err(|error| format!("脚本入口执行失败：{error}"))
+}
+
+fn resolve_module_name(base: &str, name: &str) -> String {
+    if !name.starts_with('.') {
+        return name.to_string();
+    }
+    let parent = base.rsplit_once('/').map(|(path, _)| path).unwrap_or("");
+    let combined = if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    };
+    let mut parts = Vec::new();
+    for part in combined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            value => parts.push(value),
+        }
+    }
+    parts.join("/")
 }
 
 fn prepare_script(script: &str) -> String {
@@ -324,6 +476,7 @@ mod tests {
                 input: json!({"title": "demo"}),
                 http_hosts: Vec::new(),
                 _http_headers: HashMap::new(),
+                modules: HashMap::new(),
             },
             Duration::from_millis(500),
             Arc::new(Mutex::new(super::Transport::new())),
@@ -342,6 +495,7 @@ mod tests {
                 input: Value::Null,
                 http_hosts: Vec::new(),
                 _http_headers: HashMap::new(),
+                modules: HashMap::new(),
             },
             Duration::from_millis(20),
             Arc::new(Mutex::new(super::Transport::new())),
@@ -371,6 +525,7 @@ mod tests {
                 input: json!({"title": "demo"}),
                 http_hosts: Vec::new(),
                 _http_headers: HashMap::new(),
+                modules: HashMap::new(),
             },
             Duration::from_millis(500),
             Arc::new(Mutex::new(super::Transport::new())),
@@ -381,5 +536,65 @@ mod tests {
             prepare_script("export async function getHome() {}"),
             "async function getHome() {}"
         );
+    }
+
+    #[test]
+    fn imports_only_from_the_in_memory_module_allowlist() {
+        let value = execute_request(
+            RuntimeRequest {
+                script: "import { add } from './math.js'; export function main(input) { return { value: add(input.value) }; }".to_string(),
+                entry: "main".to_string(),
+                input: json!({"value": 2}),
+                http_hosts: Vec::new(),
+                _http_headers: HashMap::new(),
+                modules: HashMap::from([(
+                    "math.js".to_string(),
+                    "export function add(value) { return value + 1; }".to_string(),
+                )]),
+            },
+            Duration::from_millis(500),
+            Arc::new(Mutex::new(super::Transport::new())),
+        )
+        .unwrap();
+        assert_eq!(value["value"], 3);
+    }
+
+    #[test]
+    fn supports_default_export_for_legacy_named_entry_configuration() {
+        let value = execute_request(
+            RuntimeRequest {
+                script: "export default function main(input) { return { title: input.title }; }"
+                    .to_string(),
+                entry: "main".to_string(),
+                input: json!({"title": "demo"}),
+                http_hosts: Vec::new(),
+                _http_headers: HashMap::new(),
+                modules: HashMap::new(),
+            },
+            Duration::from_millis(500),
+            Arc::new(Mutex::new(super::Transport::new())),
+        )
+        .unwrap();
+        assert_eq!(value["title"], "demo");
+    }
+
+    #[test]
+    fn rejects_modules_outside_the_in_memory_allowlist() {
+        let result = execute_request(
+            RuntimeRequest {
+                script:
+                    "import { add } from './missing.js'; export function main() { return add(1); }"
+                        .to_string(),
+                entry: "main".to_string(),
+                input: Value::Null,
+                http_hosts: Vec::new(),
+                _http_headers: HashMap::new(),
+                modules: HashMap::new(),
+            },
+            Duration::from_millis(500),
+            Arc::new(Mutex::new(super::Transport::new())),
+        );
+        let error = result.unwrap_err();
+        assert!(error.contains("声明脚本模块"), "{error}");
     }
 }

@@ -6,7 +6,7 @@ edition = "2021"
 rust-version = "1.77.2"
 
 [dependencies]
-rquickjs = "0.13"
+rquickjs = { version = "0.13", features = ["loader"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"

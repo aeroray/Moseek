@@ -858,6 +858,21 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                error_kind TEXT,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
+                         CREATE TABLE IF NOT EXISTS script_execution_logs (
+                             id INTEGER PRIMARY KEY AUTOINCREMENT,
+                             archive_id INTEGER,
+                             entry TEXT NOT NULL,
+                             status TEXT NOT NULL,
+                             phase TEXT NOT NULL,
+                             duration_ms INTEGER NOT NULL,
+                             http_call_count INTEGER NOT NULL DEFAULT 0,
+                             http_hosts_json TEXT NOT NULL DEFAULT '[]',
+                             http_calls_json TEXT NOT NULL DEFAULT '[]',
+                             error_kind TEXT,
+                             timed_out INTEGER NOT NULL DEFAULT 0,
+                             credential_lookup_failed INTEGER NOT NULL DEFAULT 0,
+                             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                         );
              CREATE TABLE IF NOT EXISTS app_settings (
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL,
@@ -872,6 +887,7 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                              entry TEXT NOT NULL DEFAULT 'main',
                              http_hosts_json TEXT NOT NULL DEFAULT '[]',
                                http_headers_json TEXT NOT NULL DEFAULT '{}',
+                                                             modules_json TEXT NOT NULL DEFAULT '{}',
                                cookie_present INTEGER NOT NULL DEFAULT 0,
                              enabled INTEGER NOT NULL DEFAULT 0,
                              imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -884,6 +900,7 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     ensure_sources_epg_column(&connection)?;
     ensure_script_archives_deleted_at_column(&connection)?;
     ensure_script_archives_http_headers_column(&connection)?;
+    ensure_script_archives_modules_column(&connection)?;
     ensure_script_archives_cookie_column(&connection)?;
     script_runtime::migrate_script_archive_cookies(&connection)?;
     Ok(connection)
@@ -988,6 +1005,27 @@ fn ensure_script_archives_cookie_column(connection: &Connection) -> Result<(), S
     Ok(())
 }
 
+fn ensure_script_archives_modules_column(connection: &Connection) -> Result<(), String> {
+    let has_modules = connection
+        .prepare("PRAGMA table_info(script_archives)")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|column| column == "modules_json");
+    if !has_modules {
+        connection
+            .execute(
+                "ALTER TABLE script_archives ADD COLUMN modules_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1022,10 +1060,12 @@ pub fn run() {
             script_runtime::execute_script,
             script_runtime::test_script_source,
             script_runtime::list_script_archives,
+            script_runtime::list_script_execution_logs,
             script_runtime::save_script_archive,
             script_runtime::set_script_archive_enabled,
             script_runtime::delete_script_archive,
             script_runtime::restore_script_archive,
+            script_runtime::purge_script_archive,
             script_runtime::execute_script_archive,
         ])
         .run(tauri::generate_context!())

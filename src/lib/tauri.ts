@@ -53,12 +53,40 @@ export interface ScriptExecutionRequest {
   input?: unknown;
   httpHosts?: string[];
   httpHeaders?: Record<string, string>;
+  modules?: Record<string, string>;
 }
 
 export interface ScriptExecutionResult {
   value: unknown;
   adapterId: string;
   httpCallCount: number;
+  diagnostics: ScriptExecutionDiagnostics;
+}
+
+export interface ScriptHttpDiagnostic {
+  host: string;
+  durationMs: number;
+  status: string;
+  errorKind?: string | null;
+}
+
+export interface ScriptExecutionDiagnostics {
+  status: string;
+  phase: string;
+  durationMs: number;
+  httpCallCount: number;
+  httpHosts: string[];
+  httpCalls: ScriptHttpDiagnostic[];
+  errorKind?: string | null;
+  timedOut: boolean;
+  credentialLookupFailed: boolean;
+}
+
+export interface ScriptExecutionLog extends ScriptExecutionDiagnostics {
+  id: number;
+  archiveId?: number | null;
+  entry: string;
+  createdAt: string;
 }
 
 export interface SaveScriptArchiveInput {
@@ -68,6 +96,7 @@ export interface SaveScriptArchiveInput {
   entry?: string;
   httpHosts?: string[];
   httpHeaders?: Record<string, string>;
+  modules?: Record<string, string>;
 }
 
 export const DEFAULT_SNIFFER_COMPANION_URL = "http://127.0.0.1:57573/sniffer";
@@ -218,6 +247,12 @@ export async function executeScript(request: ScriptExecutionRequest) {
   return invokeCommand<ScriptExecutionResult>("execute_script", { request });
 }
 
+export async function listScriptExecutionLogs(limit = 20) {
+  return invokeCommand<ScriptExecutionLog[]>("list_script_execution_logs", {
+    limit,
+  });
+}
+
 export async function listScriptArchives() {
   return invokeCommand<ScriptArchiveSummary[]>("list_script_archives");
 }
@@ -241,6 +276,12 @@ export async function deleteScriptArchive(id: number) {
 
 export async function restoreScriptArchive(id: number) {
   return invokeCommand<ScriptArchiveSummary[]>("restore_script_archive", {
+    archiveId: id,
+  });
+}
+
+export async function purgeScriptArchive(id: number) {
+  return invokeCommand<ScriptArchiveSummary[]>("purge_script_archive", {
     archiveId: id,
   });
 }

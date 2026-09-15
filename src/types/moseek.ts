@@ -49,6 +49,7 @@ export interface ScriptArchiveSummary {
   entry: string;
   httpHosts: string[];
   httpHeaderNames: string[];
+  moduleNames: string[];
   hasCookie: boolean;
   enabled: boolean;
   importedAt: string;

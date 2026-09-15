@@ -27,3 +27,6 @@
 - CatVod bindings call getCategory independently, preserve parseIframe headers for HLS playback, and normalize named export functions; full module imports and DOM remain out of scope for the current sidecar.
 - Script archives may carry only validated User-Agent, Referer, and Cookie headers; archive listings expose names only, and host HTTP calls still pass through the shared network policy.
 - Cookie values are stored in the Windows native credential store through `keyring`; SQLite keeps only non-sensitive headers and a `hasCookie` marker, with startup migration for legacy plaintext Cookie fields.
+- Script ES modules use an explicit in-memory `modules` map; the QuickJS loader has no filesystem, network, or implicit module resolution. This preserves import compatibility without expanding sidecar authority.
+- Script archive soft deletion remains reversible; permanent deletion requires a disabled archive and removes its Windows credential-store entry before deleting SQLite content. This prevents active credentials from being removed accidentally.
+- Script executions return and persist redacted diagnostics: phase, duration, host-only HTTP details, error class, and timeout/credential flags. Full URLs, query strings, Cookie values, and response bodies are excluded from the log contract.

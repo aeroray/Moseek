@@ -36,11 +36,14 @@ import {
   executeScript,
   executeScriptArchive,
   isTauriRuntime,
+  listScriptExecutionLogs,
   listScriptArchives,
+  purgeScriptArchive,
   restoreScriptArchive,
   saveScriptArchive,
   setScriptArchiveEnabled,
 } from "@/lib/tauri";
+import type { ScriptExecutionLog } from "@/lib/tauri";
 import type { ScriptArchiveSummary, ThemeMode } from "@/types/moseek";
 
 interface SettingsViewProps {
@@ -62,17 +65,22 @@ export function SettingsView({
   const [runtimeInput, setRuntimeInput] = useState('{"title":"demo"}');
   const [runtimeHosts, setRuntimeHosts] = useState("");
   const [runtimeHeaders, setRuntimeHeaders] = useState("");
+  const [runtimeModules, setRuntimeModules] = useState("");
   const [runtimeOutput, setRuntimeOutput] = useState("");
   const [isExecutingScript, setIsExecutingScript] = useState(false);
   const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
     [],
   );
+  const [scriptExecutionLogs, setScriptExecutionLogs] = useState<
+    ScriptExecutionLog[]
+  >([]);
   const [isLoadingArchives, setIsLoadingArchives] = useState(false);
   const [archiveMessage, setArchiveMessage] = useState("");
   const [deletedArchiveId, setDeletedArchiveId] = useState<number | null>(null);
   const [archiveEntry, setArchiveEntry] = useState("main");
   const [archiveHttpHosts, setArchiveHttpHosts] = useState("");
   const [archiveHeaders, setArchiveHeaders] = useState("");
+  const [archiveModules, setArchiveModules] = useState("");
   const scriptFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -86,7 +94,18 @@ export function SettingsView({
         );
       })
       .finally(() => setIsLoadingArchives(false));
+    void listScriptExecutionLogs(8)
+      .then((logs) => setScriptExecutionLogs(logs ?? []))
+      .catch(() => setScriptExecutionLogs([]));
   }, []);
+
+  const refreshScriptExecutionLogs = () => {
+    void listScriptExecutionLogs(8)
+      .then((logs) => {
+        if (logs) setScriptExecutionLogs(logs);
+      })
+      .catch(() => undefined);
+  };
 
   const handleExecuteScript = async () => {
     if (isExecutingScript) return;
@@ -105,6 +124,9 @@ export function SettingsView({
           .map((host) => host.trim())
           .filter(Boolean),
         httpHeaders,
+        modules: runtimeModules.trim()
+          ? (JSON.parse(runtimeModules) as Record<string, string>)
+          : {},
       });
       if (!result) {
         throw new Error(
@@ -118,11 +140,13 @@ export function SettingsView({
             value: result.value,
             adapterId: result.adapterId,
             httpCallCount: result.httpCallCount,
+            diagnostics: result.diagnostics,
           },
           null,
           2,
         ),
       );
+      refreshScriptExecutionLogs();
     } catch (error) {
       setRuntimeOutput(
         JSON.stringify(
@@ -158,6 +182,9 @@ export function SettingsView({
           .filter(Boolean),
         httpHeaders: archiveHeaders.trim()
           ? (JSON.parse(archiveHeaders) as Record<string, string>)
+          : {},
+        modules: archiveModules.trim()
+          ? (JSON.parse(archiveModules) as Record<string, string>)
           : {},
       });
       if (!saved)
@@ -224,6 +251,30 @@ export function SettingsView({
     }
   };
 
+  const handlePurgeScriptArchive = async (archive: ScriptArchiveSummary) => {
+    if (archive.enabled) {
+      setArchiveMessage("请先停用脚本档案，再永久删除。");
+      return;
+    }
+    if (
+      !window.confirm(
+        `永久删除「${archive.name}」？这会同时清理 Windows 凭据存储中的 Cookie，不能撤销。`,
+      )
+    ) {
+      return;
+    }
+    try {
+      const archives = await purgeScriptArchive(archive.id);
+      if (!archives) throw new Error("浏览器预览不会永久删除脚本档案。");
+      setScriptArchives(archives);
+      setArchiveMessage(`已永久删除「${archive.name}」及其安全凭据。`);
+    } catch (error) {
+      setArchiveMessage(
+        error instanceof Error ? error.message : "脚本档案永久删除失败",
+      );
+    }
+  };
+
   const handleExecuteScriptArchive = async (archive: ScriptArchiveSummary) => {
     if (isExecutingScript || !archive.enabled) return;
     setIsExecutingScript(true);
@@ -239,6 +290,7 @@ export function SettingsView({
             value: result.value,
             adapterId: result.adapterId,
             httpCallCount: result.httpCallCount,
+            diagnostics: result.diagnostics,
           },
           null,
           2,
@@ -246,6 +298,7 @@ export function SettingsView({
       );
       const archives = await listScriptArchives();
       if (archives) setScriptArchives(archives);
+      refreshScriptExecutionLogs();
     } catch (error) {
       setRuntimeOutput(
         JSON.stringify(
@@ -497,6 +550,13 @@ export function SettingsView({
                     aria-label="脚本档案请求头"
                     className="col-span-2 min-h-16 font-mono text-xs"
                   />
+                  <Textarea
+                    value={archiveModules}
+                    onChange={(event) => setArchiveModules(event.target.value)}
+                    placeholder='内存模块 JSON，例如 {"math.js":"export function add(value) { return value + 1; }"}'
+                    aria-label="脚本档案内存模块"
+                    className="col-span-2 min-h-16 font-mono text-xs"
+                  />
                 </div>
                 {scriptArchives.length > 0 && (
                   <div className="flex flex-col divide-y rounded-md border">
@@ -514,6 +574,10 @@ export function SettingsView({
                             {archive.sha256.slice(0, 16)}…
                             {archive.httpHeaderNames.length > 0 &&
                               ` · headers ${archive.httpHeaderNames.join(", ")}`}
+                            {archive.hasCookie &&
+                              " · Cookie 已保存到 Windows 凭据存储"}
+                            {archive.moduleNames.length > 0 &&
+                              ` · modules ${archive.moduleNames.length}`}
                           </p>
                         </div>
                         <Switch
@@ -544,6 +608,17 @@ export function SettingsView({
                           onClick={() =>
                             void handleDeleteScriptArchive(archive)
                           }
+                        >
+                          <Trash2 data-icon="inline-start" aria-hidden="true" />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="icon-sm"
+                          title="永久删除并清理安全凭据"
+                          aria-label={`永久删除 ${archive.name}`}
+                          disabled={archive.enabled}
+                          onClick={() => void handlePurgeScriptArchive(archive)}
                         >
                           <Trash2 data-icon="inline-start" aria-hidden="true" />
                         </Button>
@@ -610,6 +685,13 @@ export function SettingsView({
                     aria-label="脚本运行时请求头"
                     className="min-h-16 font-mono text-xs"
                   />
+                  <Textarea
+                    value={runtimeModules}
+                    onChange={(event) => setRuntimeModules(event.target.value)}
+                    placeholder='内存模块 JSON，例如 {"math.js":"export function add(value) { return value + 1; }"}'
+                    aria-label="脚本运行时内存模块"
+                    className="min-h-16 font-mono text-xs"
+                  />
                   <Button
                     type="button"
                     className="w-fit gap-2"
@@ -620,13 +702,34 @@ export function SettingsView({
                     {isExecutingScript ? "执行中..." : "执行本地脚本"}
                   </Button>
                 </div>
-                <Textarea
-                  value={runtimeOutput}
-                  readOnly
-                  className="min-h-56 font-mono text-xs"
-                  placeholder="执行结果会显示在这里"
-                  aria-label="脚本执行结果"
-                />
+                <div className="flex flex-col gap-3">
+                  <Textarea
+                    value={runtimeOutput}
+                    readOnly
+                    className="min-h-56 font-mono text-xs"
+                    placeholder="执行结果会显示在这里"
+                    aria-label="脚本执行结果"
+                  />
+                  {scriptExecutionLogs.length > 0 && (
+                    <div className="flex flex-col gap-2 rounded-md border p-3">
+                      <p className="text-xs font-medium">最近执行诊断</p>
+                      {scriptExecutionLogs.slice(0, 4).map((log) => (
+                        <div
+                          key={log.id}
+                          className="flex items-center justify-between gap-3 text-[11px] text-muted-foreground"
+                        >
+                          <span className="truncate">
+                            {log.status} · {log.phase} · {log.durationMs}ms
+                          </span>
+                          <span className="shrink-0 font-mono">
+                            {log.httpCallCount} calls
+                            {log.errorKind ? ` · ${log.errorKind}` : ""}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </CardContent>
             </Card>
           </TabsContent>

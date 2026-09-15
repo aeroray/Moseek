@@ -21,7 +21,7 @@
 ## 采用的边界
 
 1. 初始 JS 运行时不暴露文件系统、Shell、DOM、`fetch` 或任意网络 API。
-2. 运行时协议接受 `{ script, entry, input, httpHosts }`，返回 `{ ok, value, error }`；`httpHosts` 缺省或为空时没有网络 API。
+2. 运行时协议接受 `{ script, entry, input, httpHosts, modules }`，返回 `{ ok, value, error }`；`httpHosts` 缺省或为空时没有网络 API，`modules` 只允许显式提交的内存源码。
 3. 远程配置里的 JS、JAR 和 Spider 继续保持 blocked；只有未来显式导入并经过信任/哈希校验的本地脚本才能进入运行时。
 4. 下一步若兼容 CatVod 请求流程，只增加主进程提供的 `http_get` Host API，并复用 Moseek 的 URL、响应大小、重定向和私网策略。
 5. JAR 不进入主进程；若未来支持，只能作为独立、用户明确安装的 sidecar，并做版本、哈希、协议和权限校验。
@@ -30,18 +30,21 @@
 
 1. 增加本地脚本源档案：文件导入、SHA-256、用户启用确认、版本和删除回滚；不让远程配置直接变成可执行脚本。
 2. 定义 CatVod 输出归一化：把 `getCategory`、`getHome`、`getSearch`、`getDetail` 和 `parseIframe` 的返回值映射到 Moseek 的 `CatalogPage`、`VodItem` 和播放解析模型。
-3. 将脚本源纳入能力审计：记录脚本入口、HTTP host-call 数、耗时、超时和失败阶段。
-4. 再考虑 sidecar 进程复用与取消；当前每次执行独立启动，边界清晰但启动成本较高。
+3. 再考虑 sidecar 进程复用与取消；当前每次执行独立启动，边界清晰但启动成本较高。
 
-当前已完成：本地文件导入、SHA-256 去重、入口函数和 HTTP allowlist 保存、默认停用、软删除/撤销、按档案 ID 执行，以及 sidecar/HTTP 超时保护。
+当前已完成：本地文件导入、SHA-256 去重、入口函数和 HTTP allowlist 保存、默认停用、软删除/撤销、按档案 ID 执行、显式内存 ES Module、脱敏执行日志，以及 sidecar/HTTP 超时保护。
 
 绑定链也已接通：配置中心可以把 JS 源绑定到本地档案；首页/搜索、详情和非 HTTP 选集分别调用 `getHome`/`getSearch`、`getDetail` 和 `parseIframe`，统一经过 CatVod 输出归一化。
 
-当前兼容边界：脚本源会独立调用 `getCategory`，`parseIframe` 的 headers 可传给 HLS 播放器，sidecar 会处理常见的命名 `export function`/`export async function`；暂不提供完整 ES Module import、DOM 或默认文件系统能力。
+当前兼容边界：脚本源会独立调用 `getCategory`，`parseIframe` 的 headers 可传给 HLS 播放器，sidecar 会处理命名 export 和显式内存模块 import；仍不提供 DOM、默认文件系统或隐式网络模块能力。
 
 请求头边界：脚本档案可配置 `User-Agent`、`Referer` 和 `Cookie`，值会经过长度/换行校验；列表只展示 header 名称，不回显 Cookie 内容，其他请求头会被拒绝。
 
-Cookie 存储：Windows 桌面版本使用系统 Credential Store 保存 Cookie，SQLite 只保留 `hasCookie` 标记和非敏感请求头；旧档案启动时会尝试迁移明文 Cookie。
+Cookie 存储：Windows 桌面版本使用系统 Credential Store 保存 Cookie，SQLite 只保留 `hasCookie` 标记和非敏感请求头；旧档案启动时会尝试迁移明文 Cookie。软删除保留凭据以支持撤销，永久删除要求先停用并清理凭据。
+
+ES Module 边界：脚本可通过显式 `modules` JSON 映射导入内存模块，支持相对模块名；未提供的模块会被拒绝，sidecar 不启用文件、网络或原生模块 loader。模块数量、单模块大小和总大小均受限。
+
+诊断日志：每次脚本执行返回并持久化阶段、耗时、host-call 数量、host-only HTTP 明细、错误类别和超时/凭据读取标记；完整 URL、查询参数、Cookie 和响应正文不会进入日志。
 
 ## 暂不采用
 
