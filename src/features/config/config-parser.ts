@@ -438,6 +438,7 @@ function classifySource(
     key,
     name,
     sourceType: "cms",
+    scriptArchiveId: normalizeOptionalNumber(site.scriptArchiveId),
     sourceDialect,
     siteType,
     siteProtocol,
@@ -508,6 +509,12 @@ function normalizeSiteType(value: RawSite["type"]): number | null {
   if (value === undefined) return null;
   const parsed = typeof value === "string" ? Number(value.trim()) : value;
   return Number.isInteger(parsed) ? parsed : null;
+}
+
+function normalizeOptionalNumber(value: unknown): number | null {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = typeof value === "string" ? Number(value.trim()) : value;
+  return typeof parsed === "number" && Number.isInteger(parsed) ? parsed : null;
 }
 
 function getSiteProtocol(

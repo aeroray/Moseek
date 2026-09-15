@@ -110,7 +110,9 @@ import {
   deleteConfigDocument,
   exportConfig,
   fetchConfigUrl,
+  listScriptArchives,
   saveConfigDocument,
+  setSourceScriptArchive,
   testSource,
   updateSourceTest,
   type ConfigDocumentSummary,
@@ -120,6 +122,7 @@ import { useAppStore } from "@/stores/app-store";
 import type {
   CapabilityStatus,
   SourceOperationStatus,
+  ScriptArchiveSummary,
   SourceRecord,
   SourceTestStatus,
 } from "@/types/moseek";
@@ -165,6 +168,9 @@ export function ConfigCenter() {
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isFetchingRemote, setIsFetchingRemote] = useState(false);
   const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set());
+  const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
+    [],
+  );
   const [deleteCandidate, setDeleteCandidate] =
     useState<ConfigDocumentSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -200,6 +206,12 @@ export function ConfigCenter() {
     setImportText(rawConfig);
     setParseResult(rawConfig ? parseConfigText(rawConfig) : null);
   }, [activeConfigId, rawConfig]);
+
+  useEffect(() => {
+    void listScriptArchives()
+      .then((archives) => setScriptArchives(archives ?? []))
+      .catch(() => setScriptArchives([]));
+  }, []);
 
   const filteredSources = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -288,6 +300,42 @@ export function ConfigCenter() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "源状态保存失败";
       setParseState({ type: "error", message });
+    }
+  };
+
+  const handleBindScriptArchive = async (
+    source: SourceRecord,
+    value: string,
+  ) => {
+    if (activeConfigId === null) {
+      setParseState({
+        type: "error",
+        message: "请先保存当前配置，再绑定脚本档案。",
+      });
+      return;
+    }
+    const archiveId = value === "none" ? null : Number(value);
+    if (archiveId !== null && !Number.isInteger(archiveId)) return;
+    try {
+      const document = await setSourceScriptArchive(
+        activeConfigId,
+        source.key,
+        archiveId,
+      );
+      if (!document) throw new Error("浏览器预览不会保存脚本档案绑定。");
+      setConfigDocument(document);
+      setParseState({
+        type: "success",
+        message:
+          archiveId === null
+            ? `已解除「${source.name}」的本地脚本绑定。`
+            : `已为「${source.name}」绑定本地脚本档案。请启用档案并重新审计源。`,
+      });
+    } catch (error) {
+      setParseState({
+        type: "error",
+        message: error instanceof Error ? error.message : "脚本档案绑定失败",
+      });
     }
   };
 
@@ -1494,6 +1542,43 @@ export function ConfigCenter() {
                     )}
                   </DetailSection>
                   <AdapterDetail source={inspectedSource} />
+                  {inspectedSource.sourceType === "cms" &&
+                    (inspectedSource.siteProtocol === "js-extension" ||
+                      (inspectedSource.scriptArchiveId !== null &&
+                        inspectedSource.scriptArchiveId !== undefined)) && (
+                      <DetailSection title="本地脚本绑定">
+                        <div className="rounded-md border bg-muted/20 p-3 text-xs leading-5 text-muted-foreground">
+                          绑定后只会调用本地档案；远程 JS、JAR 和 Spider
+                          仍不会自动执行。
+                        </div>
+                        <Select
+                          value={String(
+                            inspectedSource.scriptArchiveId ?? "none",
+                          )}
+                          onValueChange={(value) =>
+                            void handleBindScriptArchive(inspectedSource, value)
+                          }
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="选择本地脚本档案" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="none">不绑定</SelectItem>
+                              {scriptArchives.map((archive) => (
+                                <SelectItem
+                                  key={archive.id}
+                                  value={String(archive.id)}
+                                >
+                                  {archive.name}
+                                  {archive.enabled ? " · 已启用" : " · 已停用"}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      </DetailSection>
+                    )}
                   {inspectedSource.testOperations &&
                     inspectedSource.testOperations.length > 0 && (
                       <DetailSection title="能力审计">

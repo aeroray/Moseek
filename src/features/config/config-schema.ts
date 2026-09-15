@@ -28,6 +28,7 @@ export const RawSiteSchema = z
     id: optionalText,
     key: optionalText,
     name: optionalText,
+    scriptArchiveId: z.union([z.number().int(), z.string()]).optional(),
     type: z.union([z.number().int(), z.string()]).optional(),
     api: optionalText,
     logo: optionalText,

@@ -35,6 +35,14 @@
 
 当前已完成：本地文件导入、SHA-256 去重、入口函数和 HTTP allowlist 保存、默认停用、软删除/撤销、按档案 ID 执行，以及 sidecar/HTTP 超时保护。
 
+绑定链也已接通：配置中心可以把 JS 源绑定到本地档案；首页/搜索、详情和非 HTTP 选集分别调用 `getHome`/`getSearch`、`getDetail` 和 `parseIframe`，统一经过 CatVod 输出归一化。
+
+当前兼容边界：脚本源会独立调用 `getCategory`，`parseIframe` 的 headers 可传给 HLS 播放器，sidecar 会处理常见的命名 `export function`/`export async function`；暂不提供完整 ES Module import、DOM 或默认文件系统能力。
+
+请求头边界：脚本档案可配置 `User-Agent`、`Referer` 和 `Cookie`，值会经过长度/换行校验；列表只展示 header 名称，不回显 Cookie 内容，其他请求头会被拒绝。
+
+Cookie 存储：Windows 桌面版本使用系统 Credential Store 保存 Cookie，SQLite 只保留 `hasCookie` 标记和非敏感请求头；旧档案启动时会尝试迁移明文 Cookie。
+
 ## 暂不采用
 
 - 不采用 Deno Core 作为新基础；其独立仓库已归档并合并回 Deno。

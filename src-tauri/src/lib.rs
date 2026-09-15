@@ -26,6 +26,8 @@ pub struct SourceRecord {
     pub name: String,
     pub source_type: String,
     #[serde(default)]
+    pub script_archive_id: Option<i64>,
+    #[serde(default)]
     pub source_dialect: Option<String>,
     pub site_type: Option<i64>,
     pub site_protocol: Option<String>,
@@ -185,6 +187,7 @@ fn load_legacy_sources(
                 key: row.get(0)?,
                 name: row.get(1)?,
                 source_type: row.get(2)?,
+                script_archive_id: None,
                 source_dialect: None,
                 site_type: None,
                 site_protocol: None,
@@ -322,6 +325,33 @@ fn update_normalized_source_enabled(
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
 }
 
+fn update_normalized_source_script_archive(
+    normalized_config: &str,
+    source_key: &str,
+    archive_id: Option<i64>,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
+        return normalized_config.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for item in items {
+            if item.get("key").and_then(Value::as_str) != Some(source_key) {
+                continue;
+            }
+            if let Some(object) = item.as_object_mut() {
+                let value = archive_id
+                    .map(|id| Value::Number(id.into()))
+                    .unwrap_or(Value::Null);
+                object.insert("scriptArchiveId".to_string(), value);
+            }
+        }
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
+}
+
 fn update_normalized_source_test(
     normalized_config: &str,
     source_key: &str,
@@ -411,6 +441,53 @@ fn set_source_enabled_in_connection(
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     load_config_document(connection, document_id)?.ok_or_else(|| "配置更新后无法读取".to_string())
+}
+
+fn set_source_script_archive_in_connection(
+    connection: &mut Connection,
+    document_id: i64,
+    source_key: &str,
+    archive_id: Option<i64>,
+) -> Result<ConfigDocument, String> {
+    if let Some(archive_id) = archive_id {
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM script_archives WHERE id = ?1 AND deleted_at IS NULL",
+                params![archive_id],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if exists.is_none() {
+            return Err("脚本档案不存在、已删除或不可用".to_string());
+        }
+    }
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+    let mut sources = document.sources.clone();
+    let source = sources
+        .iter_mut()
+        .find(|source| source.key == source_key)
+        .ok_or_else(|| "配置中找不到该资源源".to_string())?;
+    source.script_archive_id = archive_id;
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config = update_normalized_source_script_archive(
+        &document.normalized_config,
+        source_key,
+        archive_id,
+    );
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
+            params![sources_json, normalized_config, document_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?
+        .ok_or_else(|| "绑定保存后无法读取配置".to_string())
 }
 
 fn set_source_test_in_connection(
@@ -640,6 +717,17 @@ fn set_source_enabled(
 }
 
 #[tauri::command]
+fn set_source_script_archive(
+    document_id: i64,
+    source_key: String,
+    archive_id: Option<i64>,
+    state: State<'_, AppDatabase>,
+) -> Result<ConfigDocument, String> {
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    set_source_script_archive_in_connection(&mut connection, document_id, &source_key, archive_id)
+}
+
+#[tauri::command]
 fn update_source_test(
     document_id: i64,
     source_key: String,
@@ -783,6 +871,8 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
                              script TEXT NOT NULL,
                              entry TEXT NOT NULL DEFAULT 'main',
                              http_hosts_json TEXT NOT NULL DEFAULT '[]',
+                               http_headers_json TEXT NOT NULL DEFAULT '{}',
+                               cookie_present INTEGER NOT NULL DEFAULT 0,
                              enabled INTEGER NOT NULL DEFAULT 0,
                              imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                              last_used_at TEXT,
@@ -793,6 +883,9 @@ fn initialize_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     ensure_config_sources_column(&connection)?;
     ensure_sources_epg_column(&connection)?;
     ensure_script_archives_deleted_at_column(&connection)?;
+    ensure_script_archives_http_headers_column(&connection)?;
+    ensure_script_archives_cookie_column(&connection)?;
+    script_runtime::migrate_script_archive_cookies(&connection)?;
     Ok(connection)
 }
 
@@ -853,6 +946,48 @@ fn ensure_script_archives_deleted_at_column(connection: &Connection) -> Result<(
     Ok(())
 }
 
+fn ensure_script_archives_http_headers_column(connection: &Connection) -> Result<(), String> {
+    let has_http_headers = connection
+        .prepare("PRAGMA table_info(script_archives)")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|column| column == "http_headers_json");
+    if !has_http_headers {
+        connection
+            .execute(
+                "ALTER TABLE script_archives ADD COLUMN http_headers_json TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn ensure_script_archives_cookie_column(connection: &Connection) -> Result<(), String> {
+    let has_cookie = connection
+        .prepare("PRAGMA table_info(script_archives)")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .any(|column| column == "cookie_present");
+    if !has_cookie {
+        connection
+            .execute(
+                "ALTER TABLE script_archives ADD COLUMN cookie_present INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -872,6 +1007,7 @@ pub fn run() {
             activate_config_document,
             delete_config_document,
             set_source_enabled,
+            set_source_script_archive,
             update_source_test,
             export_config,
             fetch_config_url,
@@ -884,6 +1020,7 @@ pub fn run() {
             resolver::resolve_playback,
             resolver::sniff_with_companion,
             script_runtime::execute_script,
+            script_runtime::test_script_source,
             script_runtime::list_script_archives,
             script_runtime::save_script_archive,
             script_runtime::set_script_archive_enabled,
@@ -924,6 +1061,7 @@ mod tests {
             key: key.to_string(),
             name: "同名源".to_string(),
             source_type: "cms".to_string(),
+            script_archive_id: None,
             source_dialect: None,
             site_type: Some(1),
             site_protocol: Some("json-http".to_string()),

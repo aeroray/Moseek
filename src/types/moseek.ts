@@ -48,6 +48,8 @@ export interface ScriptArchiveSummary {
   sha256: string;
   entry: string;
   httpHosts: string[];
+  httpHeaderNames: string[];
+  hasCookie: boolean;
   enabled: boolean;
   importedAt: string;
   lastUsedAt?: string | null;
@@ -167,6 +169,7 @@ export interface SourceRecord {
   key: string;
   name: string;
   sourceType: SourceType;
+  scriptArchiveId?: number | null;
   sourceDialect?: SourceDialect | null;
   siteType?: number | null;
   siteProtocol?: SiteProtocol | null;

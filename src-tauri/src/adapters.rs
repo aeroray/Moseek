@@ -75,6 +75,7 @@ mod tests {
             key: "demo".to_string(),
             name: "Demo".to_string(),
             source_type: "cms".to_string(),
+            script_archive_id: None,
             source_dialect: None,
             site_type,
             site_protocol: site_protocol.map(ToOwned::to_owned),

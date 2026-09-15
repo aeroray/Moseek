@@ -13,6 +13,7 @@ import {
 
 import { CapabilityBadge } from "@/components/capability-badge";
 import { parseParseServices } from "@/features/config/config-parser";
+import { normalizeCatVodResult } from "@/features/script/catvod-normalizer";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppStore } from "@/stores/app-store";
 import {
+  executeScriptArchive,
   isTauriRuntime,
   openExternalUrl,
   resolvePlayback,
@@ -108,13 +110,41 @@ export function PlayerView({
     }
     setResolvedPlayback(null);
     setStatus("loading");
-    void resolvePlayback(
-      activeEpisode.url,
-      parseParseServices(normalizedConfig),
-    )
+    const resolveEpisode = async () => {
+      let playbackUrl = activeEpisode.url;
+      let playbackHeaders: Record<string, string> = {};
+      if (
+        source.scriptArchiveId !== null &&
+        source.scriptArchiveId !== undefined &&
+        !/^https?:\/\//i.test(playbackUrl)
+      ) {
+        const scriptResult = await executeScriptArchive(
+          source.scriptArchiveId,
+          { url: playbackUrl, id: activeEpisode.id },
+          "parseIframe",
+        );
+        if (!scriptResult) throw new Error("脚本档案没有返回 parseIframe 结果");
+        const normalized = normalizeCatVodResult(
+          "parseIframe",
+          scriptResult.value,
+          { sourceKey: source.key, sourceName: source.name },
+        );
+        if (normalized.kind !== "playback" || !normalized.value) {
+          throw new Error("parseIframe 返回值无法转换为播放地址");
+        }
+        playbackUrl = normalized.value.url;
+        playbackHeaders = normalized.value.headers;
+      }
+      const resolution = await resolvePlayback(
+        playbackUrl,
+        parseParseServices(normalizedConfig),
+      );
+      if (!resolution) throw new Error("桌面运行时未返回播放解析结果");
+      return { ...resolution, headers: playbackHeaders };
+    };
+    void resolveEpisode()
       .then((resolution) => {
-        if (cancelled) return;
-        setResolvedPlayback(resolution);
+        if (!cancelled) setResolvedPlayback(resolution);
       })
       .catch((error) => {
         if (cancelled) return;
@@ -126,7 +156,7 @@ export function PlayerView({
     return () => {
       cancelled = true;
     };
-  }, [activeEpisode.url, normalizedConfig]);
+  }, [activeEpisode.url, normalizedConfig, source.key, source.scriptArchiveId]);
 
   const selectEpisode = (line: VodPlayLine, episode: VodEpisode) => {
     setActiveLineId(line.id);
@@ -149,7 +179,7 @@ export function PlayerView({
   const handleExternalPlayer = async () => {
     try {
       await openExternalUrl(
-        activeEpisode.url,
+        resolvedPlayback?.url ?? activeEpisode.url,
         parseParseServices(normalizedConfig),
       );
       setDiagnostic("已按用户操作打开外部播放地址。");
@@ -273,6 +303,7 @@ export function PlayerView({
                 title={`${item.name} · ${activeEpisode.name}`}
                 url={resolvedPlayback?.url ?? activeEpisode.url}
                 kind={resolvedPlayback?.mediaKind ?? mediaKind}
+                headers={resolvedPlayback?.headers}
                 poster={item.poster}
                 resumeAt={resumeAt}
                 onProgress={(seconds) =>

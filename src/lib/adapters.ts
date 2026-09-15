@@ -16,6 +16,7 @@ export type AdapterId =
   | "http-extension"
   | "http-parser"
   | "js-extension"
+  | "local-script"
   | "html-http"
   | "spider-runtime"
   | "remote-jar"
@@ -66,6 +67,13 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     execution: "blocked",
     operations: ["分类", "首页", "搜索", "详情", "iframe 解析"],
     reason: "识别小猫/CatVod JS 源契约，但当前没有启用脚本沙箱。",
+  },
+  "local-script": {
+    label: "本地脚本适配器",
+    execution: "partial",
+    operations: ["分类", "首页", "搜索", "详情", "iframe 解析"],
+    reason:
+      "使用用户明确绑定的本地脚本档案；脚本执行受 sidecar、哈希和 HTTP allowlist 限制。",
   },
   "html-http": {
     label: "声明式 HTML 适配器",
@@ -135,6 +143,7 @@ export const adapterRegistry: AdapterProfile[] = [
   createProfile("http-extension", "cms"),
   createProfile("http-parser", "parser"),
   createProfile("js-extension", "cms"),
+  createProfile("local-script", "cms"),
   createProfile("html-http", "cms"),
   createProfile("spider-runtime", "cms"),
   createProfile("remote-jar", "cms"),
@@ -150,7 +159,13 @@ export const adapterRegistry: AdapterProfile[] = [
 export function getAdapterProfile(
   source: Pick<
     SourceRecord,
-    "key" | "api" | "jar" | "sourceType" | "siteProtocol" | "capability"
+    | "key"
+    | "api"
+    | "jar"
+    | "sourceType"
+    | "siteProtocol"
+    | "capability"
+    | "scriptArchiveId"
   >,
 ): AdapterProfile {
   const key = source.key.toLowerCase();
@@ -159,6 +174,11 @@ export function getAdapterProfile(
 
   if (source.sourceType === "live") {
     id = "builtin-live";
+  } else if (
+    source.scriptArchiveId !== null &&
+    source.scriptArchiveId !== undefined
+  ) {
+    id = "local-script";
   } else if (source.siteProtocol === "http-extension") {
     id = "http-extension";
   } else if (source.siteProtocol === "js-extension") {
@@ -237,10 +257,14 @@ export function adapterMatchesCapability(
 }
 
 export function isTestableCmsSource(source: SourceRecord) {
-  if (source.sourceType !== "cms" || source.capability !== "supported") {
+  if (source.sourceType !== "cms" || source.capability === "invalid") {
     return false;
   }
-  return getAdapterProfile(source).execution === "enabled";
+  const profile = getAdapterProfile(source);
+  if (source.scriptArchiveId !== null && source.scriptArchiveId !== undefined) {
+    return profile.id === "local-script";
+  }
+  return source.capability === "supported" && profile.execution === "enabled";
 }
 
 export function isTestableLiveSource(source: SourceRecord) {

@@ -18,6 +18,7 @@ interface MediaPlayerProps {
   title: string;
   url: string;
   kind: MediaKind;
+  headers?: Record<string, string>;
   poster?: string;
   resumeAt?: number;
   onProgress?: (seconds: number) => void;
@@ -28,6 +29,7 @@ export function MediaPlayer({
   title,
   url,
   kind,
+  headers,
   poster,
   resumeAt = 0,
   onProgress,
@@ -102,7 +104,15 @@ export function MediaPlayer({
     video.poster = poster ?? "";
     const isHls = kind === "hls" || url.toLowerCase().includes(".m3u8");
     if (isHls && Hls.isSupported()) {
-      const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        xhrSetup: (xhr) => {
+          Object.entries(headers ?? {}).forEach(([name, value]) => {
+            xhr.setRequestHeader(name, value);
+          });
+        },
+      });
       hlsRef.current = hls;
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (data.fatal) {
@@ -127,7 +137,7 @@ export function MediaPlayer({
       video.removeAttribute("src");
       video.load();
     };
-  }, [kind, poster, title, url]);
+  }, [headers, kind, poster, title, url]);
 
   return (
     <div

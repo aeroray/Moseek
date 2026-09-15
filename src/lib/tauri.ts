@@ -44,6 +44,7 @@ export interface PlaybackResolution {
   mediaKind: "hls" | "mp4" | "unknown";
   adapterId: string;
   parseServiceId?: string | null;
+  headers?: Record<string, string>;
 }
 
 export interface ScriptExecutionRequest {
@@ -51,6 +52,7 @@ export interface ScriptExecutionRequest {
   entry?: string;
   input?: unknown;
   httpHosts?: string[];
+  httpHeaders?: Record<string, string>;
 }
 
 export interface ScriptExecutionResult {
@@ -65,6 +67,7 @@ export interface SaveScriptArchiveInput {
   script: string;
   entry?: string;
   httpHosts?: string[];
+  httpHeaders?: Record<string, string>;
 }
 
 export const DEFAULT_SNIFFER_COMPANION_URL = "http://127.0.0.1:57573/sniffer";
@@ -113,6 +116,18 @@ export async function setSourceEnabled(
   });
 }
 
+export async function setSourceScriptArchive(
+  documentId: number,
+  sourceKey: string,
+  archiveId: number | null,
+) {
+  return invokeCommand<StoredConfigDocument>("set_source_script_archive", {
+    documentId,
+    sourceKey,
+    archiveId,
+  });
+}
+
 export async function updateSourceTest(
   documentId: number,
   sourceKey: string,
@@ -153,7 +168,11 @@ export async function browseSource(
 
 export async function testSource(source: SourceRecord) {
   const command =
-    source.sourceType === "live" ? "test_live_source" : "test_source";
+    source.sourceType === "live"
+      ? "test_live_source"
+      : source.scriptArchiveId !== null && source.scriptArchiveId !== undefined
+        ? "test_script_source"
+        : "test_source";
   return invokeCommand<SourceTestResult>(command, {
     source,
   });
@@ -226,10 +245,15 @@ export async function restoreScriptArchive(id: number) {
   });
 }
 
-export async function executeScriptArchive(id: number, input: unknown) {
+export async function executeScriptArchive(
+  id: number,
+  input: unknown,
+  entry?: string,
+) {
   return invokeCommand<ScriptExecutionResult>("execute_script_archive", {
     archiveId: id,
     input,
+    entry: entry ?? null,
   });
 }
 

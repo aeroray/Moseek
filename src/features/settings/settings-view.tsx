@@ -61,6 +61,7 @@ export function SettingsView({
   );
   const [runtimeInput, setRuntimeInput] = useState('{"title":"demo"}');
   const [runtimeHosts, setRuntimeHosts] = useState("");
+  const [runtimeHeaders, setRuntimeHeaders] = useState("");
   const [runtimeOutput, setRuntimeOutput] = useState("");
   const [isExecutingScript, setIsExecutingScript] = useState(false);
   const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
@@ -71,6 +72,7 @@ export function SettingsView({
   const [deletedArchiveId, setDeletedArchiveId] = useState<number | null>(null);
   const [archiveEntry, setArchiveEntry] = useState("main");
   const [archiveHttpHosts, setArchiveHttpHosts] = useState("");
+  const [archiveHeaders, setArchiveHeaders] = useState("");
   const scriptFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -91,6 +93,9 @@ export function SettingsView({
     setIsExecutingScript(true);
     try {
       const input = JSON.parse(runtimeInput) as unknown;
+      const httpHeaders = runtimeHeaders.trim()
+        ? (JSON.parse(runtimeHeaders) as Record<string, string>)
+        : {};
       const result = await executeScript({
         script: runtimeScript,
         entry: "main",
@@ -99,6 +104,7 @@ export function SettingsView({
           .split(",")
           .map((host) => host.trim())
           .filter(Boolean),
+        httpHeaders,
       });
       if (!result) {
         throw new Error(
@@ -150,6 +156,9 @@ export function SettingsView({
           .split(",")
           .map((host) => host.trim())
           .filter(Boolean),
+        httpHeaders: archiveHeaders.trim()
+          ? (JSON.parse(archiveHeaders) as Record<string, string>)
+          : {},
       });
       if (!saved)
         throw new Error(
@@ -434,8 +443,9 @@ export function SettingsView({
                   本地脚本档案
                 </CardTitle>
                 <CardDescription>
-                  导入后默认停用；档案按 SHA-256
-                  去重，删除只影响本地档案，不会修改原始配置。
+                  导入后默认停用；档案按 SHA-256 去重。Cookie 会保存到 Windows
+                  凭据存储，不会写入
+                  SQLite；删除只影响本地档案，不会修改原始配置。
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-3">
@@ -480,6 +490,13 @@ export function SettingsView({
                     aria-label="脚本档案 HTTP allowlist"
                     className="font-mono text-xs"
                   />
+                  <Textarea
+                    value={archiveHeaders}
+                    onChange={(event) => setArchiveHeaders(event.target.value)}
+                    placeholder='请求头 JSON，例如 {"Referer":"https://example.com","User-Agent":"Moseek"}'
+                    aria-label="脚本档案请求头"
+                    className="col-span-2 min-h-16 font-mono text-xs"
+                  />
                 </div>
                 {scriptArchives.length > 0 && (
                   <div className="flex flex-col divide-y rounded-md border">
@@ -495,6 +512,8 @@ export function SettingsView({
                           <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">
                             {archive.fileName} · sha256{" "}
                             {archive.sha256.slice(0, 16)}…
+                            {archive.httpHeaderNames.length > 0 &&
+                              ` · headers ${archive.httpHeaderNames.join(", ")}`}
                           </p>
                         </div>
                         <Switch
@@ -583,6 +602,13 @@ export function SettingsView({
                     placeholder="允许的 HTTP 主机，逗号分隔；留空表示禁止网络"
                     aria-label="脚本 HTTP 主机 allowlist"
                     className="font-mono text-xs"
+                  />
+                  <Textarea
+                    value={runtimeHeaders}
+                    onChange={(event) => setRuntimeHeaders(event.target.value)}
+                    placeholder='请求头 JSON，例如 {"Referer":"https://example.com"}'
+                    aria-label="脚本运行时请求头"
+                    className="min-h-16 font-mono text-xs"
                   />
                   <Button
                     type="button"

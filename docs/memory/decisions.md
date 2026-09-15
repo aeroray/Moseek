@@ -23,3 +23,7 @@
 - Phase 3 now packages the QuickJS runtime as a Tauri sidecar; scripts can request only explicitly allowlisted public `http_get` calls through the main process policy, while Settings exposes a manual local-script lab and imported remote scripts remain blocked.
 - The sidecar runtime has a 20-second total execution deadline and a 16-second per-request host-call deadline; nested Cargo targets are ignored while standalone Cargo lockfiles remain trackable.
 - Local script archives are stored separately from imported config documents, deduplicated by SHA-256, disabled on import, and soft-deleted with an explicit undo path; archive execution requires an enabled archive ID.
+- JS/CatVod sources only become executable when explicitly bound to a local `scriptArchiveId`; bound sources route getHome/getSearch/getDetail/parseIframe through the sidecar and CatVod normalizer, while unbound remote JS remains blocked.
+- CatVod bindings call getCategory independently, preserve parseIframe headers for HLS playback, and normalize named export functions; full module imports and DOM remain out of scope for the current sidecar.
+- Script archives may carry only validated User-Agent, Referer, and Cookie headers; archive listings expose names only, and host HTTP calls still pass through the shared network policy.
+- Cookie values are stored in the Windows native credential store through `keyring`; SQLite keeps only non-sensitive headers and a `hasCookie` marker, with startup migration for legacy plaintext Cookie fields.

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::{self, BufRead, BufReader, BufWriter, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -28,6 +29,9 @@ struct RuntimeRequest {
     input: Value,
     #[serde(default)]
     http_hosts: Vec<String>,
+    #[serde(default)]
+    #[serde(rename = "httpHeaders")]
+    _http_headers: HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,7 +235,8 @@ fn execute_request(
                 .set("http_get", http_get)
                 .map_err(|error| format!("注入 http_get 宿主 API 失败：{error}"))?;
         }
-        ctx.eval::<(), _>(request.script.as_str())
+        let prepared_script = prepare_script(&request.script);
+        ctx.eval::<(), _>(prepared_script.as_str())
             .map_err(|error| format!("脚本执行失败：{error}"))?;
         let invocation = format!(
             "(function() {{ const result = {entry}(JSON.parse(__moseek_input_json)); return JSON.stringify(result === undefined ? null : result); }})()",
@@ -268,6 +273,16 @@ fn is_allowed_http_url(url: &str, allowed_hosts: &[String]) -> bool {
         .any(|allowed| host.eq_ignore_ascii_case(allowed.trim_end_matches('.')))
 }
 
+fn prepare_script(script: &str) -> String {
+    script
+        .replace("export default async function", "async function")
+        .replace("export default function", "function")
+        .replace("export default class", "class")
+        .replace("export async function", "async function")
+        .replace("export function", "function")
+        .replace("export class", "class")
+}
+
 fn is_valid_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -293,9 +308,10 @@ fn error_response(error: &str) -> RuntimeResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{execute_request, is_allowed_http_url, RuntimeRequest};
+    use super::{execute_request, is_allowed_http_url, prepare_script, RuntimeRequest};
     use serde_json::json;
     use serde_json::Value;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -307,6 +323,7 @@ mod tests {
                 entry: "main".to_string(),
                 input: json!({"title": "demo"}),
                 http_hosts: Vec::new(),
+                _http_headers: HashMap::new(),
             },
             Duration::from_millis(500),
             Arc::new(Mutex::new(super::Transport::new())),
@@ -324,6 +341,7 @@ mod tests {
                 entry: "main".to_string(),
                 input: Value::Null,
                 http_hosts: Vec::new(),
+                _http_headers: HashMap::new(),
             },
             Duration::from_millis(20),
             Arc::new(Mutex::new(super::Transport::new())),
@@ -341,5 +359,27 @@ mod tests {
             "https://other.example/api",
             &["example.com".to_string()]
         ));
+    }
+
+    #[test]
+    fn prepares_named_module_exports_for_entry_calls() {
+        let value = execute_request(
+            RuntimeRequest {
+                script: "export function getHome(input) { return { title: input.title }; }"
+                    .to_string(),
+                entry: "getHome".to_string(),
+                input: json!({"title": "demo"}),
+                http_hosts: Vec::new(),
+                _http_headers: HashMap::new(),
+            },
+            Duration::from_millis(500),
+            Arc::new(Mutex::new(super::Transport::new())),
+        )
+        .unwrap();
+        assert_eq!(value["title"], "demo");
+        assert_eq!(
+            prepare_script("export async function getHome() {}"),
+            "async function getHome() {}"
+        );
     }
 }
