@@ -6,7 +6,6 @@ import {
   Library,
   Radio,
   Settings2,
-  Sparkles,
   type LucideIcon,
 } from "lucide-react";
 
@@ -58,7 +57,7 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
               type="button"
               onClick={() => onNavigate("browse")}
               className="group relative flex size-9 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary transition-all duration-200 hover:scale-105 hover:border-primary hover:bg-primary/20 hover:shadow-[0_0_12px_rgba(229,169,60,0.3)] active:scale-95"
-              title="拾影 · 万千影画，一拾即得"
+              title="拾影 · 万千影视，一拾即得"
             >
               <span className="font-display text-sm font-bold tracking-tight">拾</span>
               <span className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-primary animate-pulse" />

@@ -4,8 +4,6 @@ import {
   ChevronRight,
   CircleAlert,
   Heart,
-  Radio,
-  RotateCw,
   Search,
   Tv,
 } from "lucide-react";
@@ -22,7 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { loadEpg, loadLiveCatalog } from "@/lib/live-adapter";
+import { loadEpg, loadLiveCatalog, resolveEpgUrl } from "@/lib/live-adapter";
 import {
   isTauriRuntime,
   resolvePlayback,
@@ -39,7 +37,6 @@ const maxAutomaticStreamAttempts = 3;
 
 export function LiveView() {
   const sources = useAppStore((state) => state.sources);
-  const setActiveView = useAppStore((state) => state.setActiveView);
   const liveFavorites = useAppStore((state) => state.liveFavorites);
   const toggleLiveFavorite = useAppStore((state) => state.toggleLiveFavorite);
   const liveSources = useMemo(
@@ -138,9 +135,16 @@ export function LiveView() {
   const selectedIndex = channels.findIndex(
     (channel) => channel.id === selectedChannel?.id,
   );
-  const programs = epgPrograms.filter(
-    (program) =>
-      program.channelId === (selectedChannel?.epgId ?? selectedChannel?.id),
+  // Providers identify the channel differently: an XMLTV guide keys on `tvg-id`, while a
+  // per-channel JSON template (112114) only echoes back the name it was asked about. Match
+  // on whichever identifiers the channel actually carries rather than assuming one.
+  const epgKeys = selectedChannel
+    ? [selectedChannel.epgId, selectedChannel.name, selectedChannel.id].filter(
+        (key): key is string => Boolean(key),
+      )
+    : [];
+  const programs = epgPrograms.filter((program) =>
+    epgKeys.includes(program.channelId),
   );
   const streamUrls = selectedChannel
     ? selectedChannel.streamUrls.length > 0
@@ -208,24 +212,35 @@ export function LiveView() {
     };
   }, [selectedChannel, selectedStreamUrl]);
 
+  // Templates resolve per channel, but a fixed XMLTV guide resolves to the same string for
+  // every channel. Keying the fetch on the resolved URL means the guide is fetched once for
+  // a fixed URL and re-fetched per channel only when the template actually varies.
+  const epgUrl = useMemo(
+    () =>
+      liveSource?.epg && selectedChannel
+        ? resolveEpgUrl(liveSource.epg, selectedChannel)
+        : "",
+    [liveSource?.epg, selectedChannel],
+  );
+
   useEffect(() => {
     let cancelled = false;
-    if (!liveSource || !selectedChannel) {
+    if (!epgUrl) {
       setEpgPrograms([]);
       setEpgError(null);
       return () => {
         cancelled = true;
       };
     }
-    void loadEpg(liveSource, selectedChannel).then((result) => {
+    void loadEpg(epgUrl).then((result) => {
       if (cancelled) return;
-      setEpgPrograms(result.data);
+      setEpgPrograms(result.data.programs);
       setEpgError(result.error);
     });
     return () => {
       cancelled = true;
     };
-  }, [liveSource, selectedChannel]);
+  }, [epgUrl]);
 
   const isFavorite = selectedChannel
     ? liveFavorites.includes(selectedChannel.id)
@@ -291,30 +306,68 @@ export function LiveView() {
           />
         </div>
 
-        {/* Groups Horizontal Scroll in Topbar */}
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
-          {groups.map((group) => (
-            <button
-              key={group.id}
-              type="button"
-              onClick={() => {
-                setGroupId(group.id);
-                const firstInGroup = channels.find((c) => c.groupId === group.id);
-                if (firstInGroup) selectChannel(firstInGroup);
-              }}
-              className={cn(
-                "shrink-0 rounded px-2.5 py-1 text-xs font-medium transition-colors",
-                group.id === groupId
-                  ? "bg-primary text-primary-foreground font-semibold"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              {group.name}
-            </button>
-          ))}
+        {/* Group filter chips. The group name comes from the playlist's own
+            `group-title` attribute, so a source that ships a single group renders a single
+            chip whose name is unfamiliar and whose click is a no-op (it re-selects the group
+            already shown). Label it so it reads as a filter rather than an action, and
+            expose selection via aria-pressed instead of colour alone. */}
+        <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto py-1">
+          {groups.length > 0 && (
+            <span className="shrink-0 text-xs text-muted-foreground/70">
+              分组
+            </span>
+          )}
+          {groups.map((group) => {
+            const isActive = group.id === groupId;
+            return (
+              <button
+                key={group.id}
+                type="button"
+                aria-pressed={isActive}
+                title={`只看「${group.name}」分组的频道`}
+                onClick={() => {
+                  setGroupId(group.id);
+                  const firstInGroup = channels.find((c) => c.groupId === group.id);
+                  if (firstInGroup) selectChannel(firstInGroup);
+                }}
+                className={cn(
+                  "shrink-0 rounded px-2.5 py-1 text-xs font-medium transition-colors",
+                  isActive
+                    ? "bg-primary text-primary-foreground font-semibold"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                {group.name}
+              </button>
+            );
+          })}
         </div>
 
         <div className="ml-auto flex items-center gap-2 shrink-0">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="text-muted-foreground"
+            aria-label="上一个频道"
+            disabled={selectedIndex <= 0}
+            onClick={() => stepChannel(-1)}
+          >
+            <ChevronLeft aria-hidden="true" />
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            className="text-muted-foreground"
+            aria-label="下一个频道"
+            disabled={
+              selectedIndex < 0 || selectedIndex >= channels.length - 1
+            }
+            onClick={() => stepChannel(1)}
+          >
+            <ChevronRight aria-hidden="true" />
+          </Button>
           <span className="text-xs text-muted-foreground hidden sm:inline">
             {channels.length} 个频道
           </span>
@@ -324,7 +377,7 @@ export function LiveView() {
               variant={isFavorite ? "secondary" : "outline"}
               size="sm"
               className="gap-1.5"
-              onClick={() => toggleLiveFavorite(selectedChannel.id)}
+              onClick={() => toggleLiveFavorite(selectedChannel)}
             >
               <Heart
                 className={cn("size-3.5", isFavorite && "fill-primary text-primary")}
@@ -337,11 +390,35 @@ export function LiveView() {
         </div>
       </header>
 
+      {/* Live catalog / EPG request failure. Kept explicit so an unreachable source is
+          never silently rendered as "no channels". */}
+      {(loadError || epgError) && (
+        <div className="shrink-0 px-3 pt-2">
+          <Alert variant="destructive" className="py-2">
+            <CircleAlert
+              className="size-4"
+              data-icon="inline-start"
+              aria-hidden="true"
+            />
+            <AlertTitle className="text-xs">直播数据请求失败</AlertTitle>
+            <AlertDescription className="text-xs">
+              {loadError ?? epgError}
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
       {/* Main Live Workspace: Dual-Pane (Left: Channel List, Right: Player + EPG) */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left Channel List (240px) */}
         <aside className="flex w-60 shrink-0 flex-col border-r border-border/70 bg-card/20 overflow-hidden">
-          <ScrollArea className="flex-1">
+          {/* `min-h-0` is required: a flex item defaults to `min-height: auto`, so without
+              it this root grows to the height of all 129 channel rows instead of the
+              aside's box. The viewport then matches its own content, leaving nothing to
+              scroll, and the aside's `overflow-hidden` silently clips the list.
+              `type="auto"` keeps the scrollbar mounted while the list overflows, so the
+              list advertises itself instead of only revealing a bar on hover. */}
+          <ScrollArea type="auto" className="flex-1 min-h-0">
             <div className="p-1.5 flex flex-col gap-0.5">
               {filteredChannels.length > 0 ? (
                 filteredChannels.map((channel) => {
@@ -376,7 +453,7 @@ export function LiveView() {
                 })
               ) : (
                 <div className="py-12 text-center text-xs text-muted-foreground">
-                  暂无匹配频道
+                  {isLoading ? "正在读取频道目录..." : "暂无匹配频道"}
                 </div>
               )}
             </div>
@@ -395,6 +472,7 @@ export function LiveView() {
                 url={playerUrl}
                 kind={playerKind}
                 isLive
+                fill
                 onDiagnostic={setMediaDiagnostic}
                 onStatus={(st, msg) => {
                   if (st === "error") {
@@ -448,7 +526,13 @@ export function LiveView() {
                     )}
                   </>
                 ) : (
-                  <span>暂无实时节目单信息</span>
+                  <span>
+                    {!liveSource?.epg
+                      ? "当前直播源未配置 EPG 节目单地址"
+                      : epgError
+                        ? "节目单获取失败"
+                        : "该频道暂无节目单数据"}
+                  </span>
                 )}
               </div>
             </div>

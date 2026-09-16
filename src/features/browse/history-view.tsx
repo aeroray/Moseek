@@ -1,4 +1,4 @@
-import { ArrowUpRight, Clock3, Play, Trash2 } from "lucide-react";
+import { Clock3, Play, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { MediaPoster } from "@/components/media-poster";
@@ -52,7 +52,7 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
       </header>
 
       {/* Main Content */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4">
           {history.length === 0 ? (
             <div className="flex h-96 items-center justify-center">
@@ -124,7 +124,9 @@ function formatSeconds(seconds: number) {
   return `${mins}:${secs.toString().padStart(2, "0")}`;
 }
 
-function formatHistoryDate(timestamp: number) {
+function formatHistoryDate(value: string) {
+  const timestamp = new Date(value).getTime();
+  if (Number.isNaN(timestamp)) return value;
   const diff = Date.now() - timestamp;
   if (diff < 60_000) return "刚刚";
   if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`;

@@ -352,9 +352,17 @@ fn parse_xmltv(text: &str) -> Result<Vec<EpgProgram>, String> {
 fn parse_epg_json(text: &str) -> Result<Vec<EpgProgram>, String> {
     let value: Value =
         serde_json::from_str(text).map_err(|error| format!("EPG JSON 解析失败：{error}"))?;
+    // Providers that serve one channel per request describe the channel once at the top
+    // level (`channel_name`) and then list only start/end/title per programme. 112114 — the
+    // provider the TVBox `epg` templates point at — is exactly this shape, so the channel
+    // identity has to be read from the envelope; without it every item was discarded for
+    // having no `channel_id` and the guide always came back empty.
+    let envelope_channel = value_text(&value, &["channel_name"]);
     let items = value
         .as_array()
         .cloned()
+        // `epg_data` is 112114's key; the others cover the remaining public shapes.
+        .or_else(|| value.get("epg_data").and_then(Value::as_array).cloned())
         .or_else(|| value.get("epg").and_then(Value::as_array).cloned())
         .or_else(|| value.get("programs").and_then(Value::as_array).cloned())
         .or_else(|| value.get("data").and_then(Value::as_array).cloned())
@@ -363,7 +371,12 @@ fn parse_epg_json(text: &str) -> Result<Vec<EpgProgram>, String> {
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            let channel_id = value_text(item, &["channel_id", "channel", "tvg_id"]);
+            let own_channel = value_text(item, &["channel_id", "channel", "tvg_id"]);
+            let channel_id = if own_channel.is_empty() {
+                envelope_channel.clone()
+            } else {
+                own_channel
+            };
             let title = value_text(item, &["title", "name", "program"]);
             if channel_id.is_empty() || title.is_empty() {
                 return None;
@@ -866,5 +879,37 @@ mod tests {
         assert_eq!(xml_programs[0].channel_id, "news.one");
         assert_eq!(xml_programs[0].start_at, "07:30");
         assert_eq!(json_programs[0].title, "Next");
+    }
+
+    /// 112114 (the provider TVBox `epg` templates point at) names the channel once in the
+    /// envelope and lists bare start/end/title items under `epg_data`. Both of those broke
+    /// the parser: the array key was unknown and every item was dropped for having no
+    /// `channel_id`, so the guide was always empty even when the fetch succeeded.
+    #[test]
+    fn parses_per_channel_epg_json_that_names_the_channel_in_the_envelope() {
+        let programs = parse_epg_json(
+            r#"{"date":"2026-09-16","channel_name":"CCTV1","url":"epg.112114.xyz",
+                "epg_data":[{"start":"01:08","end":"01:30","title":"人口-2026-37"},
+                            {"start":"01:30","end":"02:02","title":"晚间新闻"}]}"#,
+        )
+        .expect("112114 shape should parse");
+
+        assert_eq!(programs.len(), 2);
+        assert_eq!(programs[0].channel_id, "CCTV1");
+        assert_eq!(programs[0].title, "人口-2026-37");
+        assert_eq!(programs[0].start_at, "01:08");
+        assert_eq!(programs[1].title, "晚间新闻");
+    }
+
+    /// A per-item `channel_id` must still win over the envelope name, so the shape that
+    /// carries its own identity keeps working.
+    #[test]
+    fn prefers_the_item_channel_id_over_the_envelope_name() {
+        let programs = parse_epg_json(
+            r#"{"channel_name":"envelope","epg_data":[{"channel_id":"item-channel","title":"Show","start":"10:00","end":"11:00"}]}"#,
+        )
+        .expect("json epg should parse");
+
+        assert_eq!(programs[0].channel_id, "item-channel");
     }
 }

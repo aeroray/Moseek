@@ -331,7 +331,7 @@ export function SettingsView({
               <Badge variant="secondary">拾影 · 偏好设置</Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              万千影画，一拾即得 · 主题外观、播放引擎与网络安全控制
+              万千影视，一拾即得 · 主题外观、播放引擎与网络安全控制
             </p>
           </div>
         </div>

@@ -1,4 +1,4 @@
-import { Bookmark, Heart, Play, Trash2 } from "lucide-react";
+import { Bookmark, Heart } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { MediaPoster } from "@/components/media-poster";
@@ -48,7 +48,7 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
       </header>
 
       {/* Main Content */}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4">
           {favorites.length === 0 ? (
             <div className="flex h-96 items-center justify-center">

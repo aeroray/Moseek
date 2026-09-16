@@ -13,6 +13,7 @@ import Plyr from "plyr";
 import "plyr/dist/plyr.css";
 
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { fetchMediaResource, isTauriRuntime } from "@/lib/tauri";
 import { getByteRangeHeader } from "@/features/player/media-range";
 import {
@@ -38,6 +39,12 @@ interface MediaPlayerProps {
   url: string;
   kind: MediaKind;
   isLive?: boolean;
+  /**
+   * Stretch the player to fill its container instead of sizing to the video's own
+   * aspect-ratio box. Used by the live workspace, where the player is centred inside a
+   * large pane and an intrinsically sized wrapper would collapse to 300x150.
+   */
+  fill?: boolean;
   headers?: Record<string, string>;
   poster?: string;
   resumeAt?: number;
@@ -262,9 +269,11 @@ function isHlsSource(source: MediaSourceState) {
 }
 
 export function MediaPlayer({
+  title,
   url,
   kind,
   isLive = false,
+  fill = false,
   headers,
   poster,
   resumeAt = 0,
@@ -292,6 +301,10 @@ export function MediaPlayer({
   );
   const [isBuffering, setIsBuffering] = useState(isLive);
   const [hasFailed, setHasFailed] = useState(false);
+  // Playback has actually produced a picture. Until then the live surface stays covered by
+  // the loading layer below, so the user never sees a bare Plyr control strip floating on an
+  // empty black pane — which read as "the player is only ever this small".
+  const [hasStarted, setHasStarted] = useState(false);
 
   useEffect(() => {
     callbackRef.current = { onProgress, onStatus, onDiagnostic };
@@ -373,7 +386,10 @@ export function MediaPlayer({
       lastMessage = message ?? null;
       if (liveMode && nextStatus === "error") setIsBuffering(false);
       if (nextStatus === "error") setHasFailed(true);
-      if (nextStatus === "playing") setHasFailed(false);
+      if (nextStatus === "playing") {
+        setHasFailed(false);
+        setHasStarted(true);
+      }
       recorder.push(`播放状态：${mediaStatusLabels[nextStatus]}`, message);
       callbackRef.current.onStatus?.(nextStatus, message);
       scheduleDiagnosticFlush(nextStatus === "error");
@@ -885,16 +901,49 @@ export function MediaPlayer({
 
   return (
     <div
-      className="relative overflow-hidden rounded-md bg-black shadow-2xl ring-1 ring-border/40"
+      className={cn(
+        "relative overflow-hidden rounded-md bg-black shadow-2xl ring-1 ring-border/40",
+        // The live workspace centres this wrapper inside a large flex container. Without an
+        // explicit size it shrinks to the <video> element's intrinsic 300x150 box, so the
+        // player rendered as a small stamp in the middle of the surface. `fill` makes it
+        // occupy the whole pane; the natural aspect-ratio box stays for the VOD player,
+        // where the wrapper sits in a normal document-flow column.
+        //
+        // `.plyr` is Plyr's own root and carries no height, so its
+        // `.plyr__video-wrapper{height:100%}` resolves against auto and collapses to the
+        // video's intrinsic 150px. Stretching that node is what actually makes the picture
+        // fill the pane.
+        fill && "h-full w-full [&_.plyr]:h-full",
+      )}
       style={{ "--plyr-color-main": "var(--primary)" } as React.CSSProperties}
     >
-      <video ref={videoRef} className="aspect-video w-full" playsInline />
-      {isLive && isBuffering && !hasFailed && (
+      <video
+        ref={videoRef}
+        className={cn(
+          fill ? "h-full w-full object-contain" : "aspect-video w-full",
+          // Hide the untouched media element while the live pipeline is still connecting, so
+          // only the loading layer below is visible on an otherwise empty black surface.
+          isLive && !hasStarted && !hasFailed && "opacity-0",
+        )}
+        playsInline
+      />
+      {isLive && isBuffering && !hasStarted && !hasFailed && (
+        <div
+          className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black"
+          aria-live="polite"
+        >
+          <span className="size-8 animate-spin rounded-full border-2 border-white/25 border-t-primary" />
+          <p className="text-xs text-white/60">
+            {title ? `正在连接 ${title}…` : "正在连接直播信号…"}
+          </p>
+        </div>
+      )}
+      {isLive && isBuffering && hasStarted && !hasFailed && (
         <div
           className="pointer-events-none absolute inset-0 flex items-center justify-center"
           aria-label="直播缓冲中"
         >
-          <span className="size-8 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+          <span className="size-8 animate-spin rounded-full border-2 border-white/25 border-t-primary" />
         </div>
       )}
       {hasFailed && (

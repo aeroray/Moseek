@@ -34,7 +34,16 @@ function SelectTrigger({
       data-slot="select-trigger"
       data-size={size}
       className={cn(
-        "flex w-fit items-center justify-between gap-1.5 rounded-md border border-input/80 bg-input/20 px-3 py-1 text-sm whitespace-nowrap shadow-2xs transition-all outline-none focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 data-[placeholder]:text-muted-foreground/60 data-[size=default]:h-9 data-[size=default]:text-sm data-[size=sm]:h-8 data-[size=sm]:text-xs data-[size=sm]:px-2.5 *:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 hover:bg-input/30 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4 data-[size=sm]:[&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-muted-foreground",
+        // Size geometry stays plain rather than `data-[size=*]:`. A variant selector such
+        // as `.data-[size=sm]:px-2.5[data-size=sm]` scores (0,1,2), which beats a caller's
+        // `pl-8` at (0,1,0) regardless of source order, so `cn()` could not merge it away.
+        // The svg rules are mutually exclusive for the same reason: a shared `size-4` base
+        // would survive `cn()` and override the smaller `sm` rule.
+        "flex w-fit items-center justify-between gap-1.5 rounded-md border border-input/80 bg-input/20 py-1 whitespace-nowrap shadow-2xs transition-all outline-none focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 data-[placeholder]:text-muted-foreground/60",
+        size === "sm"
+          ? "h-8 pl-2.5 pr-2.5 text-xs [&_svg:not([class*='size-'])]:size-3.5"
+          : "h-9 pl-3 pr-3 text-sm [&_svg:not([class*='size-'])]:size-4",
+        "*:data-[slot=select-value]:line-clamp-1 *:data-[slot=select-value]:flex *:data-[slot=select-value]:items-center *:data-[slot=select-value]:gap-1.5 hover:bg-input/30 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='text-'])]:text-muted-foreground",
         className
       )}
       {...props}

@@ -1,6 +1,11 @@
 import { isTauriRuntime, loadLiveSource } from "@/lib/tauri";
 import { getEpg } from "@/lib/tauri";
-import type { EpgCatalog, SourceRecord, LiveCatalog } from "@/types/moseek";
+import type {
+  EpgCatalog,
+  LiveChannel,
+  SourceRecord,
+  LiveCatalog,
+} from "@/types/moseek";
 
 export interface LiveAdapterResult {
   data: LiveCatalog;
@@ -40,12 +45,40 @@ export interface EpgAdapterResult {
   error: string | null;
 }
 
-export async function loadEpg(
-  source?: SourceRecord,
-): Promise<EpgAdapterResult> {
-  if (source?.epg) {
+/**
+ * TVBox `epg` entries are URL templates, not fixed URLs: `?ch={name}&date={date}` has to be
+ * filled per channel. Sending the template verbatim makes the provider answer for the
+ * literal string `{name}` (112114 replies with `channel_name: "{NAME}"` and a generic
+ * "精彩节目" placeholder), so the guide looked like it had no data for any channel.
+ */
+export function resolveEpgUrl(
+  template: string,
+  channel?: Pick<LiveChannel, "name" | "epgId">,
+  now: Date = new Date(),
+) {
+  if (!template.includes("{")) return template;
+  const name = channel?.epgId?.trim() || channel?.name?.trim() || "";
+  // 112114 keys on the local date, and its own docs use YYYY-MM-DD.
+  const localDate = [
+    now.getFullYear(),
+    String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"),
+  ].join("-");
+  return template
+    .replace(/\{name\}/gi, encodeURIComponent(name))
+    .replace(/\{date\}/gi, localDate)
+    .replace(/\{epg_id\}/gi, encodeURIComponent(channel?.epgId?.trim() ?? ""))
+    .replace(/\{id\}/gi, encodeURIComponent(channel?.epgId?.trim() ?? name));
+}
+
+/**
+ * Fetches a guide from an already-resolved EPG URL. Callers resolve the TVBox template with
+ * `resolveEpgUrl` first, because the resolved URL is what the fetch must be keyed on.
+ */
+export async function loadEpg(epgUrl?: string): Promise<EpgAdapterResult> {
+  if (epgUrl?.trim()) {
     try {
-      const remote = await getEpg(source.epg, "auto");
+      const remote = await getEpg(epgUrl, "auto");
       if (remote) return { data: remote, mode: "remote", error: null };
     } catch (error) {
       return {

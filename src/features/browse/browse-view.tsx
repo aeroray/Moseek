@@ -8,19 +8,14 @@ import {
   Grid2X2,
   List,
   Play,
-  RotateCw,
   Search,
-  SlidersHorizontal,
-  Sparkles,
   Star,
 } from "lucide-react";
 
-import { CapabilityBadge } from "@/components/capability-badge";
 import { MediaPoster } from "@/components/media-poster";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Empty,
   EmptyDescription,
@@ -292,7 +287,10 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
       </header>
 
       {/* Main Content Area */}
-      <ScrollArea className="flex-1">
+      {/* `min-h-0` is required: a flex item defaults to `min-height: auto`, so without it
+          the scroll root grows to its full content height and the viewport ends up with
+          nothing to scroll, leaving the parent's `overflow-hidden` to clip it. */}
+      <ScrollArea className="flex-1 min-h-0">
         <div className="p-4 flex flex-col gap-4">
           {loadError && (
             <Alert variant="destructive" className="py-2.5">
@@ -609,7 +607,7 @@ function DetailView({
         </div>
       </div>
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="flex-1 min-h-0">
         <div className="mx-auto max-w-5xl p-6 flex flex-col gap-6">
           {detailError && (
             <Alert variant="destructive" className="py-2.5">
