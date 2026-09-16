@@ -53,6 +53,8 @@ interface SettingsViewProps {
   onThemeChange: (theme: ThemeMode) => void;
   snifferCompanionUrl: string;
   onSnifferCompanionUrlChange: (url: string) => void;
+  autoEpgEnabled: boolean;
+  onAutoEpgEnabledChange: (enabled: boolean) => void;
 }
 
 export function SettingsView({
@@ -60,6 +62,8 @@ export function SettingsView({
   onThemeChange,
   snifferCompanionUrl,
   onSnifferCompanionUrlChange,
+  autoEpgEnabled,
+  onAutoEpgEnabledChange,
 }: SettingsViewProps) {
   const [runtimeScript, setRuntimeScript] = useState(
     "function main(input) { return { title: input.title.toUpperCase(), fetchType: typeof fetch }; }",
@@ -436,6 +440,22 @@ export function SettingsView({
               <PreferenceRow label="优先选择高清线路" checked />
               <PreferenceRow label="允许 HTTP 播放地址" checked />
               <PreferenceRow label="使用外部播放器" />
+            </PreferenceCard>
+            <PreferenceCard
+              className="col-span-2"
+              title="电视直播节目单"
+              description="节目单只用于显示，不影响频道播放"
+            >
+              <PreferenceRow
+                label="自动获取节目单"
+                checked={autoEpgEnabled}
+                onCheckedChange={onAutoEpgEnabledChange}
+                description={
+                  autoEpgEnabled
+                    ? "未配置 EPG 的直播源会自动使用内置节目单源（epg.112114.xyz）查询当前频道，单次仅请求所选频道。"
+                    : "仅使用直播源自己声明的 EPG 地址，不连接内置节目单源。"
+                }
+              />
             </PreferenceCard>
           </TabsContent>
 
@@ -856,13 +876,15 @@ function PreferenceCard({
   title,
   description,
   children,
+  className,
 }: {
   title: string;
   description: string;
   children: React.ReactNode;
+  className?: string;
 }) {
   return (
-    <Card>
+    <Card className={className}>
       <CardHeader>
         <CardTitle className="text-base">{title}</CardTitle>
         <CardDescription>{description}</CardDescription>
@@ -875,14 +897,37 @@ function PreferenceCard({
 function PreferenceRow({
   label,
   checked = false,
+  onCheckedChange,
+  description,
 }: {
   label: string;
   checked?: boolean;
+  /**
+   * Supplying this makes the row a real setting rather than a placeholder. The other rows in
+   * this view are still inert UI, so only pass it where the value is genuinely persisted.
+   */
+  onCheckedChange?: (checked: boolean) => void;
+  description?: string;
 }) {
   return (
     <div className="flex items-center justify-between gap-4 rounded-md px-2 py-3 hover:bg-muted/50">
-      <span className="text-sm">{label}</span>
-      <Switch defaultChecked={checked} aria-label={label} />
+      <span className="flex flex-col gap-0.5">
+        <span className="text-sm">{label}</span>
+        {description && (
+          <span className="text-xs leading-5 text-muted-foreground">
+            {description}
+          </span>
+        )}
+      </span>
+      {onCheckedChange ? (
+        <Switch
+          checked={checked}
+          onCheckedChange={onCheckedChange}
+          aria-label={label}
+        />
+      ) : (
+        <Switch defaultChecked={checked} aria-label={label} />
+      )}
     </div>
   );
 }

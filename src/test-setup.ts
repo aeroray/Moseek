@@ -1,5 +1,14 @@
 import "@testing-library/jest-dom/vitest";
 
+// jsdom leaves `HTMLMediaElement.prototype.load`/`play`/`pause` unimplemented and logs a
+// "Not implemented" error every time the player's cleanup runs, which buries real failures in
+// noise. They are no-ops here because no test asserts on actual media decoding.
+if (typeof window !== "undefined" && window.HTMLMediaElement) {
+  window.HTMLMediaElement.prototype.load = () => {};
+  window.HTMLMediaElement.prototype.play = () => Promise.resolve();
+  window.HTMLMediaElement.prototype.pause = () => {};
+}
+
 // jsdom does not implement ResizeObserver, which Radix's ScrollArea constructs as soon as a
 // scrollbar is actually mounted (`type="auto"`/`"always"`). Without the stub those scroll
 // areas throw during layout instead of being asserted on.

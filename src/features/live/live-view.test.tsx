@@ -7,12 +7,12 @@ import type { EpgCatalog, LiveCatalog, SourceRecord } from "@/types/moseek";
 const loadLiveCatalog = vi.fn();
 const loadEpg = vi.fn();
 
-// `resolveEpgUrl` is pure, so the real implementation is reused rather than stubbed: the
-// view depends on its template substitution when deciding which EPG URL to request.
+// The pure helpers are reused rather than stubbed: the view depends on template
+// substitution and on picking the currently-airing programme.
 vi.mock("@/lib/live-adapter", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/live-adapter")>();
   return {
-    resolveEpgUrl: actual.resolveEpgUrl,
+    ...actual,
     loadLiveCatalog: (...args: unknown[]) => loadLiveCatalog(...args),
     loadEpg: (...args: unknown[]) => loadEpg(...args),
   };
@@ -79,6 +79,14 @@ describe("LiveView EPG rendering", () => {
     loadLiveCatalog.mockReset();
     loadEpg.mockReset();
     loadLiveCatalog.mockResolvedValue({ data: catalog, error: null });
+    // The guide must cover the current minute, because the footer now reports the programme
+    // actually on air rather than the first row of the day. Build the window around "now".
+    const now = new Date();
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const clock = (offsetMinutes: number) => {
+      const at = new Date(now.getTime() + offsetMinutes * 60_000);
+      return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+    };
     loadEpg.mockResolvedValue({
       data: {
         programs: [
@@ -87,16 +95,27 @@ describe("LiveView EPG rendering", () => {
             channelId: "news.one",
             title: "Morning News",
             description: "",
-            startAt: "07:30",
-            endAt: "09:00",
+            startAt: clock(-30),
+            endAt: clock(30),
+          },
+          {
+            id: "news.one-1",
+            channelId: "news.one",
+            title: "Evening Report",
+            description: "",
+            startAt: clock(30),
+            endAt: clock(90),
           },
         ],
       } satisfies EpgCatalog,
+      mode: "remote",
+      origin: "configured",
       error: null,
     });
     useAppStore.setState({
       sources: [liveSource()],
       liveFavorites: [],
+      autoEpgEnabled: false,
     });
   });
 
@@ -165,12 +184,12 @@ describe("LiveView EPG rendering", () => {
   it("substitutes the TVBox epg template before requesting the guide", async () => {
     // The TVBox `epg` field is a template. Requesting it verbatim made the provider answer
     // for the literal channel "{name}" and return a generic placeholder for every channel.
-    loadLiveCatalog.mockResolvedValue({ data: catalog, error: null });
     useAppStore.setState({
       sources: [
         liveSource({ epg: "https://epg.example/?ch={name}&date={date}" }),
       ],
       liveFavorites: [],
+      autoEpgEnabled: false,
     });
 
     render(<LiveView />);
@@ -178,18 +197,74 @@ describe("LiveView EPG rendering", () => {
     await waitFor(() => {
       expect(loadEpg).toHaveBeenCalled();
     });
-    const requestedUrl = loadEpg.mock.calls[0]?.[0] as string;
-    expect(requestedUrl).toContain("ch=news.one");
-    expect(requestedUrl).not.toContain("{name}");
-    expect(requestedUrl).not.toContain("{date}");
+    const request = loadEpg.mock.calls[0]?.[0] as { template: string };
+    expect(request.template).toBe("https://epg.example/?ch={name}&date={date}");
+    const channel = loadEpg.mock.calls[0]?.[1] as { name: string };
+    expect(channel.name).toBe("City News");
   });
 
-  it("explains that EPG is unconfigured rather than claiming there is no data", async () => {
-    // "暂无实时节目单信息" was shown both when the source had no EPG at all and when a
-    // configured guide returned nothing, which made a configuration gap look like a bug.
+  it("uses the built-in guide when the source declares none", async () => {
+    // The whole point of the automatic guide: the user should not have to hand-edit a TVBox
+    // template to see what is on air.
     useAppStore.setState({
       sources: [liveSource({ epg: undefined })],
       liveFavorites: [],
+      autoEpgEnabled: true,
+    });
+
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(loadEpg).toHaveBeenCalled();
+    });
+    const request = loadEpg.mock.calls[0]?.[0] as { template: string; origin: string };
+    expect(request.origin).toBe("auto");
+    expect(request.template).toContain("epg.112114.xyz");
+  });
+
+  it("does not request a guide at all when auto guides are off and none is configured", async () => {
+    useAppStore.setState({
+      sources: [liveSource({ epg: undefined })],
+      liveFavorites: [],
+      autoEpgEnabled: false,
+    });
+
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+    expect(loadEpg).not.toHaveBeenCalled();
+    expect(
+      screen.getByText("已关闭自动节目单，且该源未配置 EPG 地址"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports the programme airing now rather than the first of the day", async () => {
+    // Providers return the whole day from 00:00, so programs[0] is the earliest programme.
+    // Labelling it "当前" showed the 01:08 programme while 11:48 was on air.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+    expect(await screen.findByText(/当前：Morning News/)).toBeInTheDocument();
+    expect(screen.getByText(/稍后：Evening Report/)).toBeInTheDocument();
+  });
+
+  it("says the channel is unlisted when the provider only returns placeholder filler", async () => {
+    // 112114 answers HTTP 200 with a dozen identical "精彩节目" rows for any unknown name.
+    // Rendering those would claim the guide works while every row said "exciting programming".
+    loadEpg.mockResolvedValue({
+      data: { programs: [] },
+      mode: "unrecognized",
+      origin: "auto",
+      error: null,
+    });
+    useAppStore.setState({
+      sources: [liveSource({ epg: undefined })],
+      liveFavorites: [],
+      autoEpgEnabled: true,
     });
 
     render(<LiveView />);
@@ -198,8 +273,7 @@ describe("LiveView EPG rendering", () => {
       expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
     });
     expect(
-      screen.getByText("当前直播源未配置 EPG 节目单地址"),
+      await screen.findByText("节目单源未收录该频道"),
     ).toBeInTheDocument();
-    expect(loadEpg).not.toHaveBeenCalled();
   });
 });

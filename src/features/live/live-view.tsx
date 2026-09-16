@@ -20,7 +20,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { loadEpg, loadLiveCatalog, resolveEpgUrl } from "@/lib/live-adapter";
+import {
+  findCurrentProgram,
+  findNextProgram,
+  loadEpg,
+  loadLiveCatalog,
+  resolveEpgRequest,
+  resolveEpgUrl,
+  type EpgAdapterResult,
+} from "@/lib/live-adapter";
 import {
   isTauriRuntime,
   resolvePlayback,
@@ -39,6 +47,7 @@ export function LiveView() {
   const sources = useAppStore((state) => state.sources);
   const liveFavorites = useAppStore((state) => state.liveFavorites);
   const toggleLiveFavorite = useAppStore((state) => state.toggleLiveFavorite);
+  const autoEpgEnabled = useAppStore((state) => state.autoEpgEnabled);
   const liveSources = useMemo(
     () =>
       sources.filter(
@@ -57,6 +66,7 @@ export function LiveView() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [epgPrograms, setEpgPrograms] = useState<EpgProgram[]>([]);
   const [epgError, setEpgError] = useState<string | null>(null);
+  const [epgMode, setEpgMode] = useState<EpgAdapterResult["mode"]>("empty");
   const [isLoading, setIsLoading] = useState(false);
   const [groupId, setGroupId] = useState("");
   const [query, setQuery] = useState("");
@@ -146,6 +156,10 @@ export function LiveView() {
   const programs = epgPrograms.filter((program) =>
     epgKeys.includes(program.channelId),
   );
+  // Providers return the whole day from 00:00, so the first row is the earliest programme of
+  // the day, not the one on air. Labelling it "当前" showed 01:08 at 11:52.
+  const currentProgram = findCurrentProgram(programs);
+  const nextProgram = findNextProgram(programs);
   const streamUrls = selectedChannel
     ? selectedChannel.streamUrls.length > 0
       ? selectedChannel.streamUrls
@@ -212,35 +226,44 @@ export function LiveView() {
     };
   }, [selectedChannel, selectedStreamUrl]);
 
+  // A source may declare its own `epg`; otherwise the built-in guide is used so the user does
+  // not have to hand-edit a TVBox template just to see what is on air.
+  const epgRequest = useMemo(
+    () => resolveEpgRequest(liveSource, autoEpgEnabled),
+    [autoEpgEnabled, liveSource],
+  );
+
   // Templates resolve per channel, but a fixed XMLTV guide resolves to the same string for
   // every channel. Keying the fetch on the resolved URL means the guide is fetched once for
   // a fixed URL and re-fetched per channel only when the template actually varies.
   const epgUrl = useMemo(
     () =>
-      liveSource?.epg && selectedChannel
-        ? resolveEpgUrl(liveSource.epg, selectedChannel)
+      epgRequest && selectedChannel
+        ? resolveEpgUrl(epgRequest.template, selectedChannel)
         : "",
-    [liveSource?.epg, selectedChannel],
+    [epgRequest, selectedChannel],
   );
 
   useEffect(() => {
     let cancelled = false;
-    if (!epgUrl) {
+    setEpgMode("empty");
+    if (!epgRequest || !selectedChannel || !epgUrl) {
       setEpgPrograms([]);
       setEpgError(null);
       return () => {
         cancelled = true;
       };
     }
-    void loadEpg(epgUrl).then((result) => {
+    void loadEpg(epgRequest, selectedChannel).then((result) => {
       if (cancelled) return;
       setEpgPrograms(result.data.programs);
       setEpgError(result.error);
+      setEpgMode(result.mode);
     });
     return () => {
       cancelled = true;
     };
-  }, [epgUrl]);
+  }, [epgRequest, epgUrl, selectedChannel]);
 
   const isFavorite = selectedChannel
     ? liveFavorites.includes(selectedChannel.id)
@@ -514,24 +537,30 @@ export function LiveView() {
               </span>
               <span className="text-muted-foreground">|</span>
               <div className="flex items-center gap-1.5 overflow-hidden text-muted-foreground text-xs">
-                {programs.length > 0 ? (
+                {currentProgram ? (
                   <>
                     <span className="text-primary font-medium truncate">
-                      当前：{programs[0]?.title}
+                      当前：{currentProgram.title}
                     </span>
-                    {programs[1] && (
+                    {nextProgram && (
                       <span className="truncate hidden md:inline">
-                        → 稍后：{programs[1]?.title}
+                        → 稍后：{nextProgram.title}
                       </span>
                     )}
                   </>
+                ) : programs.length > 0 ? (
+                  // The guide loaded and matched this channel, but no row covers the current
+                  // minute; saying "no data" here would contradict the rows we do hold.
+                  <span>今日节目已播完</span>
                 ) : (
                   <span>
-                    {!liveSource?.epg
-                      ? "当前直播源未配置 EPG 节目单地址"
+                    {epgMode === "unrecognized"
+                      ? "节目单源未收录该频道"
                       : epgError
                         ? "节目单获取失败"
-                        : "该频道暂无节目单数据"}
+                        : !liveSource?.epg && !autoEpgEnabled
+                          ? "已关闭自动节目单，且该源未配置 EPG 地址"
+                          : "该频道暂无节目单数据"}
                   </span>
                 )}
               </div>

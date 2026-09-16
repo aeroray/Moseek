@@ -50,6 +50,8 @@ function App() {
   const setSnifferCompanionUrl = useAppStore(
     (state) => state.setSnifferCompanionUrl,
   );
+  const autoEpgEnabled = useAppStore((state) => state.autoEpgEnabled);
+  const setAutoEpgEnabled = useAppStore((state) => state.setAutoEpgEnabled);
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
   const setConfigDocument = useAppStore((state) => state.setConfigDocument);
   const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
@@ -110,6 +112,8 @@ function App() {
             onThemeChange={setTheme}
             snifferCompanionUrl={snifferCompanionUrl}
             onSnifferCompanionUrlChange={setSnifferCompanionUrl}
+            autoEpgEnabled={autoEpgEnabled}
+            onAutoEpgEnabledChange={setAutoEpgEnabled}
           />
         )}
         {activeView === "browse" && <BrowseView onNavigate={navigate} />}

@@ -23,6 +23,12 @@ interface AppStore {
   activeView: ViewKey;
   theme: ThemeMode;
   snifferCompanionUrl: string;
+  /**
+   * Opt-out for the built-in programme guide. On by default because the guide is display-only
+   * enrichment and most public lists declare no `epg`; off means only an explicitly configured
+   * guide is used, so no third-party guide provider is contacted.
+   */
+  autoEpgEnabled: boolean;
   configDocuments: ConfigDocumentSummary[];
   configDocumentCache: Record<number, StoredConfigDocument>;
   activeConfigId: number | null;
@@ -37,6 +43,7 @@ interface AppStore {
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
   setSnifferCompanionUrl: (url: string) => void;
+  setAutoEpgEnabled: (enabled: boolean) => void;
   toggleSource: (key: string) => Promise<void>;
   setSourceTestResult: (key: string, result: SourceTestResult) => void;
   setConfigDocuments: (documents: ConfigDocumentSummary[]) => void;
@@ -62,6 +69,7 @@ export const useAppStore = create<AppStore>()(
       activeView: "browse",
       theme: "system",
       snifferCompanionUrl: DEFAULT_SNIFFER_COMPANION_URL,
+      autoEpgEnabled: true,
       configDocuments: [],
       configDocumentCache: {},
       activeConfigId: null,
@@ -77,6 +85,7 @@ export const useAppStore = create<AppStore>()(
       setTheme: (theme) => set({ theme }),
       setSnifferCompanionUrl: (snifferCompanionUrl) =>
         set({ snifferCompanionUrl }),
+      setAutoEpgEnabled: (autoEpgEnabled) => set({ autoEpgEnabled }),
       toggleSource: async (key) => {
         const initialState = get();
         if (initialState.activeConfigId === null) return;
@@ -277,6 +286,9 @@ export const useAppStore = create<AppStore>()(
           ...persisted,
           snifferCompanionUrl:
             persisted?.snifferCompanionUrl ?? currentState.snifferCompanionUrl,
+          // Defaults to on for existing installs that predate the setting.
+          autoEpgEnabled:
+            persisted?.autoEpgEnabled ?? currentState.autoEpgEnabled,
           configDocuments: persisted?.configDocuments ?? [],
           configDocumentCache: persisted?.configDocumentCache ?? {},
           activeConfigId: persisted?.activeConfigId ?? null,
@@ -299,6 +311,7 @@ export const useAppStore = create<AppStore>()(
         activeView: state.activeView,
         theme: state.theme,
         snifferCompanionUrl: state.snifferCompanionUrl,
+        autoEpgEnabled: state.autoEpgEnabled,
         configDocuments: state.configDocuments,
         configDocumentCache: state.configDocumentCache,
         activeConfigId: state.activeConfigId,
