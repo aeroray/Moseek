@@ -1,8 +1,4 @@
-import type {
-  CapabilityStatus,
-  SourceRecord,
-  SourceType,
-} from "@/types/moseek";
+import type { SourceRecord, SourceType } from "@/types/moseek";
 
 export type AdapterExecution =
   | "enabled"
@@ -249,17 +245,6 @@ export function adapterStatusLabel(execution: AdapterExecution) {
 
 function createProfile(id: AdapterId, sourceType: SourceType): AdapterProfile {
   return { id, sourceType, ...profiles[id] };
-}
-
-export function adapterMatchesCapability(
-  profile: AdapterProfile,
-  capability: CapabilityStatus,
-) {
-  if (profile.execution === "blocked")
-    return capability === "blocked" || capability === "partial";
-  if (profile.execution === "needs-adapter")
-    return capability === "needs-adapter";
-  return capability === "supported" || capability === "partial";
 }
 
 export function isTestableCmsSource(source: SourceRecord) {
