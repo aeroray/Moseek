@@ -1,5 +1,10 @@
 import { useMemo, useState } from "react";
-import { ClipboardCheck, ClipboardCopy, ScrollText } from "lucide-react";
+import {
+  ChevronDown,
+  ClipboardCheck,
+  ClipboardCopy,
+  ScrollText,
+} from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +14,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   mediaPipelineLabels,
@@ -21,14 +31,27 @@ interface MediaDiagnosticPanelProps {
   snapshot: MediaDiagnosticSnapshot | null;
   note?: string | null;
   className?: string;
+  /**
+   * Render as a collapsed disclosure whose trigger doubles as the player status line. The
+   * player page needs one row that both summarises state and reveals the diagnostics, instead
+   * of a status strip plus a permanently expanded panel.
+   */
+  collapsible?: boolean;
+  /** Summary content shown on the trigger, supplied by the caller that owns the status. */
+  summary?: React.ReactNode;
+  defaultOpen?: boolean;
 }
 
 export function MediaDiagnosticPanel({
   snapshot,
   note,
   className,
+  collapsible = false,
+  summary,
+  defaultOpen = false,
 }: MediaDiagnosticPanelProps) {
   const [copyState, setCopyState] = useState<"idle" | "done" | "failed">("idle");
+  const [open, setOpen] = useState(defaultOpen);
   const report = useMemo(
     () => buildReportText(snapshot, note),
     [note, snapshot],
@@ -44,6 +67,210 @@ export function MediaDiagnosticPanel({
     setTimeout(() => setCopyState("idle"), 2_000);
   };
 
+  const copyButton = (
+    <Button
+      type="button"
+      variant="outline"
+      size="sm"
+      disabled={!snapshot && !note}
+      onClick={() => void copyReport()}
+    >
+      {copyState === "done" ? (
+        <ClipboardCheck className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+      ) : (
+        <ClipboardCopy className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+      )}
+      {copyState === "done"
+        ? "已复制"
+        : copyState === "failed"
+          ? "复制失败"
+          : "复制诊断"}
+    </Button>
+  );
+
+  const body = (
+    <>
+      {note && (
+        <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
+          {note}
+        </p>
+      )}
+
+      {snapshot ? (
+        <>
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+            <DiagnosticRow
+              label="播放状态"
+              value={mediaStatusLabels[snapshot.status]}
+            />
+            <DiagnosticRow
+              label="媒体管线"
+              value={mediaPipelineLabels[snapshot.pipeline.mode]}
+            />
+            <DiagnosticRow
+              label="媒体类型"
+              value={`${snapshot.source.kind.toUpperCase()}${
+                snapshot.source.isLive ? " · 直播" : ""
+              }`}
+            />
+            <DiagnosticRow
+              label="码率档位"
+              value={`${snapshot.pipeline.levelCount} 档 · 当前 ${formatLevel(
+                snapshot.pipeline.currentLevel,
+              )} / 加载 ${formatLevel(snapshot.pipeline.loadLevel)}`}
+            />
+            <DiagnosticRow
+              label="缓冲区"
+              value={`${snapshot.pipeline.bufferedSeconds.toFixed(1)}s · MediaSource ${
+                snapshot.pipeline.mediaSourceState
+              }`}
+            />
+            <DiagnosticRow
+              label="媒体元素"
+              value={`readyState ${snapshot.media.readyState} · networkState ${
+                snapshot.media.networkState
+              } · ${snapshot.media.videoWidth}×${snapshot.media.videoHeight} · ${snapshot.media.currentTime.toFixed(1)}s${
+                snapshot.media.paused ? " · 暂停" : " · 播放中"
+              }`}
+            />
+            <DiagnosticRow
+              label="转封装线程"
+              value={
+                snapshot.environment
+                  ? snapshot.environment.transmuxWorkerSupported
+                    ? "可用"
+                    : `不可用（${snapshot.environment.transmuxWorkerNote}）`
+                  : "检测中..."
+              }
+            />
+            <DiagnosticRow
+              label="解码支持"
+              value={
+                snapshot.environment
+                  ? `H.264 ${yesNo(snapshot.environment.avcSupported)} · H.265 ${yesNo(
+                      snapshot.environment.hevcSupported,
+                    )} · AAC ${yesNo(snapshot.environment.aacSupported)}`
+                  : "检测中..."
+              }
+            />
+          </dl>
+
+          <div>
+            <p className="mb-1 text-xs text-muted-foreground">当前地址</p>
+            <p className="break-all rounded-md border bg-muted/25 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
+              {snapshot.source.url}
+            </p>
+          </div>
+
+          {snapshot.environment && (
+            <p
+              className="truncate text-[11px] text-muted-foreground"
+              title={snapshot.environment.userAgent}
+            >
+              运行环境：
+              {snapshot.environment.tauriRuntime ? "Tauri 桌面端" : "浏览器预览"} ·
+              MediaSource {yesNo(snapshot.environment.mediaSourceSupported)} ·
+              hls.js {yesNo(snapshot.environment.hlsJsSupported)}
+            </p>
+          )}
+
+          <div>
+            <p className="mb-1 text-xs text-muted-foreground">
+              事件时间线（最新在上，共 {snapshot.events.length} 条）
+            </p>
+            <ScrollArea className="h-[200px] rounded-md border bg-muted/20">
+              <div className="flex flex-col gap-1 p-3">
+                {snapshot.events.length > 0 ? (
+                  snapshot.events
+                    .slice()
+                    .reverse()
+                    .map((event, index) => (
+                      <p
+                        key={`${event.at}-${index}`}
+                        className="font-mono text-[11px] leading-5 break-all text-muted-foreground"
+                      >
+                        <span className="text-foreground/70">
+                          {formatClock(event.at)}
+                        </span>{" "}
+                        <span className="text-foreground">{event.label}</span>
+                        {event.detail ? ` · ${event.detail}` : ""}
+                      </p>
+                    ))
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    还没有播放事件。
+                  </p>
+                )}
+              </div>
+            </ScrollArea>
+          </div>
+        </>
+      ) : (
+        <p className="rounded-md border border-dashed px-3 py-4 text-center text-xs leading-5 text-muted-foreground">
+          尚未开始播放，暂时没有诊断数据。
+        </p>
+      )}
+    </>
+  );
+
+  if (collapsible) {
+    return (
+      <Collapsible
+        open={open}
+        onOpenChange={setOpen}
+        className={cn(className)}
+      >
+        {/* One surface for both states, so expanding does not shift the player or change the
+            row's identity. The trigger is the old standalone status strip, which is where the
+            summary now lives instead of occupying its own bar. */}
+        <Card className="gap-0 overflow-hidden py-0">
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              aria-label={open ? "收起播放诊断" : "展开播放诊断"}
+              className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+            >
+              <div className="flex min-w-0 items-center gap-3 text-sm">
+                <ScrollText
+                  className="size-4 shrink-0 text-primary"
+                  aria-hidden="true"
+                />
+                {summary ?? (
+                  <span className="font-medium">
+                    {snapshot
+                      ? mediaStatusLabels[snapshot.status]
+                      : "播放诊断"}
+                  </span>
+                )}
+              </div>
+              <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                播放诊断
+                <ChevronDown
+                  className={cn(
+                    "size-4 transition-transform duration-200",
+                    open && "rotate-180",
+                  )}
+                  aria-hidden="true"
+                />
+              </span>
+            </button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <div className="flex flex-col gap-3 border-t border-border/60 px-4 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-muted-foreground">
+                  播放失败时复制这段内容，可直接定位到具体环节
+                </p>
+                {copyButton}
+              </div>
+              {body}
+            </div>
+          </CollapsibleContent>
+        </Card>
+      </Collapsible>
+    );
+  }
+
   return (
     <Card className={cn(className)}>
       <CardHeader className="pb-3">
@@ -57,150 +284,10 @@ export function MediaDiagnosticPanel({
               播放失败时复制这段内容，可直接定位到具体环节
             </CardDescription>
           </div>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={!snapshot && !note}
-            onClick={() => void copyReport()}
-          >
-            {copyState === "done" ? (
-              <ClipboardCheck className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-            ) : (
-              <ClipboardCopy className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-            )}
-            {copyState === "done"
-              ? "已复制"
-              : copyState === "failed"
-                ? "复制失败"
-                : "复制诊断"}
-          </Button>
+          {copyButton}
         </div>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        {note && (
-          <p className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs leading-5 text-destructive">
-            {note}
-          </p>
-        )}
-
-        {snapshot ? (
-          <>
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
-              <DiagnosticRow
-                label="播放状态"
-                value={mediaStatusLabels[snapshot.status]}
-              />
-              <DiagnosticRow
-                label="媒体管线"
-                value={mediaPipelineLabels[snapshot.pipeline.mode]}
-              />
-              <DiagnosticRow
-                label="媒体类型"
-                value={`${snapshot.source.kind.toUpperCase()}${
-                  snapshot.source.isLive ? " · 直播" : ""
-                }`}
-              />
-              <DiagnosticRow
-                label="码率档位"
-                value={`${snapshot.pipeline.levelCount} 档 · 当前 ${formatLevel(
-                  snapshot.pipeline.currentLevel,
-                )} / 加载 ${formatLevel(snapshot.pipeline.loadLevel)}`}
-              />
-              <DiagnosticRow
-                label="缓冲区"
-                value={`${snapshot.pipeline.bufferedSeconds.toFixed(1)}s · MediaSource ${
-                  snapshot.pipeline.mediaSourceState
-                }`}
-              />
-              <DiagnosticRow
-                label="媒体元素"
-                value={`readyState ${snapshot.media.readyState} · networkState ${
-                  snapshot.media.networkState
-                } · ${snapshot.media.videoWidth}×${snapshot.media.videoHeight} · ${snapshot.media.currentTime.toFixed(1)}s${
-                  snapshot.media.paused ? " · 暂停" : " · 播放中"
-                }`}
-              />
-              <DiagnosticRow
-                label="转封装线程"
-                value={
-                  snapshot.environment
-                    ? snapshot.environment.transmuxWorkerSupported
-                      ? "可用"
-                      : `不可用（${snapshot.environment.transmuxWorkerNote}）`
-                    : "检测中..."
-                }
-              />
-              <DiagnosticRow
-                label="解码支持"
-                value={
-                  snapshot.environment
-                    ? `H.264 ${yesNo(snapshot.environment.avcSupported)} · H.265 ${yesNo(
-                        snapshot.environment.hevcSupported,
-                      )} · AAC ${yesNo(snapshot.environment.aacSupported)}`
-                    : "检测中..."
-                }
-              />
-            </dl>
-
-            <div>
-              <p className="mb-1 text-xs text-muted-foreground">
-                当前地址
-              </p>
-              <p className="break-all rounded-md border bg-muted/25 px-3 py-2 font-mono text-[11px] leading-5 text-muted-foreground">
-                {snapshot.source.url}
-              </p>
-            </div>
-
-            {snapshot.environment && (
-              <p
-                className="truncate text-[11px] text-muted-foreground"
-                title={snapshot.environment.userAgent}
-              >
-                运行环境：
-                {snapshot.environment.tauriRuntime ? "Tauri 桌面端" : "浏览器预览"} ·
-                MediaSource {yesNo(snapshot.environment.mediaSourceSupported)} ·
-                hls.js {yesNo(snapshot.environment.hlsJsSupported)}
-              </p>
-            )}
-
-            <div>
-              <p className="mb-1 text-xs text-muted-foreground">
-                事件时间线（最新在上，共 {snapshot.events.length} 条）
-              </p>
-              <ScrollArea className="h-[200px] rounded-md border bg-muted/20">
-                <div className="flex flex-col gap-1 p-3">
-                  {snapshot.events.length > 0 ? (
-                    snapshot.events
-                      .slice()
-                      .reverse()
-                      .map((event, index) => (
-                        <p
-                          key={`${event.at}-${index}`}
-                          className="font-mono text-[11px] leading-5 break-all text-muted-foreground"
-                        >
-                          <span className="text-foreground/70">
-                            {formatClock(event.at)}
-                          </span>{" "}
-                          <span className="text-foreground">{event.label}</span>
-                          {event.detail ? ` · ${event.detail}` : ""}
-                        </p>
-                      ))
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      还没有播放事件。
-                    </p>
-                  )}
-                </div>
-              </ScrollArea>
-            </div>
-          </>
-        ) : (
-          <p className="rounded-md border border-dashed px-3 py-4 text-center text-xs leading-5 text-muted-foreground">
-            尚未开始播放，暂时没有诊断数据。
-          </p>
-        )}
-      </CardContent>
+      <CardContent className="flex flex-col gap-3">{body}</CardContent>
     </Card>
   );
 }

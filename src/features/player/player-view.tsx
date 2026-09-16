@@ -4,10 +4,9 @@ import {
   ArrowLeft,
   ChevronLeft,
   ChevronRight,
+  EllipsisVertical,
   ExternalLink,
-  Info,
   ListVideo,
-  Play,
   ScanSearch,
 } from "lucide-react";
 
@@ -15,15 +14,20 @@ import { CapabilityBadge } from "@/components/capability-badge";
 import { parseParseServices } from "@/features/config/config-parser";
 import { normalizeCatVodResult } from "@/features/script/catvod-normalizer";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
   CardContent,
-  CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppStore } from "@/stores/app-store";
@@ -35,6 +39,7 @@ import {
   sniffWithCompanion,
   type PlaybackResolution,
 } from "@/lib/tauri";
+import { cn } from "@/lib/utils";
 import type {
   MediaKind,
   SourceRecord,
@@ -220,87 +225,120 @@ export function PlayerView({
   const displayMediaKind = resolvedPlayback?.mediaKind ?? mediaKind;
   const canRenderPlayer = !isTauriRuntime() || resolvedPlayback !== null;
 
+  const statusDotClass =
+    status === "error"
+      ? "bg-destructive"
+      : status === "playing"
+        ? "bg-[color:var(--status-supported)]"
+        : status === "loading"
+          ? "animate-pulse bg-primary"
+          : "bg-muted-foreground";
+
   return (
-    <ScrollArea className="h-full">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-5">
-        <div className="flex items-center justify-between gap-4 border-b border-border/60 pb-3">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="gap-1.5 text-muted-foreground hover:text-foreground"
-            onClick={onBack}
-          >
-            <ArrowLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
-            返回列表
-          </Button>
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              disabled={!isTauriRuntime() || isSniffing}
-              onClick={() => void handleLocalSniff()}
-            >
-              <ScanSearch className="size-4" data-icon="inline-start" aria-hidden="true" />
-              {isSniffing ? "嗅探中..." : "本地嗅探"}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              onClick={handleExternalPlayer}
-            >
-              <ExternalLink className="size-4" data-icon="inline-start" aria-hidden="true" />
-              外部播放器
-            </Button>
-            <CapabilityBadge status={source.capability} compact />
+    // The page owns its scrolling, so the root must be a flex column with an explicit height
+    // and `min-h-0` on the scrolling child. Previously the root was `h-full` while the inner
+    // column was taller than the viewport, which clipped the top of the right-hand list.
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {/* Single header row: back, title, episode stepper. The title leads with the work's name
+          because the previous "播放器视窗" heading named the widget instead of the content. */}
+      <header className="flex shrink-0 items-center gap-3 border-b border-border/70 bg-card/40 px-5 py-2.5 backdrop-blur-md select-none">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="gap-1.5 text-muted-foreground hover:text-foreground"
+          onClick={onBack}
+        >
+          <ArrowLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+          返回列表
+        </Button>
+
+        <div className="mx-1 h-5 w-px shrink-0 bg-border/70" aria-hidden="true" />
+
+        <div className="flex min-w-0 flex-1 flex-col">
+          <h1 className="truncate font-display text-sm font-bold tracking-tight text-foreground">
+            {item.name}
+          </h1>
+          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="truncate">{source.name}</span>
+            <span aria-hidden="true">·</span>
+            <span className="shrink-0">{activeLine.name}</span>
+            <span aria-hidden="true">·</span>
+            <span className="shrink-0 font-medium text-primary">
+              {activeEpisode.name}
+            </span>
+            <span className="shrink-0 text-muted-foreground/70">
+              （{activeIndex + 1} / {activeLine.episodes.length}）
+            </span>
           </div>
         </div>
 
-        <header className="flex items-center justify-between gap-4 border-b border-border/60 pb-3">
-          <div>
-            <h2 className="font-display text-base font-bold tracking-tight text-foreground">
-              播放器视窗
-            </h2>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
-              <Badge variant="secondary">{source.name}</Badge>
-              <span>·</span>
-              <span className="text-foreground font-medium">{activeLine.name}</span>
-              <span>·</span>
-              <span className="text-primary font-medium">{activeEpisode.name}</span>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={activeIndex <= 0}
-              onClick={() => stepEpisode(-1)}
-            >
-              <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
-              上一集
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={
-                activeIndex < 0 || activeIndex >= activeLine.episodes.length - 1
-              }
-              onClick={() => stepEpisode(1)}
-            >
-              下一集
-              <ChevronRight className="size-4" data-icon="inline-end" aria-hidden="true" />
-            </Button>
-          </div>
-        </header>
+        <div className="flex shrink-0 items-center gap-2">
+          {/* Only surfaced when the source is not fully usable: a green "可用" badge on every
+              ordinary source is noise, while a degraded one is worth knowing about. */}
+          {source.capability !== "supported" && (
+            <CapabilityBadge status={source.capability} />
+          )}
+          {/* The two auxiliary actions moved off the header into an overflow menu. They were a
+              prominent pair of buttons on every playback screen even though they are rarely
+              used, and they pushed the header wide on narrow windows. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                aria-label="更多播放操作"
+              >
+                <EllipsisVertical className="size-4" aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuLabel className="text-xs text-muted-foreground">
+                播放方式
+              </DropdownMenuLabel>
+              <DropdownMenuItem
+                disabled={!isTauriRuntime() || isSniffing}
+                onSelect={() => void handleLocalSniff()}
+              >
+                <ScanSearch className="size-4" aria-hidden="true" />
+                {isSniffing ? "嗅探中..." : "本地嗅探"}
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => void handleExternalPlayer()}>
+                <ExternalLink className="size-4" aria-hidden="true" />
+                用外部播放器打开
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={activeIndex <= 0}
+            onClick={() => stepEpisode(-1)}
+          >
+            <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+            上一集
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={
+              activeIndex < 0 || activeIndex >= activeLine.episodes.length - 1
+            }
+            onClick={() => stepEpisode(1)}
+          >
+            下一集
+            <ChevronRight className="size-4" data-icon="inline-end" aria-hidden="true" />
+          </Button>
+        </div>
+      </header>
 
-        <div className="grid grid-cols-[minmax(0,1fr)_360px] gap-5">
-          <div className="flex flex-col gap-4">
+      <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-4 overflow-hidden p-5">
+        {/* The player column scrolls on its own; the episode list is a fixed rail beside it. */}
+        <ScrollArea className="min-h-0">
+          <div className="flex flex-col gap-3 pr-3">
             {canRenderPlayer ? (
               <MediaPlayer
                 key={resolvedPlayback?.url ?? activeEpisode.url}
@@ -324,129 +362,117 @@ export function PlayerView({
                 正在校验播放地址...
               </div>
             )}
-            <div className="flex items-center justify-between rounded-md border bg-card px-4 py-3 text-sm">
-              <div className="flex items-center gap-2">
-                <span
-                  className={`size-2 rounded-full ${status === "error" ? "bg-destructive" : status === "playing" ? "bg-[color:var(--status-supported)]" : "bg-muted-foreground"}`}
-                />
-                <span>{statusLabel(status)}</span>
-              </div>
-              <span className="font-mono text-xs text-muted-foreground">
-                {displayMediaKind.toUpperCase()} · {formatSeconds(resumeAt)}
-              </span>
-            </div>
-            {diagnostic && (
-              <Alert variant={status === "error" ? "destructive" : "default"}>
+
+            {diagnostic && status === "error" && (
+              <Alert variant="destructive">
                 <AlertTriangle className="size-4" data-icon="inline-start" aria-hidden="true" />
-                <AlertTitle>播放诊断</AlertTitle>
-                <AlertDescription>{diagnostic}</AlertDescription>
+                <AlertTitle className="text-xs">播放失败</AlertTitle>
+                <AlertDescription className="text-xs text-destructive/90">
+                  {diagnostic}
+                </AlertDescription>
               </Alert>
             )}
-            <MediaDiagnosticPanel snapshot={mediaDiagnostic} />
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Info className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  播放边界
-                </CardTitle>
-                <CardDescription>
-                  播放器不会执行远程脚本，也不会自动下载 JAR。
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="grid grid-cols-3 gap-3 text-xs text-muted-foreground">
-                <div className="rounded-md border bg-muted/25 p-3">
-                  <p>当前源</p>
-                  <p className="mt-1 font-medium text-foreground">
-                    {source.name}
-                  </p>
-                </div>
-                <div className="rounded-md border bg-muted/25 p-3">
-                  <p>线路</p>
-                  <p className="mt-1 font-medium text-foreground">
-                    {activeLine.name}
-                  </p>
-                </div>
-                <div className="rounded-md border bg-muted/25 p-3">
-                  <p>地址协议</p>
-                  <p className="mt-1 font-medium text-foreground">
-                    {displayMediaKind === "hls"
-                      ? "HLS m3u8"
-                      : displayMediaKind === "mp4"
-                        ? "MP4"
-                        : "未识别"}
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
 
-          <Card className="min-h-[560px]">
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
+            {/* Status and diagnostics share one surface: the collapsed row is the status strip,
+                and expanding reveals the detail in place instead of dumping it permanently
+                below the player. */}
+            <MediaDiagnosticPanel
+              collapsible
+              snapshot={mediaDiagnostic}
+              note={diagnostic && status !== "error" ? diagnostic : null}
+              summary={
+                <>
+                  <span className={`size-2 shrink-0 rounded-full ${statusDotClass}`} />
+                  <span className="font-medium">{statusLabel(status)}</span>
+                  <span className="truncate font-mono text-xs text-muted-foreground">
+                    {displayMediaKind.toUpperCase()} · {formatSeconds(resumeAt)}
+                  </span>
+                </>
+              }
+            />
+          </div>
+          <ScrollBar />
+        </ScrollArea>
+
+        {/* Episode rail. It fills the available height rather than a hard-coded 560px, which
+            left a large empty gap under short lists and clipped taller ones. */}
+        <Card className="flex min-h-0 flex-col gap-0 overflow-hidden py-0">
+          <CardHeader className="shrink-0 border-b border-border/60 py-3">
+            <div className="flex items-center justify-between gap-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
                 <ListVideo className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                 线路与选集
               </CardTitle>
-              <CardDescription>
-                {item.playLines.length} 条线路 · {activeLine.episodes.length}{" "}
-                个选集
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="p-0">
-              <Tabs
-                value={activeLine.id}
-                onValueChange={(lineId) => {
-                  const line = item.playLines.find(
-                    (candidate) => candidate.id === lineId,
-                  );
-                  if (line) {
-                    setActiveLineId(line.id);
-                    setActiveEpisodeId(line.episodes[0]?.id ?? "");
-                  }
-                }}
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {item.playLines.length} 线路 · {activeLine.episodes.length} 集
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+            <Tabs
+              value={activeLine.id}
+              onValueChange={(lineId) => {
+                const line = item.playLines.find(
+                  (candidate) => candidate.id === lineId,
+                );
+                if (line) {
+                  setActiveLineId(line.id);
+                  setActiveEpisodeId(line.episodes[0]?.id ?? "");
+                }
+              }}
+              className="min-h-0 flex-1 gap-0"
+            >
+              <TabsList
+                variant="line"
+                className="mx-3 w-[calc(100%-1.5rem)] shrink-0 justify-start overflow-x-auto"
               >
-                <TabsList className="mx-6 w-[calc(100%-3rem)]">
-                  <>
-                    {item.playLines.map((line) => (
-                      <TabsTrigger key={line.id} value={line.id}>
-                        {line.name}
-                      </TabsTrigger>
-                    ))}
-                  </>
-                </TabsList>
                 {item.playLines.map((line) => (
-                  <TabsContent key={line.id} value={line.id} className="mt-0">
-                    <ScrollArea className="h-[430px] px-6">
-                      <div className="grid grid-cols-2 gap-2 py-4">
-                        {line.episodes.map((episode) => (
+                  <TabsTrigger key={line.id} value={line.id} className="flex-none px-3">
+                    {line.name}
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+              {item.playLines.map((line) => (
+                <TabsContent
+                  key={line.id}
+                  value={line.id}
+                  className="mt-0 min-h-0 flex-1"
+                >
+                  <ScrollArea className="h-full px-3">
+                    <div className="grid grid-cols-2 gap-1.5 py-3">
+                      {line.episodes.map((episode) => {
+                        const isActive =
+                          activeEpisode.id === episode.id &&
+                          activeLine.id === line.id;
+                        return (
                           <Button
                             key={episode.id}
                             type="button"
-                            variant={
-                              activeEpisode.id === episode.id &&
-                              activeLine.id === line.id
-                                ? "secondary"
-                                : "outline"
-                            }
+                            variant={isActive ? "default" : "ghost"}
                             size="sm"
-                            className="justify-start gap-1.5"
+                            className={cn(
+                              "justify-start gap-1.5 font-normal",
+                              !isActive &&
+                                "bg-muted/40 text-foreground/85 hover:bg-muted hover:text-foreground",
+                              isActive && "font-semibold",
+                            )}
+                            aria-current={isActive ? "true" : undefined}
                             onClick={() => selectEpisode(line, episode)}
                           >
-                            <Play className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                            {episode.name}
+                            <span className="truncate">{episode.name}</span>
                           </Button>
-                        ))}
-                      </div>
-                      <ScrollBar />
-                    </ScrollArea>
-                  </TabsContent>
-                ))}
-              </Tabs>
-            </CardContent>
-          </Card>
-        </div>
+                        );
+                      })}
+                    </div>
+                    <ScrollBar />
+                  </ScrollArea>
+                </TabsContent>
+              ))}
+            </Tabs>
+          </CardContent>
+        </Card>
       </div>
-      <ScrollBar />
-    </ScrollArea>
+    </div>
   );
 }
 
