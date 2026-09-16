@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BrowseView } from "@/features/browse/browse-view";
@@ -127,8 +127,44 @@ describe("BrowseView catalog metadata", () => {
     expect(img).toHaveAttribute("src", "https://img.example/poster.jpg");
   });
 
-  it("labels the quick-play button 立即播放", async () => {
-    // It read "立即起播", which is not how anyone says it.
+  it("groups the source and category on the left and centres a widened search", async () => {
+    // The source and the category are both scope controls — what is being browsed — so they sit
+    // together on the left. The search is the term and owns the centre, widened to hold the
+    // width the category gave up.
+    searchVod.mockResolvedValue(page([vodItem()]));
+    render(<BrowseView onNavigate={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("测试影片")).toBeInTheDocument();
+    });
+
+    const header = document.querySelector("header");
+    const zones = [...(header?.children ?? [])] as HTMLElement[];
+    // left scope group, centred search, right controls
+    const left = zones[0];
+    const centre = zones[1];
+    const right = zones[zones.length - 1];
+
+    // Scope controls share the left flank, in order.
+    expect(left.textContent).toContain("影视源");
+    expect(left.contains(screen.getByLabelText("影片分类"))).toBe(true);
+    expect(left.contains(screen.getByPlaceholderText(/搜索影片/))).toBe(false);
+
+    // The search owns the centre on its own, and is wide enough to be the focal point.
+    expect(centre.contains(screen.getByPlaceholderText(/搜索影片/))).toBe(true);
+    expect(centre.contains(screen.getByLabelText("影片分类"))).toBe(false);
+    expect(centre.className).toContain("shrink-0");
+    expect(centre.className).toMatch(/lg:w-\[29rem\]/);
+
+    // The flanks stay equal so the centre is genuinely centred.
+    expect(left.className).toContain("flex-1");
+    expect(right.className).toContain("flex-1");
+  });
+
+  it("opens the watch page directly from a catalog card", async () => {
+    // Detail and playback used to be two pages, so watching anything took two clicks and the
+    // second page lost the metadata. Clicking a card now lands on one page that is already
+    // playing the first episode, with the rail beside it.
     searchVod.mockResolvedValue(
       page([
         vodItem({
@@ -136,7 +172,10 @@ describe("BrowseView catalog metadata", () => {
             {
               id: "line-1",
               name: "dyttm3u8",
-              episodes: [{ id: "ep-1", name: "第01集", url: "https://cdn/1.m3u8" }],
+              episodes: [
+                { id: "ep-1", name: "第01集", url: "https://cdn/1.m3u8" },
+                { id: "ep-2", name: "第02集", url: "https://cdn/2.m3u8" },
+              ],
             },
           ],
         }),
@@ -147,8 +186,47 @@ describe("BrowseView catalog metadata", () => {
     const card = await screen.findByText("测试影片");
     card.click();
 
-    const play = await screen.findByRole("button", { name: /立即播放：第01集/ });
-    expect(play).toBeInTheDocument();
-    expect(screen.queryByText(/立即起播/)).not.toBeInTheDocument();
+    // One click reaches playback: the rail is present and the first episode is already active.
+    expect(await screen.findByText("线路与选集")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "第02集" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "第01集" }),
+    ).toHaveAttribute("aria-current", "true");
+  });
+
+  it("filters the catalog by a category chosen from the dropdown", async () => {
+    // The categories used to be a row of chips capped at the first eight, which hid the rest of
+    // the list and crowded the toolbar. The dropdown replaced them and must still filter.
+    searchVod.mockResolvedValue({
+      ...page([vodItem()]),
+      data: {
+        ...page([vodItem()]).data,
+        categories: [
+          { id: "cat-1", name: "电影" },
+          { id: "cat-2", name: "电视剧" },
+        ],
+      },
+    });
+    render(<BrowseView onNavigate={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("测试影片")).toBeInTheDocument();
+    });
+
+    // The old chip row is gone.
+    expect(screen.queryByRole("button", { name: "全部" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText("影片分类"));
+    fireEvent.click(await screen.findByRole("option", { name: "电视剧" }));
+
+    await waitFor(() => {
+      expect(searchVod).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "cat-2",
+        expect.anything(),
+        expect.anything(),
+      );
+    });
   });
 });

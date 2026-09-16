@@ -291,6 +291,39 @@ describe("LiveView EPG rendering", () => {
     expect(screen.queryByText("分组")).not.toBeInTheDocument();
   });
 
+  it("groups the source and the group filter on the left with a centred widened search", async () => {
+    // The group filter is a scope and belongs beside the source it filters; the search is the
+    // term and owns the centre, widened to hold the width the group control gave up.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+
+    const header = document.querySelector("header");
+    expect(header).toBeTruthy();
+    const zones = [...(header?.children ?? [])] as HTMLElement[];
+    // left scope group, centred search, right controls
+    const left = zones[0];
+    const centre = zones[1];
+    const right = zones[zones.length - 1];
+
+    // Scope controls share the left flank, group filter after the source.
+    expect(left.textContent).toContain("直播源");
+    expect(left.contains(screen.getByLabelText("频道分组"))).toBe(true);
+    expect(left.contains(screen.getByLabelText("搜索直播频道"))).toBe(false);
+
+    // The search owns the centre on its own and is the widened focal point.
+    expect(centre.contains(screen.getByLabelText("搜索直播频道"))).toBe(true);
+    expect(centre.contains(screen.getByLabelText("频道分组"))).toBe(false);
+    expect(centre.className).toContain("shrink-0");
+    expect(centre.className).toMatch(/lg:w-\[29rem\]/);
+
+    // The flanks stay equal so the centre is genuinely centred.
+    expect(left.className).toContain("flex-1");
+    expect(right.className).toContain("flex-1");
+  });
+
   it("substitutes the TVBox epg template before requesting the guide", async () => {
     // The TVBox `epg` field is a template. Requesting it verbatim made the provider answer
     // for the literal channel "{name}" and return a generic placeholder for every channel.

@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  ArrowLeft,
   ChevronLeft,
   ChevronRight,
   CircleAlert,
@@ -35,19 +34,10 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppStore } from "@/stores/app-store";
-import type {
-  CatalogViewMode,
-  SourceRecord,
-  ViewKey,
-  VodItem,
-  VodPlayLine,
-} from "@/types/moseek";
-import { getVodDetail, searchVod } from "@/features/browse/cms-adapter";
+import type { CatalogViewMode, ViewKey, VodItem } from "@/types/moseek";
+import { searchVod } from "@/features/browse/cms-adapter";
 import { isCandidateMovieSource, isMovieLibrarySource } from "@/lib/adapters";
-import {
-  PlayerView,
-  type VodPlayerRequest,
-} from "@/features/player/player-view";
+import { PlayerView } from "@/features/player/player-view";
 import { cn } from "@/lib/utils";
 
 interface BrowseViewProps {
@@ -75,9 +65,6 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedItem, setSelectedItem] = useState<VodItem | null>(null);
-  const [playerRequest, setPlayerRequest] = useState<VodPlayerRequest | null>(
-    null,
-  );
 
   const selectedSource =
     browseSources.find((source) => source.key === sourceKey) ??
@@ -109,22 +96,14 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
     };
   }, [categoryId, page, query, selectedSource]);
 
-  if (playerRequest) {
+  if (selectedItem && selectedSource) {
+    // Detail and playback are one page: opening a work loads its first episode straight into
+    // the player, and the episode rail swaps streams without a navigation.
     return (
       <PlayerView
-        request={playerRequest}
-        onBack={() => setPlayerRequest(null)}
-      />
-    );
-  }
-
-  if (selectedItem && selectedSource) {
-    return (
-      <DetailView
         item={selectedItem}
         source={selectedSource}
         onBack={() => setSelectedItem(null)}
-        onPlay={setPlayerRequest}
       />
     );
   }
@@ -155,35 +134,68 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      {/* 44px Unified Toolbar (回归标准 32px 控件阶梯) */}
-      <header
-        className="flex h-12 shrink-0 items-center gap-3 border-b border-border/70 bg-card/40 px-4 backdrop-blur-md select-none"
-      >
-        {/* Source Selector */}
-        <Select
-          value={sourceKey}
-          onValueChange={(value) => {
-            setSourceKey(value);
-            setPage(1);
-          }}
-        >
-          <SelectTrigger size="sm" className="h-8 w-44 font-medium border-primary/25 bg-primary/5 text-foreground hover:border-primary/50">
-            <SelectValue placeholder="选择影视源" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {browseSources.map((source) => (
-                <SelectItem key={source.key} value={source.key}>
-                  {source.name}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+      {/* 48px Unified Toolbar. Three zones: the scope controls (source + category) on the left,
+          the search centred, and the view controls on the right. The outer zones are `flex-1` so
+          the search is centred by layout rather than by an eyeballed margin. */}
+      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-border/70 bg-card/40 px-4 backdrop-blur-md select-none">
+        {/* Left: source + category. Both are scope controls — what is being browsed — so they
+            sit together, and the category dropdown is immediately reachable from the source it
+            filters. The category used to be a row of chips capped at the first eight
+            categories, which both crowded the bar and hid the rest of the list. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <Select
+            value={sourceKey}
+            onValueChange={(value) => {
+              setSourceKey(value);
+              setPage(1);
+            }}
+          >
+            <SelectTrigger size="sm" className="h-8 w-44 font-medium border-primary/25 bg-primary/5 text-foreground hover:border-primary/50">
+              <SelectValue placeholder="选择影视源" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {browseSources.map((source) => (
+                  <SelectItem key={source.key} value={source.key}>
+                    {source.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
 
-        {/* Global Search Bar */}
+          <Select
+            value={categoryId}
+            onValueChange={(value) => {
+              setCategoryId(value);
+              setPage(1);
+            }}
+            disabled={categories.length === 0}
+          >
+            <SelectTrigger
+              size="sm"
+              className="h-8 w-36 shrink-0 font-medium border-border/60 bg-muted/40 text-foreground"
+              aria-label="影片分类"
+            >
+              <SelectValue placeholder="全部分类" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="all">全部分类</SelectItem>
+                {categories.map((cat) => (
+                  <SelectItem key={cat.id} value={cat.id}>
+                    {cat.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Centre: search, widened to hold the width the category control gave up so the
+            toolbar keeps the same visual mass and the field stays the obvious focal point. */}
         <form
-          className="relative flex-1 max-w-md"
+          className="relative w-80 shrink-0 lg:w-[29rem]"
           onSubmit={(event) => {
             event.preventDefault();
             setQuery(searchInput.trim());
@@ -212,44 +224,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
           )}
         </form>
 
-        {/* Categories Chips */}
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
-          <button
-            type="button"
-            onClick={() => {
-              setCategoryId("all");
-              setPage(1);
-            }}
-            className={cn(
-              "shrink-0 rounded px-2.5 py-1 text-xs font-medium transition-colors",
-              categoryId === "all"
-                ? "bg-primary text-primary-foreground font-semibold"
-                : "text-muted-foreground hover:bg-muted hover:text-foreground",
-            )}
-          >
-            全部
-          </button>
-          {categories.slice(0, 8).map((cat) => (
-            <button
-              key={cat.id}
-              type="button"
-              onClick={() => {
-                setCategoryId(cat.id);
-                setPage(1);
-              }}
-              className={cn(
-                "shrink-0 rounded px-2.5 py-1 text-xs font-medium transition-colors",
-                categoryId === cat.id
-                  ? "bg-primary text-primary-foreground font-semibold"
-                  : "text-muted-foreground hover:bg-muted hover:text-foreground",
-              )}
-            >
-              {cat.name}
-            </button>
-          ))}
-        </div>
-
-        <div className="ml-auto flex items-center gap-2 shrink-0">
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
           <span className="text-xs text-muted-foreground hidden lg:inline">
             {itemCountText}
           </span>
@@ -514,228 +489,6 @@ function CatalogSkeleton({ viewMode }: { viewMode: CatalogViewMode }) {
           <Skeleton className="h-2.5 w-1/2" />
         </div>
       ))}
-    </div>
-  );
-}
-
-function DetailView({
-  item,
-  source,
-  onBack,
-  onPlay,
-}: {
-  item: VodItem;
-  source: SourceRecord;
-  onBack: () => void;
-  onPlay: (request: VodPlayerRequest) => void;
-}) {
-  const addHistory = useAppStore((state) => state.addHistory);
-  const favorites = useAppStore((state) => state.favorites);
-  const toggleFavorite = useAppStore((state) => state.toggleFavorite);
-  const [detail, setDetail] = useState(item);
-  const [detailError, setDetailError] = useState<string | null>(null);
-  const [selectedLineId, setSelectedLineId] = useState(
-    item.playLines[0]?.id ?? "",
-  );
-  const [selectedEpisode, setSelectedEpisode] = useState<string | null>(null);
-  const isFavorite = favorites.some((favorite) => favorite.id === item.id);
-
-  useEffect(() => {
-    let cancelled = false;
-    void getVodDetail(source, item).then((result) => {
-      if (cancelled) return;
-      if (result.data) {
-        setDetail(result.data);
-        setSelectedLineId(result.data.playLines[0]?.id ?? "");
-      }
-      setDetailError(result.error);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [item, source]);
-
-  const selectedLine =
-    detail.playLines.find((line) => line.id === selectedLineId) ??
-    detail.playLines[0];
-
-  const handleEpisode = (
-    line: VodPlayLine,
-    episodeId: string,
-    episodeName: string,
-  ) => {
-    setSelectedEpisode(episodeId);
-    addHistory({
-      item: detail,
-      lineId: line.id,
-      episodeId,
-      episodeName,
-      progress: 0,
-    });
-    const episode = line.episodes.find(
-      (candidate) => candidate.id === episodeId,
-    );
-    if (episode) onPlay({ item: detail, source, line, episode });
-  };
-
-  return (
-    <div className="flex h-full flex-col overflow-hidden bg-background">
-      {/* Detail Topbar */}
-      <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/40 px-4">
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="gap-1.5 text-muted-foreground hover:text-foreground"
-          onClick={onBack}
-        >
-          <ArrowLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
-          返回列表
-        </Button>
-        <div className="flex items-center gap-2">
-          <Button
-            type="button"
-            variant={isFavorite ? "secondary" : "outline"}
-            size="sm"
-            className="gap-1.5"
-            onClick={() => toggleFavorite(detail)}
-          >
-            <Star
-              className={cn("size-4", isFavorite && "fill-primary text-primary")}
-              data-icon="inline-start"
-              aria-hidden="true"
-            />
-            {isFavorite ? "已收藏" : "加入收藏"}
-          </Button>
-        </div>
-      </div>
-
-      <ScrollArea className="flex-1 min-h-0">
-        <div className="mx-auto max-w-5xl p-6 flex flex-col gap-6">
-          {detailError && (
-            <Alert variant="destructive" className="py-2.5">
-              <CircleAlert className="size-4" data-icon="inline-start" aria-hidden="true" />
-              <AlertTitle className="text-xs">详情获取异常</AlertTitle>
-              <AlertDescription className="text-xs">{detailError}</AlertDescription>
-            </Alert>
-          )}
-
-          {/* Hero Banner Grid */}
-          <div className="grid grid-cols-[200px_1fr] gap-6 items-start">
-            <div className="aspect-[2/3] w-full overflow-hidden rounded-lg border border-border/80 shadow-xl bg-card">
-              <MediaPoster
-                src={detail.poster}
-                alt={`${detail.name} 海报`}
-                className="size-full"
-              />
-            </div>
-
-            <div className="flex flex-col gap-3">
-              <div className="flex flex-wrap items-center gap-2">
-                {detail.year && <Badge variant="secondary">{detail.year}</Badge>}
-                {detail.area && <Badge variant="secondary">{detail.area}</Badge>}
-                {detail.categories.slice(0, 3).map((cat) => (
-                  <Badge key={cat.id} variant="outline">
-                    {cat.name}
-                  </Badge>
-                ))}
-                <span className="text-xs text-muted-foreground ml-auto">
-                  来源：{source.name}
-                </span>
-              </div>
-
-              <h1 className="font-display text-2xl font-bold tracking-tight text-foreground">
-                {detail.name}
-              </h1>
-
-              <p className="text-xs leading-relaxed text-muted-foreground/90 line-clamp-4">
-                {detail.description || "暂无剧集背景简介。"}
-              </p>
-
-              {/* Quick Play First Button */}
-              {selectedLine?.episodes[0] && (
-                <div className="pt-2">
-                  <Button
-                    type="button"
-                    variant="default"
-                    size="sm"
-                    className="gap-2 font-semibold shadow-md shadow-primary/20"
-                    onClick={() =>
-                      handleEpisode(
-                        selectedLine,
-                        selectedLine.episodes[0].id,
-                        selectedLine.episodes[0].name,
-                      )
-                    }
-                  >
-                    <Play className="size-3.5 fill-current" />
-                    立即播放：{selectedLine.episodes[0].name}
-                  </Button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Play Lines & Episodes Picker */}
-          <div className="flex flex-col gap-3 rounded-lg border border-border/80 bg-card/60 p-4">
-            <div className="flex items-center justify-between border-b border-border/60 pb-3">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-semibold text-foreground">
-                  播放线路
-                </span>
-                <span className="text-xs text-muted-foreground">
-                  (共 {detail.playLines.length} 条)
-                </span>
-              </div>
-              <div className="flex items-center gap-1.5">
-                {detail.playLines.map((line) => (
-                  <button
-                    key={line.id}
-                    type="button"
-                    onClick={() => setSelectedLineId(line.id)}
-                    className={cn(
-                      "rounded px-2.5 py-1 text-xs font-medium transition-colors",
-                      line.id === selectedLine?.id
-                        ? "bg-primary text-primary-foreground font-semibold"
-                        : "bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    {line.name} ({line.episodes.length} 集)
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Episode Grid */}
-            {selectedLine ? (
-              <div className="pt-2">
-                <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-8 lg:grid-cols-10 gap-2">
-                  {selectedLine.episodes.map((ep) => (
-                    <button
-                      key={ep.id}
-                      type="button"
-                      onClick={() => handleEpisode(selectedLine, ep.id, ep.name)}
-                      className={cn(
-                        "flex h-9 items-center justify-center rounded border text-xs font-medium transition-all hover:border-primary/60 hover:text-primary active:scale-95",
-                        selectedEpisode === ep.id
-                          ? "border-primary bg-primary/15 text-primary font-bold shadow-xs"
-                          : "border-border/60 bg-muted/30 text-foreground/80",
-                      )}
-                    >
-                      <span className="truncate px-1.5">{ep.name}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="py-6 text-center text-xs text-muted-foreground">
-                当前源未解析出可用剧集或播放线路。
-              </div>
-            )}
-          </div>
-        </div>
-        <ScrollBar />
-      </ScrollArea>
     </div>
   );
 }

@@ -377,39 +377,87 @@ export function LiveView() {
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      {/* 48px Live Topbar */}
+      {/* 48px Live Topbar. Three zones, matching the movie library: the scope controls (source +
+          group) on the left, the search centred, and the channel controls on the right. */}
       <header
         className="flex h-12 shrink-0 items-center gap-3 border-b border-border/70 bg-card/40 px-4 backdrop-blur-md select-none"
       >
-        <Select
-          value={liveSourceKey}
-          onValueChange={(value) => {
-            setLiveSourceKey(value);
-            setQuery("");
-          }}
-          disabled={liveSources.length === 0}
-        >
-          <SelectTrigger size="sm" className="h-8 w-48 font-medium border-primary/25 bg-primary/5 text-foreground hover:border-primary/50">
-            <SelectValue placeholder="选择直播源" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {liveSources.map((source) => (
-                <SelectItem key={source.key} value={source.key}>
-                  {source.name}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+        {/* Left: source + group. Both are scope controls — what is being browsed — so the group
+            filter sits immediately beside the source it belongs to. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <Select
+            value={liveSourceKey}
+            onValueChange={(value) => {
+              setLiveSourceKey(value);
+              setQuery("");
+            }}
+            disabled={liveSources.length === 0}
+          >
+            <SelectTrigger size="sm" className="h-8 w-48 font-medium border-primary/25 bg-primary/5 text-foreground hover:border-primary/50">
+              <SelectValue placeholder="选择直播源" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {liveSources.map((source) => (
+                  <SelectItem key={source.key} value={source.key}>
+                    {source.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
 
-        {/* Live Channel Search.
-            The query deliberately spans every group (see `filteredChannels`), so the group
-            dropdown below is bypassed while a search is active. The scope is named on the
-            control itself rather than left implicit, because a group selector that still read
-            "央视频道" while showing results from other groups is what made the search look
-            group-scoped. */}
-        <div className="relative max-w-xs flex-1">
+          {/* Group filter. A playlist can carry dozens of `group-title` values, and rendering
+              one chip per group pushed the row past the viewport and made the header read as
+              noise. A dropdown keeps the bar a fixed height and scales to any number of groups,
+              and it shows the active group's name even when the list is long.
+              While a search is active the list spans every group, so the control says so
+              instead of continuing to display the group that is no longer being applied. */}
+          <Select
+            value={groupFilterValue}
+            onValueChange={(value) => {
+              setQuery("");
+              setGroupId(value);
+              const firstInGroup = channels.find((c) => c.groupId === value);
+              if (firstInGroup) selectChannel(firstInGroup);
+            }}
+            disabled={groups.length === 0}
+          >
+            <SelectTrigger
+              size="sm"
+              className={cn(
+                "h-8 w-40 shrink-0 font-medium border-border/60 bg-muted/40 text-foreground",
+                isSearching && "border-primary/40 text-primary",
+              )}
+              aria-label="频道分组"
+            >
+              <SelectValue placeholder="选择分组" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {/* Always offered, not only while searching: it is a genuinely useful browse
+                    mode, and a value that exists only during a search would leave the select
+                    holding a value with no matching item once the query cleared. */}
+                <SelectItem value={ALL_GROUPS_ID}>
+                  {isSearching ? "全部分组（搜索中）" : "全部分组"}
+                </SelectItem>
+                {groups.map((group) => (
+                  <SelectItem key={group.id} value={group.id}>
+                    {group.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Centre: the search, widened to hold the width the group control gave up so the bar
+            keeps its balance and the field stays the obvious focal point. The query deliberately
+            spans every group (see `filteredChannels`), so the group dropdown beside it is
+            bypassed while a search is active. The scope is named on the control itself rather
+            than left implicit, because a group selector that still read "央视频道" while showing
+            results from other groups is what made the search look group-scoped. */}
+        <div className="relative w-80 shrink-0 lg:w-[29rem]">
           <Search
             className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
             data-icon="inline-start"
@@ -436,50 +484,7 @@ export function LiveView() {
           )}
         </div>
 
-        {/* Group filter. A playlist can carry dozens of `group-title` values, and rendering
-            one chip per group pushed the row past the viewport and made the header read as
-            noise. A dropdown keeps the bar a fixed height and scales to any number of groups,
-            and it shows the active group's name even when the list is long.
-            While a search is active the list spans every group, so the control says so
-            instead of continuing to display the group that is no longer being applied. */}
-        <Select
-          value={groupFilterValue}
-          onValueChange={(value) => {
-            setQuery("");
-            setGroupId(value);
-            const firstInGroup = channels.find((c) => c.groupId === value);
-            if (firstInGroup) selectChannel(firstInGroup);
-          }}
-          disabled={groups.length === 0}
-        >
-          <SelectTrigger
-            size="sm"
-            className={cn(
-              "h-8 w-40 shrink-0 font-medium border-border/60 bg-muted/40 text-foreground",
-              isSearching && "border-primary/40 text-primary",
-            )}
-            aria-label="频道分组"
-          >
-            <SelectValue placeholder="选择分组" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              {/* Always offered, not only while searching: it is a genuinely useful browse
-                  mode, and a value that exists only during a search would leave the select
-                  holding a value with no matching item once the query cleared. */}
-              <SelectItem value={ALL_GROUPS_ID}>
-                {isSearching ? "全部分组（搜索中）" : "全部分组"}
-              </SelectItem>
-              {groups.map((group) => (
-                <SelectItem key={group.id} value={group.id}>
-                  {group.name}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-
-        <div className="ml-auto flex items-center gap-2 shrink-0">
+        <div className="flex min-w-0 flex-1 items-center justify-end gap-2">
           <Button
             type="button"
             variant="ghost"
