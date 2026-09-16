@@ -9,6 +9,12 @@ if (typeof window !== "undefined" && window.HTMLMediaElement) {
   window.HTMLMediaElement.prototype.pause = () => {};
 }
 
+// jsdom does not implement scrollIntoView, which Radix's Select calls when it highlights the
+// selected item on open. Without the stub, opening any Select throws instead of rendering.
+if (typeof window !== "undefined" && window.Element) {
+  window.Element.prototype.scrollIntoView = () => {};
+}
+
 // jsdom does not implement ResizeObserver, which Radix's ScrollArea constructs as soon as a
 // scrollbar is actually mounted (`type="auto"`/`"always"`). Without the stub those scroll
 // areas throw during layout instead of being asserted on.

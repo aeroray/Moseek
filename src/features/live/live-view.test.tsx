@@ -1,4 +1,10 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LiveView } from "@/features/live/live-view";
@@ -106,6 +112,53 @@ const multiLineCatalog: LiveCatalog = {
     },
   ],
   groups: [{ id: "news", name: "News" }],
+};
+
+/** Two groups whose names are distinguishable, for the search-scope behaviour. */
+const twoGroupCatalog: LiveCatalog = {
+  channels: [
+    {
+      id: "live-main:A:cctv1",
+      name: "CCTV-1 综合",
+      groupId: "A",
+      groupName: "央视频道",
+      logoUrl: "",
+      streamUrl: "https://stream.example/a1.m3u8",
+      streamUrls: ["https://stream.example/a1.m3u8"],
+      mediaKind: "hls",
+      sourceKey: "live-main",
+      epgId: undefined,
+    },
+    {
+      id: "live-main:A:cctv2",
+      name: "CCTV-2 财经",
+      groupId: "A",
+      groupName: "央视频道",
+      logoUrl: "",
+      streamUrl: "https://stream.example/a2.m3u8",
+      streamUrls: ["https://stream.example/a2.m3u8"],
+      mediaKind: "hls",
+      sourceKey: "live-main",
+      epgId: undefined,
+    },
+    // Only in group B; finding it while group A is selected proves the search spans groups.
+    {
+      id: "live-main:B:hunan",
+      name: "湖南卫视高清",
+      groupId: "B",
+      groupName: "卫视频道",
+      logoUrl: "",
+      streamUrl: "https://stream.example/b1.m3u8",
+      streamUrls: ["https://stream.example/b1.m3u8"],
+      mediaKind: "hls",
+      sourceKey: "live-main",
+      epgId: undefined,
+    },
+  ],
+  groups: [
+    { id: "A", name: "央视频道" },
+    { id: "B", name: "卫视频道" },
+  ],
 };
 
 function probe(index: number, ok: boolean, elapsedMs = 100) {
@@ -428,5 +481,140 @@ describe("LiveView concurrent line probing", () => {
     expect(
       screen.queryByText("该频道所有线路均无法连接"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("LiveView search scope", () => {
+  afterEach(cleanup);
+
+  beforeEach(() => {
+    loadLiveCatalog.mockReset();
+    loadEpg.mockReset();
+    probeStreamUrls.mockReset();
+    probeStreamUrls.mockResolvedValue(null);
+    loadLiveCatalog.mockResolvedValue({ data: twoGroupCatalog, error: null });
+    loadEpg.mockResolvedValue({
+      data: { programs: [] },
+      mode: "empty",
+      origin: "configured",
+      error: null,
+    });
+    useAppStore.setState({
+      sources: [liveSource()],
+      liveFavorites: [],
+      autoEpgEnabled: false,
+    });
+  });
+
+  function search(value: string) {
+    fireEvent.change(screen.getByLabelText("搜索直播频道"), {
+      target: { value },
+    });
+  }
+
+  /**
+   * Channel names appear both in the list and in the player stub's title, so `getByText` is
+   * ambiguous. Query inside the channel-list aside instead.
+   */
+  function channelListText() {
+    const list = [...document.querySelectorAll("aside")].find((aside) =>
+      aside.querySelector("[data-radix-scroll-area-viewport]"),
+    );
+    return list?.textContent ?? "";
+  }
+
+  it("finds a channel that lives in a different group than the selected one", async () => {
+    // The search has always spanned every group; this locks that so a future change cannot
+    // quietly narrow it to the selected group.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    // 央视频道 is selected, so the 湖南 channel is not listed yet.
+    expect(channelListText()).not.toContain("湖南卫视高清");
+
+    search("湖南");
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("湖南卫视高清");
+    });
+    expect(channelListText()).not.toContain("CCTV-1 综合");
+  });
+
+  it("says the scope is all groups while a search is active", async () => {
+    // The real defect the user saw: results spanned groups while the group control kept
+    // saying "央视频道", which made the search look group-scoped.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    expect(screen.getByLabelText("频道分组")).toHaveTextContent("央视频道");
+
+    search("卫视");
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("频道分组")).toHaveTextContent(/全部分组/);
+    });
+    // And it names why: the search is overriding the group filter.
+    expect(screen.getByLabelText("频道分组")).toHaveTextContent(/搜索中/);
+  });
+
+  it("restores the group filter when the search is cleared", async () => {
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    search("湖南");
+    await waitFor(() => {
+      expect(screen.getByLabelText("频道分组")).toHaveTextContent(/全部分组/);
+    });
+
+    fireEvent.click(screen.getByLabelText("清除搜索"));
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    expect(channelListText()).not.toContain("湖南卫视高清");
+    expect(screen.getByLabelText("频道分组")).toHaveTextContent("央视频道");
+  });
+
+  it("shows the narrowed count so a filter never looks like it did nothing", async () => {
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    // Group A holds two of the three channels, so the count is narrowed from the start.
+    expect(screen.getByText("2 / 3 个频道")).toBeInTheDocument();
+
+    search("湖南");
+
+    expect(await screen.findByText("1 / 3 个频道")).toBeInTheDocument();
+  });
+
+  it("does not narrow the list to one group when stepping channels in 全部分组", async () => {
+    // Stepping used to force `setGroupId(next.groupId)`, which would silently collapse an
+    // all-groups browse back down to a single group.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+
+    fireEvent.click(screen.getByLabelText("频道分组"));
+    fireEvent.click(await screen.findByRole("option", { name: "全部分组" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("3 个频道")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText("下一个频道"));
+
+    // The list must still span every group.
+    expect(screen.getByText("3 个频道")).toBeInTheDocument();
+    expect(screen.getByLabelText("频道分组")).toHaveTextContent("全部分组");
   });
 });

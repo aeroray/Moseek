@@ -6,6 +6,7 @@ import {
   Search,
   TriangleAlert,
   Tv,
+  X,
 } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -44,6 +45,8 @@ import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
 const maxAutomaticStreamAttempts = 3;
+/** Sentinel for "browse every group", used by the group selector and by search. */
+const ALL_GROUPS_ID = "__all_groups__";
 
 export function LiveView() {
   const sources = useAppStore((state) => state.sources);
@@ -124,7 +127,7 @@ export function LiveView() {
   const groups = catalog.groups;
 
   useEffect(() => {
-    if (!groups.some((group) => group.id === groupId)) {
+    if (groupId !== ALL_GROUPS_ID && !groups.some((group) => group.id === groupId)) {
       setGroupId(groups[0]?.id ?? "");
     }
     if (!channels.some((channel) => channel.id === selectedChannelId)) {
@@ -135,8 +138,13 @@ export function LiveView() {
   const filteredChannels = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return channels.filter((channel) => {
+      // A query searches across EVERY group; the group filter only applies when browsing.
+      // The dropdown reflects this by showing "全部分组（搜索中）" so the visible scope and
+      // the stated scope agree.
       const matchesGroup =
-        Boolean(normalizedQuery) || channel.groupId === groupId;
+        Boolean(normalizedQuery) ||
+        groupId === ALL_GROUPS_ID ||
+        channel.groupId === groupId;
       const matchesQuery =
         !normalizedQuery ||
         channel.name.toLowerCase().includes(normalizedQuery);
@@ -340,6 +348,11 @@ export function LiveView() {
     };
   }, [epgRequest, epgUrl, selectedChannel]);
 
+  const isSearching = query.trim().length > 0;
+  // While searching, the group selector displays the cross-group scope rather than a group
+  // that is no longer being applied.
+  const groupFilterValue = isSearching ? ALL_GROUPS_ID : groupId;
+
   const isFavorite = selectedChannel
     ? liveFavorites.includes(selectedChannel.id)
     : false;
@@ -355,7 +368,9 @@ export function LiveView() {
   const stepChannel = (direction: -1 | 1) => {
     const next = channels[selectedIndex + direction];
     if (next) {
-      setGroupId(next.groupId);
+      // Stepping while browsing "全部分组" (or searching) must not silently narrow the list to
+      // the next channel's group.
+      if (!isSearching && groupId !== ALL_GROUPS_ID) setGroupId(next.groupId);
       selectChannel(next);
     }
   };
@@ -388,7 +403,12 @@ export function LiveView() {
           </SelectContent>
         </Select>
 
-        {/* Live Channel Search */}
+        {/* Live Channel Search.
+            The query deliberately spans every group (see `filteredChannels`), so the group
+            dropdown below is bypassed while a search is active. The scope is named on the
+            control itself rather than left implicit, because a group selector that still read
+            "央视频道" while showing results from other groups is what made the search look
+            group-scoped. */}
         <div className="relative max-w-xs flex-1">
           <Search
             className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
@@ -399,18 +419,33 @@ export function LiveView() {
             size="sm"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="搜索直播频道名..."
-            className="pl-8 pr-3 bg-muted/40 border-border/60"
+            placeholder="搜索全部频道名..."
+            className="pl-8 pr-8 bg-muted/40 border-border/60"
+            aria-label="搜索直播频道"
           />
+          {isSearching && (
+            <button
+              type="button"
+              onClick={() => setQuery("")}
+              aria-label="清除搜索"
+              title="清除搜索，恢复分组筛选"
+              className="absolute right-1.5 top-1/2 flex size-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
+            >
+              <X className="size-3.5" aria-hidden="true" />
+            </button>
+          )}
         </div>
 
         {/* Group filter. A playlist can carry dozens of `group-title` values, and rendering
             one chip per group pushed the row past the viewport and made the header read as
             noise. A dropdown keeps the bar a fixed height and scales to any number of groups,
-            and it shows the active group's name even when the list is long. */}
+            and it shows the active group's name even when the list is long.
+            While a search is active the list spans every group, so the control says so
+            instead of continuing to display the group that is no longer being applied. */}
         <Select
-          value={groupId}
+          value={groupFilterValue}
           onValueChange={(value) => {
+            setQuery("");
             setGroupId(value);
             const firstInGroup = channels.find((c) => c.groupId === value);
             if (firstInGroup) selectChannel(firstInGroup);
@@ -419,13 +454,22 @@ export function LiveView() {
         >
           <SelectTrigger
             size="sm"
-            className="h-8 w-40 shrink-0 font-medium border-border/60 bg-muted/40 text-foreground"
+            className={cn(
+              "h-8 w-40 shrink-0 font-medium border-border/60 bg-muted/40 text-foreground",
+              isSearching && "border-primary/40 text-primary",
+            )}
             aria-label="频道分组"
           >
             <SelectValue placeholder="选择分组" />
           </SelectTrigger>
           <SelectContent>
             <SelectGroup>
+              {/* Always offered, not only while searching: it is a genuinely useful browse
+                  mode, and a value that exists only during a search would leave the select
+                  holding a value with no matching item once the query cleared. */}
+              <SelectItem value={ALL_GROUPS_ID}>
+                {isSearching ? "全部分组（搜索中）" : "全部分组"}
+              </SelectItem>
               {groups.map((group) => (
                 <SelectItem key={group.id} value={group.id}>
                   {group.name}
@@ -461,7 +505,11 @@ export function LiveView() {
             <ChevronRight aria-hidden="true" />
           </Button>
           <span className="text-xs text-muted-foreground hidden sm:inline">
-            {channels.length} 个频道
+            {/* Show the filtered count whenever the visible list is narrower than the whole
+                catalog, so a search or group filter never looks like it changed nothing. */}
+            {filteredChannels.length === channels.length
+              ? `${channels.length} 个频道`
+              : `${filteredChannels.length} / ${channels.length} 个频道`}
           </span>
           {selectedChannel && (
             <Button
