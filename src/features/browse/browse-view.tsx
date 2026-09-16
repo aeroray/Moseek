@@ -482,7 +482,9 @@ function CatalogSkeleton({ viewMode }: { viewMode: CatalogViewMode }) {
 
   return (
     <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
-      {Array.from({ length: 14 }, (_, idx) => (
+      {/* Enough placeholders to fill the tallest supported grid (7 columns) for three full rows,
+          so the loading state has the same shape as the content that replaces it. */}
+      {Array.from({ length: 21 }, (_, idx) => (
         <div key={idx} className="flex flex-col gap-2 rounded-md border border-border/40 p-1.5">
           <Skeleton className="aspect-[2/3] w-full rounded" />
           <Skeleton className="h-3 w-3/4" />
