@@ -317,10 +317,6 @@ export async function probeStreamUrls(urls: string[], timeoutMs?: number) {
   });
 }
 
-export async function executeScript(request: ScriptExecutionRequest) {
-  return invokeCommand<ScriptExecutionResult>("execute_script", { request });
-}
-
 export async function listScriptExecutionLogs(limit = 20) {
   return invokeCommand<ScriptExecutionLog[]>("list_script_execution_logs", {
     limit,

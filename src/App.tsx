@@ -51,6 +51,11 @@ function App() {
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
   const setConfigDocument = useAppStore((state) => state.setConfigDocument);
   const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
+  const history = useAppStore((state) => state.history);
+  const favorites = useAppStore((state) => state.favorites);
+  const playbackProgress = useAppStore((state) => state.playbackProgress);
+  const clearHistory = useAppStore((state) => state.clearHistory);
+  const clearFavorites = useAppStore((state) => state.clearFavorites);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -108,6 +113,11 @@ function App() {
             onThemeChange={setTheme}
             autoEpgEnabled={autoEpgEnabled}
             onAutoEpgEnabledChange={setAutoEpgEnabled}
+            historyCount={history.length}
+            favoriteCount={favorites.length}
+            progressCount={Object.keys(playbackProgress).length}
+            onClearHistory={clearHistory}
+            onClearFavorites={clearFavorites}
           />
         )}
         {activeView === "browse" && <BrowseView onNavigate={navigate} />}

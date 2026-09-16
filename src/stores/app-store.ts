@@ -55,6 +55,7 @@ interface AppStore {
   ) => void;
   addHistory: (record: Omit<PlayHistoryRecord, "id" | "updatedAt">) => void;
   clearHistory: () => void;
+  clearFavorites: () => void;
   toggleFavorite: (item: VodItem) => void;
   setPlaybackProgress: (historyId: string, seconds: number) => void;
   toggleLiveFavorite: (channel: LiveChannel) => void;
@@ -233,7 +234,11 @@ export const useAppStore = create<AppStore>()(
             ].slice(0, 100),
           };
         }),
-      clearHistory: () => set({ history: [] }),
+      // Playback progress is keyed by history id and has no meaning without the record it
+      // belongs to, so clearing the history clears it too. Favourites are a separate list and
+      // are deliberately left alone.
+      clearHistory: () => set({ history: [], playbackProgress: {} }),
+      clearFavorites: () => set({ favorites: [] }),
       toggleFavorite: (item) =>
         set((state) => {
           const isFavorite = state.favorites.some(

@@ -59,7 +59,6 @@ pub fn run() {
             resolver::resolve_playback,
             resolver::probe_stream_urls,
             resolver::sniff_with_companion,
-            script_runtime::execute_script,
             script_runtime::archive::test_script_source,
             script_runtime::archive::list_script_archives,
             script_runtime::archive::list_script_execution_logs,

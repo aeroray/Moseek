@@ -22,7 +22,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Separator } from "@/components/ui/separator";
 import {
   Select,
   SelectContent,
@@ -35,7 +34,6 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   deleteScriptArchive,
-  executeScript,
   executeScriptArchive,
   isTauriRuntime,
   listScriptExecutionLogs,
@@ -53,6 +51,11 @@ interface SettingsViewProps {
   onThemeChange: (theme: ThemeMode) => void;
   autoEpgEnabled: boolean;
   onAutoEpgEnabledChange: (enabled: boolean) => void;
+  historyCount: number;
+  favoriteCount: number;
+  progressCount: number;
+  onClearHistory: () => void;
+  onClearFavorites: () => void;
 }
 
 export function SettingsView({
@@ -60,15 +63,20 @@ export function SettingsView({
   onThemeChange,
   autoEpgEnabled,
   onAutoEpgEnabledChange,
+  historyCount,
+  favoriteCount,
+  progressCount,
+  onClearHistory,
+  onClearFavorites,
 }: SettingsViewProps) {
-  const [runtimeScript, setRuntimeScript] = useState(
-    "function main(input) { return { title: input.title.toUpperCase(), fetchType: typeof fetch }; }",
-  );
-  const [runtimeInput, setRuntimeInput] = useState('{"title":"demo"}');
-  const [runtimeHosts, setRuntimeHosts] = useState("");
-  const [runtimeHeaders, setRuntimeHeaders] = useState("");
-  const [runtimeModules, setRuntimeModules] = useState("");
-  const [runtimeOutput, setRuntimeOutput] = useState("");
+  const [storageMessage, setStorageMessage] = useState("");
+  /**
+   * The script-archive tooling is off by default. It is a power-user feature — most sources work
+   * without it, and the fields it asks for (entry function, HTTP allowlist, module map) are not
+   * meaningful to someone who just wants to watch something. Hiding it behind a disclosure keeps
+   * the settings page answerable for an ordinary user.
+   */
+  const [showScriptTools, setShowScriptTools] = useState(false);
   const [isExecutingScript, setIsExecutingScript] = useState(false);
   const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
     [],
@@ -107,63 +115,6 @@ export function SettingsView({
         if (logs) setScriptExecutionLogs(logs);
       })
       .catch(() => undefined);
-  };
-
-  const handleExecuteScript = async () => {
-    if (isExecutingScript) return;
-    setIsExecutingScript(true);
-    try {
-      const input = JSON.parse(runtimeInput) as unknown;
-      const httpHeaders = runtimeHeaders.trim()
-        ? (JSON.parse(runtimeHeaders) as Record<string, string>)
-        : {};
-      const result = await executeScript({
-        script: runtimeScript,
-        entry: "main",
-        input,
-        httpHosts: runtimeHosts
-          .split(",")
-          .map((host) => host.trim())
-          .filter(Boolean),
-        httpHeaders,
-        modules: runtimeModules.trim()
-          ? (JSON.parse(runtimeModules) as Record<string, string>)
-          : {},
-      });
-      if (!result) {
-        throw new Error(
-          "浏览器预览不会执行脚本运行时，请在 Tauri 桌面应用中使用。 ",
-        );
-      }
-      setRuntimeOutput(
-        JSON.stringify(
-          {
-            ok: true,
-            value: result.value,
-            adapterId: result.adapterId,
-            httpCallCount: result.httpCallCount,
-            diagnostics: result.diagnostics,
-          },
-          null,
-          2,
-        ),
-      );
-      refreshScriptExecutionLogs();
-    } catch (error) {
-      setRuntimeOutput(
-        JSON.stringify(
-          {
-            ok: false,
-            error: error instanceof Error ? error.message : "脚本执行失败",
-          },
-          null,
-          2,
-        ),
-      );
-      refreshScriptExecutionLogs();
-    } finally {
-      setIsExecutingScript(false);
-    }
   };
 
   const handleImportScriptArchive = async (
@@ -281,37 +232,24 @@ export function SettingsView({
   const handleExecuteScriptArchive = async (archive: ScriptArchiveSummary) => {
     if (isExecutingScript || !archive.enabled) return;
     setIsExecutingScript(true);
+    setArchiveMessage("");
     try {
-      const input = JSON.parse(runtimeInput) as unknown;
-      const result = await executeScriptArchive(archive.id, input);
+      // The archive is invoked with an empty input: this button exists to confirm the script
+      // runs at all, not to drive it with a payload. The real inputs come from whichever source
+      // is bound to the archive, at browse time.
+      const result = await executeScriptArchive(archive.id, {});
       if (!result) throw new Error("浏览器预览不会执行脚本档案。");
-      setRuntimeOutput(
-        JSON.stringify(
-          {
-            ok: true,
-            archive: archive.name,
-            value: result.value,
-            adapterId: result.adapterId,
-            httpCallCount: result.httpCallCount,
-            diagnostics: result.diagnostics,
-          },
-          null,
-          2,
-        ),
+      setArchiveMessage(
+        `「${archive.name}」执行成功：${result.httpCallCount} 次网络调用。`,
       );
       const archives = await listScriptArchives();
       if (archives) setScriptArchives(archives);
       refreshScriptExecutionLogs();
     } catch (error) {
-      setRuntimeOutput(
-        JSON.stringify(
-          {
-            ok: false,
-            error: error instanceof Error ? error.message : "脚本档案执行失败",
-          },
-          null,
-          2,
-        ),
+      setArchiveMessage(
+        `「${archive.name}」执行失败：${
+          error instanceof Error ? error.message : "未知错误"
+        }`,
       );
       refreshScriptExecutionLogs();
     } finally {
@@ -344,10 +282,7 @@ export function SettingsView({
             <TabsTrigger value="storage">存储</TabsTrigger>
           </TabsList>
 
-          <TabsContent
-            value="appearance"
-            className="grid grid-cols-[1.2fr_0.8fr] gap-6"
-          >
+          <TabsContent value="appearance">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
@@ -361,7 +296,7 @@ export function SettingsView({
                   value={theme}
                   onValueChange={(value) => onThemeChange(value as ThemeMode)}
                 >
-                  <SelectTrigger className="w-full">
+                  <SelectTrigger className="w-full max-w-sm">
                     <SelectValue placeholder="选择主题" />
                   </SelectTrigger>
                   <SelectContent>
@@ -396,46 +331,9 @@ export function SettingsView({
                 </p>
               </CardContent>
             </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">界面状态</CardTitle>
-                <CardDescription>当前工作区的显示信息</CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">界面字体</span>
-                  <span className="font-medium">IBM Plex Sans</span>
-                </div>
-                <Separator />
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">动画时长</span>
-                  <span className="font-medium">160–240ms</span>
-                </div>
-                <Separator />
-                <div className="flex items-center justify-between">
-                  <span className="text-muted-foreground">缩放比例</span>
-                  <span className="font-medium">100%</span>
-                </div>
-              </CardContent>
-            </Card>
           </TabsContent>
 
           <TabsContent value="player" className="grid grid-cols-2 gap-6">
-            <PreferenceCard
-              title="播放行为"
-              description="控制播放器开始播放前后的行为"
-            >
-              <PreferenceRow label="自动记忆播放进度" checked />
-              <PreferenceRow label="默认跳过片头" />
-              <PreferenceRow label="播放失败时自动切换线路" />
-            </PreferenceCard>
-            <PreferenceCard
-              title="播放质量"
-              description="播放器只会使用已解析出的安全地址"
-            >
-              <PreferenceRow label="优先选择高清线路" checked />
-              <PreferenceRow label="允许 HTTP 播放地址" checked />
-            </PreferenceCard>
             <PreferenceCard
               className="col-span-2"
               title="电视直播节目单"
@@ -454,15 +352,7 @@ export function SettingsView({
             </PreferenceCard>
           </TabsContent>
 
-          <TabsContent value="security" className="grid grid-cols-2 gap-6">
-            <PreferenceCard
-              title="本机与局域网"
-              description="这些选项默认关闭，开启前会显示风险提示"
-            >
-              <PreferenceRow label="允许访问 127.0.0.1" />
-              <PreferenceRow label="允许访问局域网地址" />
-              <PreferenceRow label="允许本机服务依赖" />
-            </PreferenceCard>
+          <TabsContent value="security">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
@@ -470,7 +360,7 @@ export function SettingsView({
                   执行边界
                 </CardTitle>
                 <CardDescription>
-                  导入配置不会改变这些默认规则。
+                  这些规则由程序固定，导入配置无法改变。
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
@@ -488,23 +378,45 @@ export function SettingsView({
                     data-icon="inline-start"
                     aria-hidden="true"
                   />
+                  本机与局域网地址默认拒绝访问
+                </p>
+                <p className="flex items-start gap-2">
+                  <Check
+                    className="mt-0.5 shrink-0 text-[color:var(--status-supported)]"
+                    data-icon="inline-start"
+                    aria-hidden="true"
+                  />
                   日志会隐藏 token、Cookie 和密钥
                 </p>
               </CardContent>
             </Card>
             <Card className="col-span-2">
               <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <FileUp className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  本地脚本档案
-                </CardTitle>
-                <CardDescription>
-                  导入后默认停用；档案按 SHA-256 去重。Cookie 会保存到 Windows
-                  凭据存储，不会写入
-                  SQLite；删除只影响本地档案，不会修改原始配置。
-                </CardDescription>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex flex-col gap-1.5">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <FileUp className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
+                      本地脚本档案
+                    </CardTitle>
+                    <CardDescription>
+                      面向进阶用法：让使用 CatVod 脚本契约的源在本机执行。
+                      普通用户不需要配置，绝大多数源无需脚本即可使用。
+                    </CardDescription>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0"
+                    aria-expanded={showScriptTools}
+                    onClick={() => setShowScriptTools((value) => !value)}
+                  >
+                    {showScriptTools ? "收起" : "展开"}
+                  </Button>
+                </div>
               </CardHeader>
-              <CardContent className="flex flex-col gap-3">
+              {showScriptTools && (
+                <CardContent className="flex flex-col gap-3">
                 <input
                   ref={scriptFileInputRef}
                   type="file"
@@ -665,150 +577,122 @@ export function SettingsView({
                     )}
                   </div>
                 )}
-              </CardContent>
+                </CardContent>
+              )}
             </Card>
             <Card className="col-span-2">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <ShieldCheck data-icon="inline-start" aria-hidden="true" />
-                  受限脚本运行时
+                  脚本执行诊断
                 </CardTitle>
                 <CardDescription>
-                  只运行当前输入的脚本；无文件、Shell、DOM 和默认网络权限。HTTP
-                  主机必须显式列入 allowlist。
+                  脚本在受限运行时中执行：无文件、Shell、DOM 权限，HTTP
+                  主机必须显式列入 allowlist。这里只显示执行记录。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="grid grid-cols-2 gap-4">
-                <div className="flex flex-col gap-3">
-                  <Textarea
-                    value={runtimeScript}
-                    onChange={(event) => setRuntimeScript(event.target.value)}
-                    className="min-h-36 font-mono text-xs"
-                    aria-label="运行时脚本"
-                  />
-                  <Input
-                    value={runtimeInput}
-                    onChange={(event) => setRuntimeInput(event.target.value)}
-                    placeholder='{"title":"demo"}'
-                    aria-label="脚本 JSON 输入"
-                    className="font-mono text-xs"
-                  />
-                  <Input
-                    value={runtimeHosts}
-                    onChange={(event) => setRuntimeHosts(event.target.value)}
-                    placeholder="允许的 HTTP 主机，逗号分隔；留空表示禁止网络"
-                    aria-label="脚本 HTTP 主机 allowlist"
-                    className="font-mono text-xs"
-                  />
-                  <Textarea
-                    value={runtimeHeaders}
-                    onChange={(event) => setRuntimeHeaders(event.target.value)}
-                    placeholder='请求头 JSON，例如 {"Referer":"https://example.com"}'
-                    aria-label="脚本运行时请求头"
-                    className="min-h-16 font-mono text-xs"
-                  />
-                  <Textarea
-                    value={runtimeModules}
-                    onChange={(event) => setRuntimeModules(event.target.value)}
-                    placeholder='内存模块 JSON，例如 {"math.js":"export function add(value) { return value + 1; }"}'
-                    aria-label="脚本运行时内存模块"
-                    className="min-h-16 font-mono text-xs"
-                  />
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="w-fit gap-1.5"
-                    onClick={() => void handleExecuteScript()}
-                    disabled={isExecutingScript || !isTauriRuntime()}
-                  >
-                    <Check className="size-4" data-icon="inline-start" aria-hidden="true" />
-                    {isExecutingScript ? "执行中..." : "执行本地脚本"}
-                  </Button>
-                </div>
-                <div className="flex flex-col gap-3">
-                  <Textarea
-                    value={runtimeOutput}
-                    readOnly
-                    className="min-h-56 font-mono text-xs"
-                    placeholder="执行结果会显示在这里"
-                    aria-label="脚本执行结果"
-                  />
-                  {scriptExecutionLogs.length > 0 && (
-                    <div className="flex flex-col gap-2 rounded-md border p-3">
-                      <p className="text-xs font-medium">最近执行诊断</p>
-                      {scriptExecutionLogs.slice(0, 4).map((log) => (
-                        <div
-                          key={log.id}
-                          className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
-                        >
-                          <div className="flex min-w-0 items-center gap-2">
-                            <Badge
-                              variant={diagnosticStatusVariant(log.status)}
-                            >
-                              {diagnosticStatusLabel(log.status)}
-                            </Badge>
-                            <span className="truncate">
-                              {diagnosticPhaseLabel(log.phase)} ·{" "}
-                              {log.durationMs} ms
-                            </span>
-                          </div>
-                          <span className="shrink-0 font-mono">
-                            {log.httpCallCount} 次请求
-                            {log.errorKind
-                              ? ` · ${diagnosticErrorLabel(log.errorKind)}`
-                              : ""}
+              <CardContent className="flex flex-col gap-3">
+                {scriptExecutionLogs.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    暂无脚本执行记录。
+                  </p>
+                ) : (
+                  <div className="flex flex-col gap-2 rounded-md border p-3">
+                    {scriptExecutionLogs.slice(0, 4).map((log) => (
+                      <div
+                        key={log.id}
+                        className="flex items-center justify-between gap-3 text-xs text-muted-foreground"
+                      >
+                        <div className="flex min-w-0 items-center gap-2">
+                          <Badge variant={diagnosticStatusVariant(log.status)}>
+                            {diagnosticStatusLabel(log.status)}
+                          </Badge>
+                          <span className="truncate">
+                            {diagnosticPhaseLabel(log.phase)} · {log.durationMs} ms
                           </span>
                         </div>
-                      ))}
-                    </div>
+                        <span className="shrink-0 font-mono">
+                          {log.httpCallCount} 次请求
+                          {log.errorKind
+                            ? ` · ${diagnosticErrorLabel(log.errorKind)}`
+                            : ""}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="storage">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <Trash2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
+                  本地数据
+                </CardTitle>
+                <CardDescription>
+                  这些数据保存在本机，清除后不会影响你导入的配置文件。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                <div className="grid grid-cols-3 gap-3">
+                  <StorageStat label="播放记录" value={historyCount} />
+                  <StorageStat label="收藏" value={favoriteCount} />
+                  <StorageStat label="观看进度" value={progressCount} />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={historyCount === 0}
+                    onClick={() => {
+                      if (!window.confirm("清除全部播放记录与观看进度？收藏会保留。")) {
+                        return;
+                      }
+                      onClearHistory();
+                      setStorageMessage("已清除播放记录与观看进度。");
+                    }}
+                  >
+                    清除播放记录
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={favoriteCount === 0}
+                    onClick={() => {
+                      if (!window.confirm("清除全部收藏？播放记录会保留。")) return;
+                      onClearFavorites();
+                      setStorageMessage("已清除收藏。");
+                    }}
+                  >
+                    清除收藏
+                  </Button>
+                  {storageMessage && (
+                    <p className="text-xs text-muted-foreground">
+                      {storageMessage}
+                    </p>
                   )}
                 </div>
               </CardContent>
             </Card>
           </TabsContent>
-
-          <TabsContent value="storage" className="grid grid-cols-2 gap-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">本地路径</CardTitle>
-                <CardDescription>
-                  缓存和下载目录将在 Rust 存储层接入后生效。
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-3 text-sm">
-                <div className="rounded-md border bg-muted/25 p-3">
-                  <p className="text-xs text-muted-foreground">缓存位置</p>
-                  <p className="mt-1 font-medium">
-                    %LOCALAPPDATA%\Moseek\cache
-                  </p>
-                </div>
-                <div className="rounded-md border bg-muted/25 p-3">
-                  <p className="text-xs text-muted-foreground">下载位置</p>
-                  <p className="mt-1 font-medium">
-                    %USERPROFILE%\Downloads\Moseek
-                  </p>
-                </div>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Trash2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  数据清理
-                </CardTitle>
-                <CardDescription>
-                  只清理本地缓存，不会删除原始配置文件。
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <Button type="button" variant="outline">
-                  清理请求缓存
-                </Button>
-              </CardContent>
-            </Card>
-          </TabsContent>
         </Tabs>
       </div>
+    </div>
+  );
+}
+
+function StorageStat({ label, value }: { label: string; value: number }) {
+  return (
+    <div className="rounded-md border bg-muted/25 p-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 font-display text-lg font-semibold tabular-nums">
+        {value}
+      </p>
     </div>
   );
 }

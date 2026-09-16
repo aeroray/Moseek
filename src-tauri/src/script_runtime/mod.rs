@@ -10,7 +10,6 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::AppHandle;
-use tauri::State;
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
     ShellExt,
@@ -18,7 +17,6 @@ use tauri_plugin_shell::{
 use tokio::time::timeout;
 
 use crate::policy::{fetch_text_with_headers, validate_remote_url};
-use crate::AppDatabase;
 
 const MAX_SCRIPT_EXECUTION_TIME: Duration = Duration::from_secs(20);
 const MAX_HOST_CALL_TIME: Duration = Duration::from_secs(16);
@@ -139,15 +137,6 @@ struct ScriptRunOutcome {
     value: Result<Value, String>,
     http_call_count: u32,
     http_calls: Vec<ScriptHttpDiagnostic>,
-}
-
-#[tauri::command]
-pub async fn execute_script(
-    app: AppHandle,
-    request: ScriptExecutionRequest,
-    state: State<'_, AppDatabase>,
-) -> Result<ScriptExecutionResult, String> {
-    run_script(app, request, &state.0, None).await
 }
 
 async fn run_script(
