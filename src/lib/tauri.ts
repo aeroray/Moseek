@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type {
   CatalogPage,
@@ -133,8 +132,6 @@ export interface SaveScriptArchiveInput {
   httpHeaders?: Record<string, string>;
   modules?: Record<string, string>;
 }
-
-export const DEFAULT_SNIFFER_COMPANION_URL = "http://127.0.0.1:57573/sniffer";
 
 export function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -320,17 +317,6 @@ export async function probeStreamUrls(urls: string[], timeoutMs?: number) {
   });
 }
 
-export async function sniffWithCompanion(
-  targetUrl: string,
-  companionUrl = DEFAULT_SNIFFER_COMPANION_URL,
-) {
-  return invokeCommand<PlaybackResolution>("sniff_with_companion", {
-    targetUrl,
-    companionUrl,
-    timeoutMs: 15_000,
-  });
-}
-
 export async function executeScript(request: ScriptExecutionRequest) {
   return invokeCommand<ScriptExecutionResult>("execute_script", { request });
 }
@@ -384,27 +370,6 @@ export async function executeScriptArchive(
     input,
     entry: entry ?? null,
   });
-}
-
-export async function openExternalUrl(
-  url: string,
-  parseServices: ParseServiceRecord[] = [],
-) {
-  const resolved = await resolvePlayback(url, parseServices);
-  const targetUrl = resolved?.url ?? url;
-  const parsedUrl = new URL(targetUrl);
-  if (!matchesHttpProtocol(parsedUrl.protocol)) {
-    throw new Error("只允许打开 HTTP 或 HTTPS 媒体地址");
-  }
-  if (isTauriRuntime()) {
-    await openUrl(targetUrl);
-    return;
-  }
-  window.open(targetUrl, "_blank", "noopener,noreferrer");
-}
-
-function matchesHttpProtocol(protocol: string) {
-  return protocol === "http:" || protocol === "https:";
 }
 
 async function invokeCommand<T>(

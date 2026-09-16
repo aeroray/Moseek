@@ -902,7 +902,7 @@ export function MediaPlayer({
   return (
     <div
       className={cn(
-        "relative overflow-hidden rounded-md bg-black shadow-2xl ring-1 ring-border/40",
+        "relative overflow-hidden rounded-md bg-black ring-1 ring-border/40",
         // The live workspace centres this wrapper inside a large flex container. Without an
         // explicit size it shrinks to the <video> element's intrinsic 300x150 box, so the
         // player rendered as a small stamp in the middle of the surface. `fill` makes it
@@ -958,7 +958,7 @@ export function MediaPlayer({
               ? "已尝试可用的线路，但仍未能取得可播放的画面。"
               : "播放器未能取得可播放的画面。"}
             常见原因是上游地址已失效、本机网络无法访问该地址，或当前播放环境不支持该媒体格式。
-            具体环节见下方「播放诊断」。
+            具体环节见「播放诊断」。
           </p>
           <Button
             type="button"

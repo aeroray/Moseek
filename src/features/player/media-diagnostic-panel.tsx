@@ -1,10 +1,5 @@
 import { useMemo, useState } from "react";
-import {
-  ChevronDown,
-  ClipboardCheck,
-  ClipboardCopy,
-  ScrollText,
-} from "lucide-react";
+import { ClipboardCheck, ClipboardCopy, ScrollText } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -14,11 +9,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   mediaPipelineLabels,
@@ -31,27 +21,14 @@ interface MediaDiagnosticPanelProps {
   snapshot: MediaDiagnosticSnapshot | null;
   note?: string | null;
   className?: string;
-  /**
-   * Render as a collapsed disclosure whose trigger doubles as the player status line. The
-   * player page needs one row that both summarises state and reveals the diagnostics, instead
-   * of a status strip plus a permanently expanded panel.
-   */
-  collapsible?: boolean;
-  /** Summary content shown on the trigger, supplied by the caller that owns the status. */
-  summary?: React.ReactNode;
-  defaultOpen?: boolean;
 }
 
 export function MediaDiagnosticPanel({
   snapshot,
   note,
   className,
-  collapsible = false,
-  summary,
-  defaultOpen = false,
 }: MediaDiagnosticPanelProps) {
   const [copyState, setCopyState] = useState<"idle" | "done" | "failed">("idle");
-  const [open, setOpen] = useState(defaultOpen);
   const report = useMemo(
     () => buildReportText(snapshot, note),
     [note, snapshot],
@@ -212,64 +189,6 @@ export function MediaDiagnosticPanel({
       )}
     </>
   );
-
-  if (collapsible) {
-    return (
-      <Collapsible
-        open={open}
-        onOpenChange={setOpen}
-        className={cn(className)}
-      >
-        {/* One surface for both states, so expanding does not shift the player or change the
-            row's identity. The trigger is the old standalone status strip, which is where the
-            summary now lives instead of occupying its own bar. */}
-        <Card className="gap-0 overflow-hidden py-0">
-          <CollapsibleTrigger asChild>
-            <button
-              type="button"
-              aria-label={open ? "收起播放诊断" : "展开播放诊断"}
-              className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition-colors hover:bg-muted/30"
-            >
-              <div className="flex min-w-0 items-center gap-3 text-sm">
-                <ScrollText
-                  className="size-4 shrink-0 text-primary"
-                  aria-hidden="true"
-                />
-                {summary ?? (
-                  <span className="font-medium">
-                    {snapshot
-                      ? mediaStatusLabels[snapshot.status]
-                      : "播放诊断"}
-                  </span>
-                )}
-              </div>
-              <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-                播放诊断
-                <ChevronDown
-                  className={cn(
-                    "size-4 transition-transform duration-200",
-                    open && "rotate-180",
-                  )}
-                  aria-hidden="true"
-                />
-              </span>
-            </button>
-          </CollapsibleTrigger>
-          <CollapsibleContent>
-            <div className="flex flex-col gap-3 border-t border-border/60 px-4 py-3">
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-muted-foreground">
-                  播放失败时复制这段内容，可直接定位到具体环节
-                </p>
-                {copyButton}
-              </div>
-              {body}
-            </div>
-          </CollapsibleContent>
-        </Card>
-      </Collapsible>
-    );
-  }
 
   return (
     <Card className={cn(className)}>

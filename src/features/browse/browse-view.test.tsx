@@ -7,7 +7,7 @@ import type { CatalogPage, SourceRecord, VodItem } from "@/types/moseek";
 const searchVod = vi.fn();
 
 // Only the adapter's network call is stubbed. The real module is spread back in so its other
-// exports (and the store's import of DEFAULT_SNIFFER_COMPANION_URL) still resolve.
+// exports still resolve.
 vi.mock("@/features/browse/cms-adapter", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/features/browse/cms-adapter")>();
   return {
@@ -125,5 +125,30 @@ describe("BrowseView catalog metadata", () => {
     });
     const img = document.querySelector("img");
     expect(img).toHaveAttribute("src", "https://img.example/poster.jpg");
+  });
+
+  it("labels the quick-play button 立即播放", async () => {
+    // It read "立即起播", which is not how anyone says it.
+    searchVod.mockResolvedValue(
+      page([
+        vodItem({
+          playLines: [
+            {
+              id: "line-1",
+              name: "dyttm3u8",
+              episodes: [{ id: "ep-1", name: "第01集", url: "https://cdn/1.m3u8" }],
+            },
+          ],
+        }),
+      ]),
+    );
+    render(<BrowseView onNavigate={() => {}} />);
+
+    const card = await screen.findByText("测试影片");
+    card.click();
+
+    const play = await screen.findByRole("button", { name: /立即播放：第01集/ });
+    expect(play).toBeInTheDocument();
+    expect(screen.queryByText(/立即起播/)).not.toBeInTheDocument();
   });
 });

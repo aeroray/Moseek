@@ -669,7 +669,7 @@ function DetailView({
                     }
                   >
                     <Play className="size-3.5 fill-current" />
-                    立即起播：{selectedLine.episodes[0].name}
+                    立即播放：{selectedLine.episodes[0].name}
                   </Button>
                 </div>
               )}

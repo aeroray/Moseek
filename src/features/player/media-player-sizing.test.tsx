@@ -118,4 +118,22 @@ describe("MediaPlayer sizing contract", () => {
     const video = playerWrapper()?.querySelector("video");
     expect(video?.className).not.toContain("opacity-0");
   });
+
+  it("does not cast a drop shadow around the player surface", () => {
+    // The player sat on a `shadow-2xl` halo, which read as a floating card against the
+    // cinematic-obsidian background instead of a picture filling the column. The hairline
+    // `ring` is what still separates the surface from the page.
+    render(
+      <MediaPlayer
+        title="Movie 1 · EP1"
+        url="https://cdn.example/1.m3u8"
+        kind="hls"
+      />,
+    );
+
+    const wrapper = playerWrapper();
+    expect(wrapper?.className).not.toContain("shadow-2xl");
+    expect(wrapper?.className).not.toMatch(/\bshadow-/);
+    expect(wrapper?.className).toContain("ring-1");
+  });
 });

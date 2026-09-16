@@ -51,8 +51,6 @@ import type { ScriptArchiveSummary, ThemeMode } from "@/types/moseek";
 interface SettingsViewProps {
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
-  snifferCompanionUrl: string;
-  onSnifferCompanionUrlChange: (url: string) => void;
   autoEpgEnabled: boolean;
   onAutoEpgEnabledChange: (enabled: boolean) => void;
 }
@@ -60,8 +58,6 @@ interface SettingsViewProps {
 export function SettingsView({
   theme,
   onThemeChange,
-  snifferCompanionUrl,
-  onSnifferCompanionUrlChange,
   autoEpgEnabled,
   onAutoEpgEnabledChange,
 }: SettingsViewProps) {
@@ -439,7 +435,6 @@ export function SettingsView({
             >
               <PreferenceRow label="优先选择高清线路" checked />
               <PreferenceRow label="允许 HTTP 播放地址" checked />
-              <PreferenceRow label="使用外部播放器" />
             </PreferenceCard>
             <PreferenceCard
               className="col-span-2"
@@ -495,29 +490,8 @@ export function SettingsView({
                   />
                   日志会隐藏 token、Cookie 和密钥
                 </p>
-                <p className="flex items-start gap-2">
-                  <Check
-                    className="mt-0.5 shrink-0 text-[color:var(--status-supported)]"
-                    data-icon="inline-start"
-                    aria-hidden="true"
-                  />
-                  外部播放器只在用户主动触发时打开
-                </p>
               </CardContent>
             </Card>
-            <PreferenceCard
-              title="本地嗅探伴侣"
-              description="仅连接本机回环地址，不会把嗅探请求发送到远程服务"
-            >
-              <Input
-                value={snifferCompanionUrl}
-                onChange={(event) =>
-                  onSnifferCompanionUrlChange(event.target.value)
-                }
-                placeholder="http://127.0.0.1:57573/sniffer"
-                aria-label="本地嗅探伴侣地址"
-              />
-            </PreferenceCard>
             <Card className="col-span-2">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">

@@ -2,7 +2,6 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import {
-  DEFAULT_SNIFFER_COMPANION_URL,
   setSourceEnabled,
   type ConfigDocumentSummary,
   type StoredConfigDocument,
@@ -22,7 +21,6 @@ const sourceToggleQueues = new Map<string, Promise<void>>();
 interface AppStore {
   activeView: ViewKey;
   theme: ThemeMode;
-  snifferCompanionUrl: string;
   /**
    * Opt-out for the built-in programme guide. On by default because the guide is display-only
    * enrichment and most public lists declare no `epg`; off means only an explicitly configured
@@ -42,7 +40,6 @@ interface AppStore {
   liveFavorites: string[];
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
-  setSnifferCompanionUrl: (url: string) => void;
   setAutoEpgEnabled: (enabled: boolean) => void;
   toggleSource: (key: string) => Promise<void>;
   setSourceTestResult: (key: string, result: SourceTestResult) => void;
@@ -68,7 +65,6 @@ export const useAppStore = create<AppStore>()(
     (set, get) => ({
       activeView: "browse",
       theme: "system",
-      snifferCompanionUrl: DEFAULT_SNIFFER_COMPANION_URL,
       autoEpgEnabled: true,
       configDocuments: [],
       configDocumentCache: {},
@@ -83,8 +79,6 @@ export const useAppStore = create<AppStore>()(
       liveFavorites: [],
       setActiveView: (activeView) => set({ activeView }),
       setTheme: (theme) => set({ theme }),
-      setSnifferCompanionUrl: (snifferCompanionUrl) =>
-        set({ snifferCompanionUrl }),
       setAutoEpgEnabled: (autoEpgEnabled) => set({ autoEpgEnabled }),
       toggleSource: async (key) => {
         const initialState = get();
@@ -284,8 +278,6 @@ export const useAppStore = create<AppStore>()(
         return {
           ...currentState,
           ...persisted,
-          snifferCompanionUrl:
-            persisted?.snifferCompanionUrl ?? currentState.snifferCompanionUrl,
           // Defaults to on for existing installs that predate the setting.
           autoEpgEnabled:
             persisted?.autoEpgEnabled ?? currentState.autoEpgEnabled,
@@ -310,7 +302,6 @@ export const useAppStore = create<AppStore>()(
       partialize: (state) => ({
         activeView: state.activeView,
         theme: state.theme,
-        snifferCompanionUrl: state.snifferCompanionUrl,
         autoEpgEnabled: state.autoEpgEnabled,
         configDocuments: state.configDocuments,
         configDocumentCache: state.configDocumentCache,

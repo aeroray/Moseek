@@ -44,12 +44,8 @@ const SettingsView = lazy(() =>
 function App() {
   const activeView = useAppStore((state) => state.activeView);
   const theme = useAppStore((state) => state.theme);
-  const snifferCompanionUrl = useAppStore((state) => state.snifferCompanionUrl);
   const setActiveView = useAppStore((state) => state.setActiveView);
   const setTheme = useAppStore((state) => state.setTheme);
-  const setSnifferCompanionUrl = useAppStore(
-    (state) => state.setSnifferCompanionUrl,
-  );
   const autoEpgEnabled = useAppStore((state) => state.autoEpgEnabled);
   const setAutoEpgEnabled = useAppStore((state) => state.setAutoEpgEnabled);
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
@@ -110,8 +106,6 @@ function App() {
           <SettingsView
             theme={theme}
             onThemeChange={setTheme}
-            snifferCompanionUrl={snifferCompanionUrl}
-            onSnifferCompanionUrlChange={setSnifferCompanionUrl}
             autoEpgEnabled={autoEpgEnabled}
             onAutoEpgEnabledChange={setAutoEpgEnabled}
           />

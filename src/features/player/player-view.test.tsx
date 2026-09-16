@@ -114,41 +114,77 @@ describe("PlayerView composition", () => {
     expect(screen.queryByText("播放边界")).not.toBeInTheDocument();
   });
 
-  it("folds the status strip and diagnostics into one collapsed row", () => {
-    // The status used to be its own bar with no actionable content, and the diagnostics sat
-    // permanently expanded below it.
+  it("collapses the back control to an icon", () => {
+    // The header used to spell out "返回列表" next to an ArrowLeft. The label was the widest
+    // thing in a header whose only job is to name the work.
     renderPlayer();
 
-    const trigger = screen.getByLabelText("展开播放诊断");
-    expect(trigger).toBeInTheDocument();
-    // Collapsed means the timeline is genuinely not rendered.
+    const back = screen.getByLabelText("返回列表");
+    expect(back.textContent).toBe("");
+    expect(document.querySelector("header")?.textContent).not.toContain("返回列表");
+  });
+
+  it("removes the source/line/episode sub-line from the header", () => {
+    // The same facts are already visible in the episode rail and on the player itself.
+    renderPlayer();
+
+    const header = document.querySelector("header");
+    expect(header?.textContent).not.toContain("电影天堂");
+    expect(header?.textContent).not.toContain("dyttm3u8");
+  });
+
+  it("moves the episode stepper below the player", async () => {
+    // 上一集/下一集 sat in the header next to the title, far from the picture they change.
+    renderPlayer();
+
+    const header = document.querySelector("header");
+    expect(header?.textContent).not.toContain("上一集");
+    expect(header?.textContent).not.toContain("下一集");
+
+    // They live in the player column, after the player surface. The player only mounts once
+    // the episode address has been resolved, so this has to await it.
+    const player = await screen.findByTestId("media-player");
+    const stepper = screen.getByRole("button", { name: "上一集" });
+    expect(
+      player.compareDocumentPosition(stepper) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("removes the overflow menu and its sniffing / external-player actions", () => {
+    // Both features were deleted outright: the sniffer companion and the external player are
+    // no longer reachable from the app.
+    renderPlayer();
+
+    expect(screen.queryByLabelText("更多播放操作")).not.toBeInTheDocument();
+    expect(screen.queryByText("本地嗅探")).not.toBeInTheDocument();
+    expect(screen.queryByText("用外部播放器打开")).not.toBeInTheDocument();
+  });
+
+  it("keeps no status strip and no diagnostics row while playback is healthy", () => {
+    // The status line under the player restated what the player controls already show, and a
+    // healthy session has no diagnostics worth reading.
+    renderPlayer();
+
+    expect(screen.queryByText("等待播放")).not.toBeInTheDocument();
+    expect(screen.queryByText("已暂停")).not.toBeInTheDocument();
+    expect(screen.queryByText("播放诊断")).not.toBeInTheDocument();
     expect(screen.queryByText(/事件时间线/)).not.toBeInTheDocument();
   });
 
-  it("reveals the diagnostics in place when the row is expanded", () => {
+  it("offers the diagnostics as a dialog once playback fails", async () => {
+    // The panel became a button that opens a modal, and it only exists after a failure.
+    resolvePlayback.mockRejectedValue(new Error("上游拒绝访问当前地址"));
     renderPlayer();
 
-    fireEvent.click(screen.getByLabelText("展开播放诊断"));
+    const trigger = await screen.findByRole("button", { name: /播放诊断/ });
+    // Nothing from the panel body is mounted until the dialog opens.
+    expect(screen.queryByRole("button", { name: /复制诊断/ })).not.toBeInTheDocument();
 
-    expect(screen.getByLabelText("收起播放诊断")).toBeInTheDocument();
-    // The copy action and its hint live inside the collapsed content, so their presence proves
-    // the panel actually expanded. (The timeline itself needs a live player snapshot, which
-    // this suite stubs out.)
-    expect(screen.getByRole("button", { name: /复制诊断/ })).toBeInTheDocument();
-    expect(
-      screen.getByText("播放失败时复制这段内容，可直接定位到具体环节"),
-    ).toBeInTheDocument();
-  });
+    fireEvent.click(trigger);
 
-  it("moves the secondary actions into an overflow menu", () => {
-    // 本地嗅探 and 外部播放器 were a prominent pair on every playback screen despite being
-    // rarely used, and they crowded the header.
-    renderPlayer();
-
-    expect(screen.getByLabelText("更多播放操作")).toBeInTheDocument();
-    const header = document.querySelector("header");
-    expect(header?.textContent).not.toContain("本地嗅探");
-    expect(header?.textContent).not.toContain("外部播放器");
+    expect(await screen.findByRole("button", { name: /复制诊断/ })).toBeInTheDocument();
+    // The failure reason is carried into the dialog as the panel's note.
+    expect(screen.getAllByText(/上游拒绝访问当前地址/).length).toBeGreaterThan(0);
   });
 
   it("lets the episode rail fill its column instead of a fixed height", () => {

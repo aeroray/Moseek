@@ -1,13 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   AlertTriangle,
-  ArrowLeft,
   ChevronLeft,
   ChevronRight,
-  EllipsisVertical,
-  ExternalLink,
   ListVideo,
-  ScanSearch,
+  ScrollText,
 } from "lucide-react";
 
 import { CapabilityBadge } from "@/components/capability-badge";
@@ -22,21 +19,20 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAppStore } from "@/stores/app-store";
 import {
   executeScriptArchive,
   isTauriRuntime,
-  openExternalUrl,
   resolvePlayback,
-  sniffWithCompanion,
   type PlaybackResolution,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
@@ -69,7 +65,6 @@ export function PlayerView({
   const addHistory = useAppStore((state) => state.addHistory);
   const playbackProgress = useAppStore((state) => state.playbackProgress);
   const normalizedConfig = useAppStore((state) => state.normalizedConfig);
-  const snifferCompanionUrl = useAppStore((state) => state.snifferCompanionUrl);
   const setPlaybackProgress = useAppStore((state) => state.setPlaybackProgress);
   const [activeLineId, setActiveLineId] = useState(request.line.id);
   const [activeEpisodeId, setActiveEpisodeId] = useState(request.episode.id);
@@ -77,7 +72,7 @@ export function PlayerView({
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [mediaDiagnostic, setMediaDiagnostic] =
     useState<MediaDiagnosticSnapshot | null>(null);
-  const [isSniffing, setIsSniffing] = useState(false);
+  const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(false);
   const [resolvedPlayback, setResolvedPlayback] =
     useState<PlaybackResolution | null>(
       isTauriRuntime()
@@ -186,153 +181,42 @@ export function PlayerView({
     if (nextEpisode) selectEpisode(activeLine, nextEpisode);
   };
 
-  const handleExternalPlayer = async () => {
-    try {
-      await openExternalUrl(
-        resolvedPlayback?.url ?? activeEpisode.url,
-        parseParseServices(normalizedConfig),
-      );
-      setDiagnostic("已按用户操作打开外部播放地址。");
-    } catch (error) {
-      setDiagnostic(
-        error instanceof Error ? error.message : "无法打开外部播放地址",
-      );
-    }
-  };
-
-  const handleLocalSniff = async () => {
-    if (isSniffing || !isTauriRuntime()) return;
-    setIsSniffing(true);
-    setDiagnostic(null);
-    setStatus("loading");
-    try {
-      const resolved = await sniffWithCompanion(
-        activeEpisode.url,
-        snifferCompanionUrl,
-      );
-      if (!resolved) throw new Error("桌面运行时未返回嗅探结果");
-      setResolvedPlayback(resolved);
-      setStatus("idle");
-      setDiagnostic("本地嗅探伴侣已返回通过安全检查的播放地址。");
-    } catch (error) {
-      setStatus("error");
-      setDiagnostic(error instanceof Error ? error.message : "本地嗅探失败");
-    } finally {
-      setIsSniffing(false);
-    }
-  };
-
-  const displayMediaKind = resolvedPlayback?.mediaKind ?? mediaKind;
   const canRenderPlayer = !isTauriRuntime() || resolvedPlayback !== null;
-
-  const statusDotClass =
-    status === "error"
-      ? "bg-destructive"
-      : status === "playing"
-        ? "bg-[color:var(--status-supported)]"
-        : status === "loading"
-          ? "animate-pulse bg-primary"
-          : "bg-muted-foreground";
 
   return (
     // The page owns its scrolling, so the root must be a flex column with an explicit height
     // and `min-h-0` on the scrolling child. Previously the root was `h-full` while the inner
     // column was taller than the viewport, which clipped the top of the right-hand list.
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      {/* Single header row: back, title, episode stepper. The title leads with the work's name
-          because the previous "播放器视窗" heading named the widget instead of the content. */}
+      {/* Single header row: back and the work's name. The episode stepper moved below the
+          player, and the source/line/episode sub-line was dropped because the same facts are
+          already visible in the episode rail and the player itself. */}
       <header className="flex shrink-0 items-center gap-3 border-b border-border/70 bg-card/40 px-5 py-2.5 backdrop-blur-md select-none">
         <Button
           type="button"
           variant="ghost"
-          size="sm"
-          className="gap-1.5 text-muted-foreground hover:text-foreground"
+          size="icon-sm"
+          aria-label="返回列表"
+          title="返回列表"
+          className="text-muted-foreground hover:text-foreground"
           onClick={onBack}
         >
-          <ArrowLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
-          返回列表
+          <ChevronLeft className="size-4" aria-hidden="true" />
         </Button>
 
         <div className="mx-1 h-5 w-px shrink-0 bg-border/70" aria-hidden="true" />
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <h1 className="truncate font-display text-sm font-bold tracking-tight text-foreground">
-            {item.name}
-          </h1>
-          <div className="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="truncate">{source.name}</span>
-            <span aria-hidden="true">·</span>
-            <span className="shrink-0">{activeLine.name}</span>
-            <span aria-hidden="true">·</span>
-            <span className="shrink-0 font-medium text-primary">
-              {activeEpisode.name}
-            </span>
-            <span className="shrink-0 text-muted-foreground/70">
-              （{activeIndex + 1} / {activeLine.episodes.length}）
-            </span>
-          </div>
-        </div>
+        <h1 className="min-w-0 flex-1 truncate font-display text-sm font-bold tracking-tight text-foreground">
+          {item.name}
+        </h1>
 
-        <div className="flex shrink-0 items-center gap-2">
-          {/* Only surfaced when the source is not fully usable: a green "可用" badge on every
-              ordinary source is noise, while a degraded one is worth knowing about. */}
-          {source.capability !== "supported" && (
+        {/* Only surfaced when the source is not fully usable: a green "可用" badge on every
+            ordinary source is noise, while a degraded one is worth knowing about. */}
+        {source.capability !== "supported" && (
+          <div className="flex shrink-0 items-center gap-2">
             <CapabilityBadge status={source.capability} />
-          )}
-          {/* The two auxiliary actions moved off the header into an overflow menu. They were a
-              prominent pair of buttons on every playback screen even though they are rarely
-              used, and they pushed the header wide on narrow windows. */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                type="button"
-                variant="outline"
-                size="icon-sm"
-                aria-label="更多播放操作"
-              >
-                <EllipsisVertical className="size-4" aria-hidden="true" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48">
-              <DropdownMenuLabel className="text-xs text-muted-foreground">
-                播放方式
-              </DropdownMenuLabel>
-              <DropdownMenuItem
-                disabled={!isTauriRuntime() || isSniffing}
-                onSelect={() => void handleLocalSniff()}
-              >
-                <ScanSearch className="size-4" aria-hidden="true" />
-                {isSniffing ? "嗅探中..." : "本地嗅探"}
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void handleExternalPlayer()}>
-                <ExternalLink className="size-4" aria-hidden="true" />
-                用外部播放器打开
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={activeIndex <= 0}
-            onClick={() => stepEpisode(-1)}
-          >
-            <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
-            上一集
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={
-              activeIndex < 0 || activeIndex >= activeLine.episodes.length - 1
-            }
-            onClick={() => stepEpisode(1)}
-          >
-            下一集
-            <ChevronRight className="size-4" data-icon="inline-end" aria-hidden="true" />
-          </Button>
-        </div>
+          </div>
+        )}
       </header>
 
       <div className="grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_340px] gap-4 overflow-hidden p-5">
@@ -355,7 +239,15 @@ export function PlayerView({
                   setStatus(nextStatus);
                   if (message) setDiagnostic(message);
                 }}
-                onDiagnostic={setMediaDiagnostic}
+                onDiagnostic={(snapshot) =>
+                  // Diagnostics only exist to explain a failure, so a healthy session keeps no
+                  // snapshot at all. `MediaPlayer` still buffers its event ring internally —
+                  // the events leading up to a failure are the evidence — but the page only
+                  // retains a report once there is something to report.
+                  setMediaDiagnostic(
+                    snapshot.status === "error" ? snapshot : null,
+                  )
+                }
               />
             ) : (
               <div className="flex aspect-video items-center justify-center rounded-md bg-muted text-sm text-muted-foreground">
@@ -363,6 +255,8 @@ export function PlayerView({
               </div>
             )}
 
+            {/* A failed episode states why on the player surface already; this repeats it in
+                full width so the reason is readable without hovering the overlay. */}
             {diagnostic && status === "error" && (
               <Alert variant="destructive">
                 <AlertTriangle className="size-4" data-icon="inline-start" aria-hidden="true" />
@@ -373,23 +267,73 @@ export function PlayerView({
               </Alert>
             )}
 
-            {/* Status and diagnostics share one surface: the collapsed row is the status strip,
-                and expanding reveals the detail in place instead of dumping it permanently
-                below the player. */}
-            <MediaDiagnosticPanel
-              collapsible
-              snapshot={mediaDiagnostic}
-              note={diagnostic && status !== "error" ? diagnostic : null}
-              summary={
-                <>
-                  <span className={`size-2 shrink-0 rounded-full ${statusDotClass}`} />
-                  <span className="font-medium">{statusLabel(status)}</span>
-                  <span className="truncate font-mono text-xs text-muted-foreground">
-                    {displayMediaKind.toUpperCase()} · {formatSeconds(resumeAt)}
-                  </span>
-                </>
-              }
-            />
+            {/* The episode stepper owns the row under the player, where the removed status
+                strip used to sit. It stays visible while an episode is playing, so stepping
+                never requires reaching back up to the header. */}
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={activeIndex <= 0}
+                  onClick={() => stepEpisode(-1)}
+                >
+                  <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+                  上一集
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={
+                    activeIndex < 0 ||
+                    activeIndex >= activeLine.episodes.length - 1
+                  }
+                  onClick={() => stepEpisode(1)}
+                >
+                  下一集
+                  <ChevronRight className="size-4" data-icon="inline-end" aria-hidden="true" />
+                </Button>
+              </div>
+
+              {/* Diagnostics are only reachable when there is something to diagnose. A healthy
+                  playback keeps no timeline worth reading, so the entry point stays hidden and
+                  a failure is what opens the door. */}
+              {status === "error" && (
+                <Dialog
+                  open={isDiagnosticOpen}
+                  onOpenChange={setIsDiagnosticOpen}
+                >
+                  <DialogTrigger asChild>
+                    <Button type="button" variant="outline" size="sm">
+                      <ScrollText className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                      播放诊断
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="flex max-h-[calc(100vh-2rem)] max-w-2xl flex-col overflow-hidden sm:max-w-2xl">
+                    {/* The panel carries the visible heading and the copy action, so the
+                        dialog's own title exists only to name the dialog for assistive
+                        technology rather than duplicating the heading on screen. */}
+                    <DialogHeader className="sr-only">
+                      <DialogTitle>播放诊断</DialogTitle>
+                      <DialogDescription>
+                        播放失败时复制这段内容，可直接定位到具体环节
+                      </DialogDescription>
+                    </DialogHeader>
+                    <div className="min-h-0 flex-1 overflow-y-auto">
+                      <MediaDiagnosticPanel
+                        // The dialog already supplies the surface, so the panel drops its own
+                        // card chrome instead of drawing a border inside a border.
+                        className="border-0 bg-transparent backdrop-blur-none"
+                        snapshot={mediaDiagnostic}
+                        note={diagnostic}
+                      />
+                    </div>
+                  </DialogContent>
+                </Dialog>
+              )}
+            </div>
           </div>
           <ScrollBar />
         </ScrollArea>
@@ -481,23 +425,4 @@ function inferMediaKind(url: string): MediaKind {
   if (normalizedUrl.includes(".m3u8")) return "hls";
   if (normalizedUrl.includes(".mp4")) return "mp4";
   return "unknown";
-}
-
-function formatSeconds(seconds: number) {
-  const safeSeconds = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(safeSeconds / 60);
-  const remainingSeconds = safeSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
-}
-
-function statusLabel(status: MediaStatus) {
-  return {
-    idle: "等待播放",
-    loading: "正在连接媒体",
-    ready: "媒体已准备",
-    playing: "正在播放",
-    paused: "已暂停",
-    ended: "播放结束",
-    error: "播放失败",
-  }[status];
 }
