@@ -210,7 +210,19 @@ export function findCurrentProgram(
   return null;
 }
 
-/** The next programme to start, or null once the guide's day is over. */
+/**
+ * The next programme to start, or null once the guide's day is over.
+ *
+ * A guide carries only `HH:MM`, so a programme starting at 00:13 is genuinely "later tonight"
+ * when it is 23:43 — but 13 sorts before 1423, so comparing start times numerically discarded
+ * every programme after midnight and the footer claimed nothing was coming while one was half an
+ * hour away.
+ *
+ * The reliable signal is the programme airing now: when it wraps past midnight, whatever starts
+ * exactly when it ends is the next one. Wrapping unconditionally to the day's earliest programme
+ * would be wrong instead — at 23:30 a guide that ends at noon has nothing left to show, and
+ * offering its 01:08 entry as "稍后" would name a programme that already aired today.
+ */
 export function findNextProgram(
   programs: EpgProgram[],
   now: Date = new Date(),
@@ -226,7 +238,19 @@ export function findNextProgram(
       next = program;
     }
   }
-  return next;
+  if (next) return next;
+
+  // Nothing starts later today. If the current programme runs past midnight, the schedule
+  // continues into tomorrow, and the programme beginning at its end is the next one.
+  const current = findCurrentProgram(programs, now);
+  if (!current) return null;
+  const currentStart = parseClock(current.startAt);
+  const currentEnd = parseClock(current.endAt);
+  if (currentStart === null || currentEnd === null) return null;
+  if (currentEnd > currentStart) return null;
+  return (
+    programs.find((program) => parseClock(program.startAt) === currentEnd) ?? null
+  );
 }
 
 function getErrorMessage(error: unknown, fallback: string) {

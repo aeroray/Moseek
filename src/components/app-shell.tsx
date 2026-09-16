@@ -35,7 +35,7 @@ const mainNavItems: NavItem[] = [
 ];
 
 const systemNavItems: NavItem[] = [
-  { key: "config", label: "配置与源", icon: FileSliders },
+  { key: "config", label: "配置中心", icon: FileSliders },
   { key: "settings", label: "设置中心", icon: Settings2 },
 ];
 

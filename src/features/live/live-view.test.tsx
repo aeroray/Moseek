@@ -188,6 +188,9 @@ describe("LiveView EPG rendering", () => {
     // actually on air rather than the first row of the day. Build the window around "now".
     const now = new Date();
     const pad = (value: number) => String(value).padStart(2, "0");
+    // Offsets may wrap past midnight, which is realistic: a guide that runs late is exactly the
+    // case `findNextProgram` has to handle. The fixture keeps the wrap rather than clamping it,
+    // so this test covers the boundary instead of failing at it.
     const clock = (offsetMinutes: number) => {
       const at = new Date(now.getTime() + offsetMinutes * 60_000);
       return `${pad(at.getHours())}:${pad(at.getMinutes())}`;

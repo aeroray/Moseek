@@ -107,7 +107,6 @@ import {
   isTestableSource,
   type AdapterExecution,
 } from "@/lib/adapters";
-import { getCapabilityCounts } from "@/lib/capability-stats";
 import { cn } from "@/lib/utils";
 import {
   activateConfigDocument,
@@ -196,7 +195,6 @@ export function ConfigCenter() {
     useState<ConfigDocumentSummary | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const liveRecoveryAttempts = useRef(new Set<number>());
-  const counts = getCapabilityCounts(sources);
   const editorText = rawDraft ?? rawConfig;
   const report =
     parseResult ??
@@ -830,52 +828,15 @@ export function ConfigCenter() {
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-display text-lg font-bold tracking-tight text-foreground">
-                配置与源
+                配置中心
               </h1>
               <Badge variant="secondary">
-                {sources.length} 个解析源
+                {sources.length} 个源
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              集中管理多套影视与直播配置档案，实时监控源探针状态
+              管理多套影视与直播配置，随时切换主用配置
             </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              disabled={testableSources.length === 0 || testingKeys.size > 0}
-              onClick={() => void handleTestAll()}
-            >
-              {testingKeys.size > 0 ? (
-                <LoaderCircle
-                  className="size-3.5 animate-spin"
-                  data-icon="inline-start"
-                  aria-hidden="true"
-                />
-              ) : (
-                <FlaskConical className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-              )}
-              {testingKeys.size > 0
-                ? `测速中 ${testingKeys.size}/${testableSources.length}`
-                : `全部测速 (${testableSources.length})`}
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              onClick={handleExport}
-            >
-              <Download className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-              导出
-            </Button>
-            <Button type="button" size="sm" className="gap-1.5 font-semibold" onClick={openImportDialog}>
-              <Upload className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-              导入配置
-            </Button>
           </div>
         </section>
 
@@ -910,144 +871,78 @@ export function ConfigCenter() {
           </Alert>
         )}
 
-        <Card>
-          <CardHeader className="border-b border-border/60 pb-3">
-            <div className="flex items-center justify-between gap-4">
-              <div>
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Layers3 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  配置档案库
-                </CardTitle>
-                <CardDescription className="text-xs">
-                  每套配置独立保存，点击即可秒级切换主用源
-                </CardDescription>
-              </div>
-              <Badge variant="secondary">{configDocuments.length} 套配置</Badge>
-            </div>
-          </CardHeader>
-          <CardContent className="p-0">
+        {/* The archive is a switcher, not a report. Everything a user does here is pick one, so
+            it is a single row: the active name, the list, and a way to remove one. The counts and
+            timestamps that used to fill a table are available in the row's own summary line. */}
+        <Card className="py-0">
+          <CardContent className="flex items-center gap-3 px-4 py-3">
+            <Layers3
+              className="size-4 shrink-0 text-primary"
+              data-icon="inline-start"
+              aria-hidden="true"
+            />
+            <span className="shrink-0 text-sm font-medium">当前配置</span>
             {configDocuments.length > 0 ? (
-              <Table>
-                <TableHeader>
-                  <TableRow className="hover:bg-transparent">
-                    <TableHead className="pl-6">配置名称</TableHead>
-                    <TableHead>内容</TableHead>
-                    <TableHead>导入时间</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead className="pr-6 text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {configDocuments.map((document) => {
-                    const isActive = document.id === activeConfigId;
-                    return (
-                      <TableRow key={document.id}>
-                        <TableCell className="pl-6">
-                          <div className="min-w-0">
-                            <p className="font-medium">{document.name}</p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              配置 #{document.id}
-                            </p>
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">
-                          {document.sourceCount} 个源 · {document.liveCount}{" "}
-                          个直播源
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {formatImportTime(document.importedAt)}
-                        </TableCell>
-                        <TableCell>
-                          {isActive ? (
-                            <Badge variant="secondary">当前使用</Badge>
-                          ) : (
-                            <Badge variant="outline">已保存</Badge>
-                          )}
-                        </TableCell>
-                        <TableCell className="pr-6 text-right">
-                          <div className="flex justify-end gap-2">
-                            <Button
-                              type="button"
-                              variant={isActive ? "secondary" : "outline"}
-                              size="sm"
-                              disabled={isActive}
-                              onClick={() => void handleActivate(document.id)}
-                            >
-                              {isActive ? "使用中" : "使用"}
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={`删除配置 ${document.name}`}
-                              onClick={() => setDeleteCandidate(document)}
-                            >
-                              <Trash2
-                                className="size-4"
-                                data-icon="inline-start"
-                                aria-hidden="true"
-                              />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </TableBody>
-              </Table>
+              <>
+                <Select
+                  value={activeConfigId ? String(activeConfigId) : ""}
+                  onValueChange={(value) => void handleActivate(Number(value))}
+                >
+                  <SelectTrigger size="sm" className="min-w-0 flex-1" aria-label="切换配置">
+                    <SelectValue placeholder="选择配置" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {configDocuments.map((document) => (
+                        <SelectItem key={document.id} value={String(document.id)}>
+                          {document.name} · {document.sourceCount} 个源
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {configDocuments.length} 套
+                </span>
+                {activeDocument && (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="shrink-0"
+                    aria-label={`删除配置 ${activeDocument.name}`}
+                    onClick={() => setDeleteCandidate(activeDocument)}
+                  >
+                    <Trash2 className="size-4" data-icon="inline-start" aria-hidden="true" />
+                  </Button>
+                )}
+              </>
             ) : (
-              <Empty className="min-h-56">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon">
-                    <Layers3 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  </EmptyMedia>
-                  <EmptyTitle>还没有配置档</EmptyTitle>
-                  <EmptyDescription>
-                    导入第一份配置后，它会作为当前工作区保存；后续配置可以随时切换。
-                  </EmptyDescription>
-                </EmptyHeader>
-                <Button type="button" onClick={openImportDialog}>
-                  导入第一份配置
+              <>
+                <span className="flex-1 text-xs text-muted-foreground">
+                  还没有配置，导入一份即可开始
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0 gap-1.5"
+                  onClick={openImportDialog}
+                >
+                  <Upload className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                  导入配置
                 </Button>
-              </Empty>
+              </>
             )}
           </CardContent>
         </Card>
-
-        <section className="grid grid-cols-5 gap-3" aria-label="配置解析报告">
-          <ReportCard label="已识别源" value={sources.length} icon={FileJson} />
-          <ReportCard
-            label="普通可用"
-            value={counts.supported}
-            icon={Check}
-            tone="supported"
-          />
-          <ReportCard
-            label="部分支持"
-            value={counts.partial}
-            icon={Info}
-            tone="partial"
-          />
-          <ReportCard
-            label="需适配"
-            value={counts["needs-adapter"]}
-            icon={Link2}
-            tone="adapter"
-          />
-          <ReportCard
-            label="已阻止"
-            value={counts.blocked + counts.invalid}
-            icon={ShieldAlert}
-            tone="blocked"
-          />
-        </section>
 
         <Tabs defaultValue="sources" className="flex flex-col gap-5">
           <div className="flex items-center justify-between gap-4">
             <TabsList>
               <TabsTrigger value="sources" className="gap-1.5">
                 <ListFilter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                资源源
+                源清单
               </TabsTrigger>
               <TabsTrigger value="adapters" className="gap-1.5">
                 <Link2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
@@ -1075,74 +970,120 @@ export function ConfigCenter() {
               <CardHeader className="border-b pb-4">
                 <div className="flex items-center justify-between gap-4">
                   <div>
-                    <CardTitle className="text-base">源能力清单</CardTitle>
+                    <CardTitle className="text-base">源清单</CardTitle>
                     <CardDescription>
-                      只有完全支持的 CMS 和直播源会出现测试入口；CMS
-                      通过后才会进入影视库。
+                      当前配置里的全部源。只有可用的源能测试；测试通过后才会进入影视库。
                     </CardDescription>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className="relative w-64">
-                      <Search
-                        className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
+                  {/* Import, export and the bulk test live here rather than in the page header:
+                      all three act on the configuration this list is showing, and a page-level
+                      "导出" gave no clue what was being exported. */}
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      disabled={testableSources.length === 0 || testingKeys.size > 0}
+                      onClick={() => void handleTestAll()}
+                    >
+                      {testingKeys.size > 0 ? (
+                        <LoaderCircle
+                          className="size-3.5 animate-spin"
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
+                      ) : (
+                        <FlaskConical
+                          className="size-3.5"
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
+                      )}
+                      {testingKeys.size > 0
+                        ? `测速中 ${testingKeys.size}/${testableSources.length}`
+                        : `全部测速 (${testableSources.length})`}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={handleExport}
+                    >
+                      <Download
+                        className="size-3.5"
                         data-icon="inline-start"
                         aria-hidden="true"
                       />
-                      <Input
-                        size="sm"
-                        value={query}
-                        onChange={(event) => setQuery(event.target.value)}
-                        placeholder="搜索源名称、key 或 API"
-                        className="pl-8"
-                      />
-                    </div>
-                    <Select
-                      value={sourceFilter}
-                      onValueChange={(value) =>
-                        setSourceFilter(value as SourceFilter)
-                      }
+                      导出此配置
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={openImportDialog}
                     >
-                      <SelectTrigger size="sm" className="w-36">
-                        <Filter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                        <SelectValue placeholder="筛选状态" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          <SelectItem value="all">全部状态</SelectItem>
-                          <SelectItem value="supported">可用</SelectItem>
-                          <SelectItem value="partial">部分支持</SelectItem>
-                          <SelectItem value="needs-adapter">
-                            需要适配
-                          </SelectItem>
-                          <SelectItem value="blocked">已阻止</SelectItem>
-                          <SelectItem value="invalid">配置无效</SelectItem>
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
+                      <Upload
+                        className="size-3.5"
+                        data-icon="inline-start"
+                        aria-hidden="true"
+                      />
+                      导入配置
+                    </Button>
                   </div>
                 </div>
-                <div className="mt-4 flex items-center justify-between gap-3 rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-                  <span>
-                    影视库：{testedCmsCount} 个 CMS 通过 · 直播：
-                    {testedLiveCount} 个通过
-                  </span>
-                  <span>
-                    {testableSources.length > 0
-                      ? `可测试 ${testableSources.length} 个支持源`
-                      : "当前没有可测试的 CMS 或直播源"}
+                <div className="mt-4 flex items-center gap-2">
+                  <div className="relative min-w-0 flex-1">
+                    <Search
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
+                      data-icon="inline-start"
+                      aria-hidden="true"
+                    />
+                    <Input
+                      size="sm"
+                      value={query}
+                      onChange={(event) => setQuery(event.target.value)}
+                      placeholder="搜索源名称或 API"
+                      className="pl-8"
+                    />
+                  </div>
+                  <Select
+                    value={sourceFilter}
+                    onValueChange={(value) =>
+                      setSourceFilter(value as SourceFilter)
+                    }
+                  >
+                    <SelectTrigger size="sm" className="w-36 shrink-0" aria-label="筛选状态">
+                      <Filter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                      <SelectValue placeholder="筛选状态" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="all">全部状态</SelectItem>
+                        <SelectItem value="supported">可用</SelectItem>
+                        <SelectItem value="partial">部分可用</SelectItem>
+                        <SelectItem value="needs-adapter">待适配</SelectItem>
+                        <SelectItem value="blocked">不可用</SelectItem>
+                        <SelectItem value="invalid">配置无效</SelectItem>
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    共 {filteredSources.length} 个 · 已通过 {testedCmsCount + testedLiveCount} 个
                   </span>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
                 {filteredSources.length > 0 ? (
-                  <ScrollArea className="h-[440px]">
+                  <ScrollArea className="h-[520px]">
                     <Table>
                       <TableHeader>
                         <TableRow className="hover:bg-transparent">
-                          <TableHead className="w-[30%] pl-6">资源源</TableHead>
-                          <TableHead>能力</TableHead>
+                          <TableHead className="w-[32%] pl-6">资源名称</TableHead>
+                          <TableHead>状态</TableHead>
                           <TableHead>适配器</TableHead>
-                          <TableHead>支持范围</TableHead>
                           <TableHead>连接测试</TableHead>
                           <TableHead className="text-right">启用</TableHead>
                           <TableHead className="w-28 pr-6 text-right">
@@ -1191,24 +1132,20 @@ export function ConfigCenter() {
                               <CapabilityBadge status={source.capability} />
                             </TableCell>
                             <TableCell className="max-w-52">
-                              {(() => {
-                                const adapter = getAdapterProfile(source);
-                                return (
-                                  <div className="flex min-w-0 flex-col items-start gap-1.5">
-                                    <span className="max-w-full truncate text-xs font-medium">
-                                      {adapter.label}
-                                    </span>
-                                    <AdapterStatusBadge
-                                      execution={adapter.execution}
-                                    />
-                                  </div>
-                                );
-                              })()}
-                            </TableCell>
-                            <TableCell className="max-w-80">
-                              <p className="truncate text-sm text-muted-foreground">
-                                {source.capabilityNote}
-                              </p>
+                              {/* The adapter's own execution badge said "已阻止" a second time,
+                                  under a row whose status column already says the source is
+                                  unusable. The row states the consequence instead: whether an
+                                  adapter is working for this source or not. */}
+                              <div className="flex min-w-0 flex-col gap-0.5">
+                                <span className="truncate text-sm">
+                                  {getAdapterProfile(source).label}
+                                </span>
+                                <span className="truncate text-xs text-muted-foreground">
+                                  {isTestableSource(source)
+                                    ? "可执行"
+                                    : "未适配"}
+                                </span>
+                              </div>
                             </TableCell>
                             <TableCell>
                               <SourceTestBadge source={source} />
@@ -1217,13 +1154,26 @@ export function ConfigCenter() {
                               className="text-right"
                               onClick={(event) => event.stopPropagation()}
                             >
-                              <Switch
-                                checked={source.enabled}
-                                onCheckedChange={() =>
-                                  void handleToggleSource(source.key)
-                                }
-                                aria-label={`启用 ${source.name}`}
-                              />
+                              {/* A switch that cannot change anything is worse than a disabled
+                                  one: it invites a click and silently does nothing. Unusable
+                                  sources get a dash, which says "not applicable" honestly. */}
+                              {source.capability === "supported" ||
+                              source.capability === "partial" ? (
+                                <Switch
+                                  checked={source.enabled}
+                                  onCheckedChange={() =>
+                                    void handleToggleSource(source.key)
+                                  }
+                                  aria-label={`启用 ${source.name}`}
+                                />
+                              ) : (
+                                <span
+                                  className="text-xs text-muted-foreground/60"
+                                  aria-hidden="true"
+                                >
+                                  —
+                                </span>
+                              )}
                             </TableCell>
                             <TableCell
                               className="pr-6 text-right"
@@ -1256,11 +1206,22 @@ export function ConfigCenter() {
                                     : "测试"}
                                 </Button>
                               ) : (
-                                <ChevronRight
-                                  className="text-muted-foreground"
-                                  data-icon="inline-end"
-                                  aria-hidden="true"
-                                />
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  className="gap-1.5 text-muted-foreground"
+                                  onClick={() =>
+                                    setInspectedSourceKey(source.key)
+                                  }
+                                >
+                                  详情
+                                  <ChevronRight
+                                    className="size-3.5"
+                                    data-icon="inline-end"
+                                    aria-hidden="true"
+                                  />
+                                </Button>
                               )}
                             </TableCell>
                           </TableRow>
@@ -1275,7 +1236,7 @@ export function ConfigCenter() {
                       <EmptyMedia variant="icon">
                         <Search className="size-4" data-icon="inline-start" aria-hidden="true" />
                       </EmptyMedia>
-                      <EmptyTitle>没有匹配的资源源</EmptyTitle>
+                      <EmptyTitle>没有匹配的源</EmptyTitle>
                       <EmptyDescription>
                         调整关键词或清除状态筛选后重试。
                       </EmptyDescription>
@@ -2144,45 +2105,6 @@ function isRelativeConfiguredUrl(value: string) {
     trimmed.startsWith("./") ||
     trimmed.startsWith("../") ||
     trimmed.includes("/")
-  );
-}
-
-function ReportCard({
-  label,
-  value,
-  icon: Icon,
-  tone = "default",
-}: {
-  label: string;
-  value: number;
-  icon: typeof Check;
-  tone?: "default" | "supported" | "partial" | "adapter" | "blocked";
-}) {
-  const toneClasses = {
-    default: "bg-muted text-muted-foreground",
-    supported:
-      "bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
-    partial:
-      "bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]",
-    adapter:
-      "bg-[color:var(--status-adapter-bg)] text-[color:var(--status-adapter)]",
-    blocked:
-      "bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",
-  };
-  return (
-    <Card className="border-border/80 shadow-none">
-      <CardContent className="flex items-center gap-3 p-4">
-        <div
-          className={`flex size-8 shrink-0 items-center justify-center rounded-md ${toneClasses[tone]}`}
-        >
-          <Icon className="size-4" data-icon="inline-start" aria-hidden="true" />
-        </div>
-        <div>
-          <p className="text-xs text-muted-foreground">{label}</p>
-          <p className="mt-1 font-display text-2xl font-semibold">{value}</p>
-        </div>
-      </CardContent>
-    </Card>
   );
 }
 
