@@ -51,6 +51,15 @@ interface MediaPlayerProps {
   onProgress?: (seconds: number) => void;
   onStatus?: (status: MediaStatus, message?: string) => void;
   onDiagnostic?: (snapshot: MediaDiagnosticSnapshot) => void;
+  /**
+   * Fired once the media element can actually start playing (`canplay`/`loadeddata`).
+   *
+   * Plyr's own `ready` event is not this signal: it fires when Plyr finishes building its DOM,
+   * which happens before a single byte of media has been fetched. A page that reveals its
+   * player on `ready` shows a working-looking surface for a URL that then fails seconds later.
+   * Callers that want to gate the surface on real playability listen here instead.
+   */
+  onPlayable?: () => void;
 }
 
 let cachedTransmuxWorkerSupport: boolean | null = null;
@@ -280,11 +289,12 @@ export function MediaPlayer({
   onProgress,
   onStatus,
   onDiagnostic,
+  onPlayable,
 }: MediaPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<Plyr | null>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const callbackRef = useRef({ onProgress, onStatus, onDiagnostic });
+  const callbackRef = useRef({ onProgress, onStatus, onDiagnostic, onPlayable });
   const resumeRef = useRef(resumeAt);
   const recorderRef = useRef(createDiagnosticRecorder());
   const environmentRef = useRef<MediaEnvironmentReport | null>(null);
@@ -307,9 +317,9 @@ export function MediaPlayer({
   const [hasStarted, setHasStarted] = useState(false);
 
   useEffect(() => {
-    callbackRef.current = { onProgress, onStatus, onDiagnostic };
+    callbackRef.current = { onProgress, onStatus, onDiagnostic, onPlayable };
     resumeRef.current = resumeAt;
-  }, [onDiagnostic, onProgress, onStatus, resumeAt]);
+  }, [onDiagnostic, onPlayable, onProgress, onStatus, resumeAt]);
 
   useEffect(() => {
     const source = { url, kind, isLive, headers, poster };
@@ -585,6 +595,25 @@ export function MediaPlayer({
 
     if (!liveMode) report("loading");
     video.poster = initialSource.poster ?? "";
+
+    // Playability is reported from the media element, not from Plyr's `ready` event. `ready`
+    // only means Plyr finished building its DOM, which happens before any media is fetched, so
+    // a caller gating on it would reveal a working-looking player for a URL that is about to
+    // fail. `canplay`/`loadeddata` mean the element actually has decodable data.
+    let playableReported = false;
+    const announcePlayable = () => {
+      if (playableReported || disposed) return;
+      playableReported = true;
+      recorder.push(
+        "媒体已可播放",
+        `readyState=${video.readyState} networkState=${video.networkState}`,
+      );
+      callbackRef.current.onPlayable?.();
+      scheduleDiagnosticFlush(true);
+    };
+    video.addEventListener("canplay", announcePlayable);
+    video.addEventListener("loadeddata", announcePlayable);
+
     // `crossOrigin` is deliberately left unset. Setting it makes the element demand CORS
     // headers from the media host, which can only break the native path (a live mp4 or a VOD
     // file) and buys nothing: nothing here reads pixels back through canvas, captureStream,
@@ -887,6 +916,8 @@ export function MediaPlayer({
       if (startupWatchdog !== null) clearTimeout(startupWatchdog);
       if (playbackRetryTimer !== null) clearTimeout(playbackRetryTimer);
       if (diagnosticTimer !== null) clearTimeout(diagnosticTimer);
+      video.removeEventListener("canplay", announcePlayable);
+      video.removeEventListener("loadeddata", announcePlayable);
       hlsRef.current?.destroy();
       hlsRef.current = null;
       playerRef.current?.destroy();

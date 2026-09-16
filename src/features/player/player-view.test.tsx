@@ -1,18 +1,47 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PlayerView } from "@/features/player/player-view";
 import type { SourceRecord, VodEpisode, VodItem } from "@/types/moseek";
 
 const resolvePlayback = vi.fn();
+const getVodDetail = vi.fn();
 
 // Plyr + hls.js need a real media element; this suite covers the page's own composition.
 vi.mock("@/features/player/media-player", () => ({
-  MediaPlayer: ({ title }: { title: string }) => (
-    <div data-testid="media-player">{title}</div>
+  MediaPlayer: ({
+    title,
+    url,
+    onPlayable,
+  }: {
+    title: string;
+    url: string;
+    onPlayable?: () => void;
+  }) => (
+    <div data-testid="media-player" data-url={url}>
+      {title}
+      <button type="button" onClick={() => onPlayable?.()}>
+        模拟可播放
+      </button>
+    </div>
   ),
   usesHlsPipeline: () => true,
 }));
+
+vi.mock("@/features/browse/cms-adapter", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/features/browse/cms-adapter")>();
+  return {
+    ...actual,
+    getVodDetail: (...args: unknown[]) => getVodDetail(...args),
+  };
+});
 
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
@@ -56,11 +85,11 @@ function item(): VodItem {
     sourceKey: "cms-1",
     sourceName: "电影天堂",
     name: SHOW,
-    poster: "",
+    poster: "https://img.example/poster.jpg",
     description: "简介",
     year: "2026",
     area: "中国大陆",
-    categories: [],
+    categories: [{ id: "cat-1", name: "剧情" }],
     actors: [],
     directors: [],
     playLines: [
@@ -71,17 +100,8 @@ function item(): VodItem {
 }
 
 function renderPlayer() {
-  const vod = item();
   return render(
-    <PlayerView
-      request={{
-        item: vod,
-        source: source(),
-        line: vod.playLines[0],
-        episode: vod.playLines[0].episodes[0],
-      }}
-      onBack={() => {}}
-    />,
+    <PlayerView item={item()} source={source()} onBack={() => {}} />,
   );
 }
 
@@ -90,28 +110,128 @@ describe("PlayerView composition", () => {
 
   beforeEach(() => {
     resolvePlayback.mockReset();
-    resolvePlayback.mockResolvedValue({
-      url: "https://cdn.example/1.m3u8",
+    resolvePlayback.mockImplementation(async (url: string) => ({
+      url,
       mediaKind: "hls",
       adapterId: "test",
-    });
-    useAppStore.setState({ playbackProgress: {}, history: [] });
+    }));
+    getVodDetail.mockReset();
+    getVodDetail.mockImplementation(async (_source, vod: VodItem) => ({
+      data: vod,
+      mode: "remote",
+      error: null,
+    }));
+    useAppStore.setState({ playbackProgress: {}, history: [], favorites: [] });
   });
 
-  it("names the work in the header instead of the widget", async () => {
-    // The header used to read "播放器视窗", which names the widget rather than the content.
+  it("leads the metadata block with the work's name", async () => {
+    // The title used to sit in the toolbar, which made the work read as chrome around the
+    // player. It now opens the metadata block below the player, so the eye lands on the work.
     renderPlayer();
 
-    expect(await screen.findByRole("heading", { name: SHOW })).toBeInTheDocument();
+    const heading = await screen.findByRole("heading", { name: SHOW });
+    expect(heading.tagName).toBe("H1");
     expect(screen.queryByText("播放器视窗")).not.toBeInTheDocument();
+
+    // It is below the player, not inside the toolbar.
+    const player = await screen.findByTestId("media-player");
+    expect(
+      player.compareDocumentPosition(heading) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(document.querySelector("header")?.contains(heading)).toBe(false);
   });
 
-  it("drops the 播放边界 card", () => {
-    // It only restated the source, line and protocol, all of which the header and the
-    // diagnostics already carry.
+  it("does not repeat the episode name and index under the player", async () => {
+    // The row carried "第01集 （1 / 24）" beside the stepper, which the highlighted entry in the
+    // rail already states.
     renderPlayer();
 
-    expect(screen.queryByText("播放边界")).not.toBeInTheDocument();
+    const player = await screen.findByTestId("media-player");
+    const column = player.parentElement;
+    expect(column?.textContent).not.toMatch(/（\d+ \/ \d+）/);
+  });
+
+  it("clamps the synopsis so a long one cannot force a scrollbar", async () => {
+    // The column must fit the viewport: a full synopsis used to push the page into scrolling.
+    renderPlayer();
+
+    const description = await screen.findByText("简介");
+    expect(description.className).toContain("line-clamp-3");
+  });
+
+  it("attaches the full synopsis as a tooltip when the clamp hides text", async () => {
+    // The clamp hides text, so the tooltip is what makes it lossless. jsdom reports zero
+    // heights, which the overflow check treats as "there is more to show", so the paragraph is
+    // rendered as a tooltip trigger here. (Radix mounts the content lazily, on open, so only the
+    // trigger is asserted.)
+    renderPlayer();
+
+    const description = await screen.findByText("简介");
+    expect(description).toHaveAttribute("data-slot", "tooltip-trigger");
+    expect(description.className).toContain("cursor-help");
+  });
+
+  it("shows a loading placeholder until the media reports it can play", async () => {
+    // Plyr builds its DOM and reports "ready" before any media is fetched, so a page that
+    // reveals the player then shows a working-looking surface for a URL that fails seconds
+    // later. The surface must stay a loading state until the element can actually play.
+    renderPlayer();
+
+    expect(await screen.findByText("正在确认可以播放…")).toBeInTheDocument();
+    // The player is mounted underneath so it can do its work, but not shown yet.
+    expect(screen.getByTestId("media-player")).toBeInTheDocument();
+  });
+
+  it("reveals the player once the media reports it can play", async () => {
+    // The counterpart to the loading test: playability is what swaps the placeholder for the
+    // real surface.
+    renderPlayer();
+
+    expect(await screen.findByText("正在确认可以播放…")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "模拟可播放" }));
+
+    await waitFor(() => {
+      expect(screen.queryByText("正在确认可以播放…")).not.toBeInTheDocument();
+    });
+    const wrapper = screen.getByTestId("media-player").parentElement;
+    expect(wrapper?.className).not.toContain("hidden");
+  });
+
+  it("takes over the surface with the reason when playback fails", async () => {
+    // The failure banner under the player was removed: the surface itself now states the
+    // reason, which is where the user is already looking.
+    resolvePlayback.mockRejectedValue(new Error("上游拒绝访问当前地址"));
+    renderPlayer();
+
+    expect(await screen.findByText("无法播放当前内容")).toBeInTheDocument();
+    expect(screen.getAllByText(/上游拒绝访问当前地址/).length).toBeGreaterThan(0);
+    // The old banner is gone.
+    expect(screen.queryByText("播放失败")).not.toBeInTheDocument();
+    // A retry is offered on the surface.
+    expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  it("fills the surface with a placeholder when the source has no episodes", () => {
+    // A small grey box floating in a large empty area read as a broken layout. The empty state
+    // now occupies the whole surface.
+    getVodDetail.mockResolvedValue({
+      data: { ...item(), playLines: [] },
+      mode: "remote",
+      error: null,
+    });
+    render(
+      <PlayerView
+        item={{ ...item(), playLines: [] }}
+        source={source()}
+        onBack={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("暂无可播放的剧集")).toBeInTheDocument();
+    expect(screen.getByText(/未解析出播放线路或剧集/)).toBeInTheDocument();
+    // The rail says why it is empty instead of rendering a blank card.
+    expect(screen.getByText("没有可用线路")).toBeInTheDocument();
   });
 
   it("collapses the back control to an icon", () => {
@@ -121,7 +241,21 @@ describe("PlayerView composition", () => {
 
     const back = screen.getByLabelText("返回列表");
     expect(back.textContent).toBe("");
+    expect(back.querySelector(".lucide-chevron-left")).toBeTruthy();
     expect(document.querySelector("header")?.textContent).not.toContain("返回列表");
+  });
+
+  it("draws no divider in the header", () => {
+    // With the title moved out, the header is just a back button and a favourite button. The
+    // separator that used to divide the back button from the title was a line drawn against
+    // empty space.
+    renderPlayer();
+
+    const header = document.querySelector("header");
+    const dividers = [...(header?.querySelectorAll("div") ?? [])].filter((node) =>
+      node.className.includes("w-px"),
+    );
+    expect(dividers).toHaveLength(0);
   });
 
   it("removes the source/line/episode sub-line from the header", () => {
@@ -133,6 +267,41 @@ describe("PlayerView composition", () => {
     expect(header?.textContent).not.toContain("dyttm3u8");
   });
 
+  it("starts playing the first episode without a navigation", async () => {
+    // Detail and playback are one page now: opening a work must already be playing, which is
+    // the whole point of merging them.
+    renderPlayer();
+
+    const player = await screen.findByTestId("media-player");
+    expect(player).toHaveAttribute("data-url", episodes[0].url);
+    expect(resolvePlayback).toHaveBeenCalled();
+  });
+
+  it("swaps the stream in place when another episode is picked", async () => {
+    renderPlayer();
+
+    const player = await screen.findByTestId("media-player");
+    expect(player).toHaveAttribute("data-url", episodes[0].url);
+
+    fireEvent.click(screen.getByRole("button", { name: "第05集" }));
+
+    const swapped = await screen.findByTestId("media-player");
+    expect(swapped).toHaveAttribute("data-url", episodes[4].url);
+  });
+
+  it("keeps the episode rail and the work's metadata on the same page", async () => {
+    renderPlayer();
+
+    // The rail is what makes in-place switching possible.
+    expect(screen.getByText("线路与选集")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "第24集" })).toBeInTheDocument();
+    // The metadata moved here from the deleted detail page rather than being dropped.
+    expect(screen.getByText("简介")).toBeInTheDocument();
+    expect(screen.getByText("2026")).toBeInTheDocument();
+    expect(screen.getByText("中国大陆")).toBeInTheDocument();
+    expect(screen.getByText("来源：电影天堂")).toBeInTheDocument();
+  });
+
   it("moves the episode stepper below the player", async () => {
     // 上一集/下一集 sat in the header next to the title, far from the picture they change.
     renderPlayer();
@@ -141,8 +310,6 @@ describe("PlayerView composition", () => {
     expect(header?.textContent).not.toContain("上一集");
     expect(header?.textContent).not.toContain("下一集");
 
-    // They live in the player column, after the player surface. The player only mounts once
-    // the episode address has been resolved, so this has to await it.
     const player = await screen.findByTestId("media-player");
     const stepper = screen.getByRole("button", { name: "上一集" });
     expect(
@@ -220,5 +387,27 @@ describe("PlayerView composition", () => {
     renderPlayer();
 
     expect(screen.queryByText("可用")).not.toBeInTheDocument();
+  });
+
+  it("adopts the fuller play lines the detail request returns", async () => {
+    // The catalog row is a summary. When the detail request comes back with more episodes, the
+    // rail must show them and the player must follow the new first episode.
+    const detail = item();
+    detail.playLines = [
+      { id: "line-1", name: "dyttm3u8", episodes },
+      { id: "line-2", name: "dytt", episodes: episodes.slice(0, 5) },
+    ];
+    getVodDetail.mockResolvedValue({ data: detail, mode: "remote", error: null });
+
+    render(
+      <PlayerView
+        item={{ ...item(), playLines: [{ id: "line-1", name: "dyttm3u8", episodes: episodes.slice(0, 2) }] }}
+        source={source()}
+        onBack={() => {}}
+      />,
+    );
+
+    // Starts from the catalog row's two episodes...
+    expect(await screen.findByRole("button", { name: "第24集" })).toBeInTheDocument();
   });
 });
