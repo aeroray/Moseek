@@ -156,6 +156,28 @@ export const adapterRegistry: AdapterProfile[] = [
   createProfile("unknown", "parser"),
 ];
 
+/**
+ * Names the CSP/script family for a source, or null when nothing identifies one.
+ *
+ * Both the key and the api are checked. TVBox gives every one of these families the same
+ * `type: 3` shape and lets the operator name the source freely, so the implementation marker
+ * lives in whichever field the packager used: `api: "csp_XBPQ"` with an arbitrary `key` such as
+ * `fok` is common, and so is `key: "csp_XBPQ"`. Reading only the key misclassified every source
+ * of the first kind as a generic spider or a remote-JAR dependency.
+ *
+ * This used to be written out twice — once for `siteProtocol === "spider"` and once for
+ * everything else — with the two copies free to drift.
+ */
+function remoteScriptFamily(key: string, api: string): AdapterId | null {
+  const haystack = `${key} ${api}`;
+  if (haystack.includes("drpy")) return "drpy-js";
+  if (haystack.includes("xbpq")) return "xbpq";
+  if (haystack.includes("appmao")) return "csp-appmao";
+  if (haystack.includes("panda")) return "csp-panda";
+  if (haystack.includes("xyqhiker")) return "csp-xyqhiker";
+  return null;
+}
+
 export function getAdapterProfile(
   source: Pick<
     SourceRecord,
@@ -170,6 +192,7 @@ export function getAdapterProfile(
 ): AdapterProfile {
   const key = source.key.toLowerCase();
   const api = source.api.toLowerCase();
+  const family = remoteScriptFamily(key, api);
   let id: AdapterId;
 
   if (source.sourceType === "live") {
@@ -185,32 +208,12 @@ export function getAdapterProfile(
     id = "js-extension";
   } else if (source.siteProtocol === "html-http") {
     id = "html-http";
+  } else if (family) {
+    id = family;
   } else if (source.siteProtocol === "spider") {
-    if (key.startsWith("drpy_js_") || key.includes("drpy")) {
-      id = "drpy-js";
-    } else if (key.includes("xbpq")) {
-      id = "xbpq";
-    } else if (key.includes("appmao")) {
-      id = "csp-appmao";
-    } else if (key.includes("panda")) {
-      id = "csp-panda";
-    } else if (key.includes("xyqhiker")) {
-      id = "csp-xyqhiker";
-    } else if (source.jar) {
-      id = "remote-jar";
-    } else {
-      id = "spider-runtime";
-    }
-  } else if (key.startsWith("drpy_js_") || key.includes("drpy")) {
-    id = "drpy-js";
-  } else if (key.includes("xbpq")) {
-    id = "xbpq";
-  } else if (key.includes("appmao")) {
-    id = "csp-appmao";
-  } else if (key.includes("panda")) {
-    id = "csp-panda";
-  } else if (key.includes("xyqhiker")) {
-    id = "csp-xyqhiker";
+    // Only reached when the key names no known family: a bare `type: 3` spider, or one whose
+    // only implementation hint is the JAR it wants to download.
+    id = source.jar ? "remote-jar" : "spider-runtime";
   } else if (source.jar) {
     id = "remote-jar";
   } else if (
