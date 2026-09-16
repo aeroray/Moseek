@@ -8,6 +8,7 @@ mod models;
 mod policy;
 mod resolver;
 mod script_runtime;
+mod xbpq;
 
 use tauri::Manager;
 

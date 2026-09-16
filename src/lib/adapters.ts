@@ -100,28 +100,31 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     reason: "Spider 需要隔离运行时，当前只记录和展示配置字段。",
   },
   xbpq: {
-    label: "XBPQ 适配器",
-    execution: "needs-adapter",
-    operations: [],
-    reason: "需要专用字段映射和隔离适配器，当前不会执行。",
+    label: "XBPQ / XYQHiker 适配器",
+    execution: "enabled",
+    operations: ["列表", "搜索", "详情", "播放链接"],
+    reason:
+      "按 URL 模板与文本标记读取页面，不执行脚本或 JAR；嗅探词用于在页面中定位直链。",
   },
   "csp-appmao": {
     label: "csp_AppMao 适配器",
-    execution: "needs-adapter",
+    execution: "blocked",
     operations: [],
-    reason: "特定 CSP 扩展尚未实现，当前只展示配置字段。",
+    reason: "配置载荷为加密数据，密钥在配套 JAR 中，不执行远程代码就无法读取。",
   },
   "csp-panda": {
     label: "csp_Panda 适配器",
-    execution: "needs-adapter",
-    operations: [],
-    reason: "特定 CSP 扩展尚未实现，当前只展示配置字段。",
+    execution: "enabled",
+    operations: ["列表", "搜索", "详情", "播放链接"],
+    reason:
+      "与 XBPQ 同属声明式配置（键值对形式），按 URL 模板与文本标记读取页面，不执行脚本或 JAR。",
   },
   "csp-xyqhiker": {
     label: "csp_XYQHiker 适配器",
-    execution: "needs-adapter",
-    operations: [],
-    reason: "特定 CSP 扩展尚未实现，当前只展示配置字段。",
+    execution: "enabled",
+    operations: ["列表", "搜索", "详情", "播放链接"],
+    reason:
+      "与 XBPQ 同属声明式配置，按 URL 模板与文本标记读取页面，不执行脚本或 JAR。",
   },
   "private-protocol": {
     label: "私有协议适配器",

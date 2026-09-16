@@ -8,7 +8,7 @@ use crate::{
     adapters::SiteAdapterKind,
     html,
     policy::{fetch_json, fetch_text, validate_remote_url},
-    SourceOperationResult, SourceRecord,
+    xbpq, SourceOperationResult, SourceRecord,
 };
 
 #[derive(Clone, Serialize)]
@@ -90,6 +90,10 @@ pub async fn browse_source(
     let current_page_size = page_size.clamp(1, 100);
     if adapter == SiteAdapterKind::Html {
         return html::browse_source(source, query, category_id, current_page, current_page_size)
+            .await;
+    }
+    if adapter == SiteAdapterKind::Xbpq {
+        return xbpq::browse_source(source, query, category_id, current_page, current_page_size)
             .await;
     }
     // Only plain JSON CMS sources get the detail-shaped listing. XML list responses already
@@ -228,6 +232,7 @@ async fn fetch_catalog(
             request_json(&source.api, params).await
         }
         SiteAdapterKind::Html => unreachable!("HTML 适配器已在载荷请求前返回"),
+        SiteAdapterKind::Xbpq => unreachable!("XBPQ 适配器已在载荷请求前返回"),
         SiteAdapterKind::Spider | SiteAdapterKind::Unsupported => {
             Err("该源没有可执行的安全站点适配器。".to_string())
         }
@@ -413,12 +418,16 @@ pub async fn get_detail(source: SourceRecord, vod_id: String) -> Result<Option<V
     if adapter == SiteAdapterKind::Html {
         return html::get_detail(source, vod_id).await;
     }
+    if adapter == SiteAdapterKind::Xbpq {
+        return xbpq::get_detail(source, vod_id).await;
+    }
     let params = vec![
         ("ac".to_string(), "detail".to_string()),
         ("ids".to_string(), vod_id.clone()),
     ];
     let payload = match adapter {
         SiteAdapterKind::Html => unreachable!("HTML 适配器已在详情请求前返回"),
+        SiteAdapterKind::Xbpq => unreachable!("XBPQ 适配器已在详情请求前返回"),
         SiteAdapterKind::XmlHttp => parse_xml_payload(&request_text(&source.api, &params).await?)?,
         SiteAdapterKind::JsonHttp | SiteAdapterKind::HttpExtension => {
             request_json(&source.api, &params).await?

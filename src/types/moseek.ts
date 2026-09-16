@@ -62,6 +62,7 @@ export type SiteProtocol =
   | "json-http"
   | "js-extension"
   | "html-http"
+  | "xbpq"
   | "spider"
   | "http-extension"
   | "unknown";

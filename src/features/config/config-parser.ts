@@ -430,11 +430,13 @@ function classifySource(
     keyLower.startsWith("drpy_js_") ||
     serializedSite.includes('"spider"') ||
     serializedSite.includes('"script"');
+  const hasXbpqConfig = siteHasXbpqConfig(site);
   const siteProtocol = getSiteProtocol(
     siteType,
     hasSpiderAdapter,
     hasJsExtension,
     hasHtmlSource,
+    hasXbpqConfig,
   );
 
   let capability: CapabilityStatus;
@@ -444,6 +446,13 @@ function classifySource(
     capability = "invalid";
     capabilityNote =
       "缺少 key、name 或 api 必填字段，无法建立安全的资源源记录。";
+  } else if (hasXbpqConfig) {
+    // Checked before the spider/JAR branch: these sources are `type: 3` and ship a JAR, but the
+    // configuration Moseek reads is declarative, so they are supported without executing
+    // anything. The JAR is still never downloaded or run.
+    capability = "supported";
+    capabilityNote =
+      "识别到 XBPQ/XYQHiker 声明式配置，按 URL 模板与文本标记读取页面，不执行脚本或 JAR。";
   } else if (hasHtmlSource && !hasHtmlMapping) {
     capability = "needs-adapter";
     capabilityNote =
@@ -559,7 +568,11 @@ function getSiteProtocol(
   hasSpiderAdapter: boolean,
   hasJsExtension: boolean,
   hasHtmlSource: boolean,
+  hasXbpqConfig: boolean,
 ): SourceRecord["siteProtocol"] {
+  // Checked before the spider test: an XBPQ source is `type: 3` and usually ships a JAR, so the
+  // spider test would claim it. Its configuration is declarative, which is what matters.
+  if (hasXbpqConfig) return "xbpq";
   if (hasJsExtension) return "js-extension";
   if (hasHtmlSource) return "html-http";
   if (hasSpiderAdapter || siteType === 3) return "spider";
@@ -698,6 +711,77 @@ function isHtmlSource(site: RawSite) {
   const type =
     typeof site.type === "string" ? site.type.toLowerCase() : site.type;
   return type === 5 || type === "html" || Boolean(getHtmlAdapterConfig(site));
+}
+
+/**
+ * Whether a source carries an XBPQ / XYQHiker declarative configuration.
+ *
+ * These are `type: 3` sources with a JAR, so they read as spiders, but the `ext` they carry is a
+ * vocabulary of URL templates and text markers rather than code. Two shapes exist: the JSON
+ * inline in `ext`, and — more commonly — a URL that serves it. Both are recognised, and both are
+ * gated on the marker keys actually being present, so a spider whose `ext` is unrelated is not
+ * claimed.
+ *
+ * The marker keys checked here are the ones the adapter requires in order to do anything at all:
+ * without a listing URL and a record separator there is no way to read a page.
+ */
+function siteHasXbpqConfig(site: RawSite) {
+  const candidates = [parseObject(site.ext), parseObject(site.extra)].filter(
+    (value): value is Record<string, unknown> => value !== null,
+  );
+  for (const candidate of candidates) {
+    if (isXbpqVocabulary(candidate)) return true;
+  }
+  // The `key:value,key:value` form that csp_Panda uses for the same vocabulary.
+  for (const raw of [site.ext, site.extra]) {
+    if (typeof raw === "string" && isXbpqPairConfig(raw)) return true;
+  }
+  // The URL form: `ext` is a plain string pointing at the JSON. It cannot be fetched while
+  // parsing the config (that would make import depend on every remote host), so it is accepted
+  // on the strength of the api naming the family.
+  const api = site.api ?? "";
+  return /^csp_(XBPQ|XYQHiker|Panda)/i.test(api.trim());
+}
+
+/**
+ * Whether a raw `ext` string is the inline `key:value,key:value` form of the same vocabulary.
+ *
+ * Narrow on purpose: a known key must precede the first `:`, so a URL (whose scheme's colon is
+ * not preceded by a key name) is never mistaken for configuration.
+ */
+function isXbpqPairConfig(raw: string) {
+  const head = raw.split(",")[0] ?? "";
+  const separator = head.indexOf(":");
+  if (separator <= 0) return false;
+  const key = head.slice(0, separator).trim();
+  if (!key || key.includes("/") || key.includes(" ")) return false;
+  return XBPQ_CONFIG_KEYS.has(key);
+}
+
+const XBPQ_CONFIG_KEYS = new Set([
+  "分类url",
+  "搜索url",
+  "分类",
+  "分类值",
+  "数组",
+  "搜索数组",
+  "标题",
+  "图片",
+  "线路数组",
+  "播放数组",
+  "简介",
+  "嗅探词",
+]);
+
+function isXbpqVocabulary(value: Record<string, unknown>) {
+  // Only the listing address is genuinely required: without it there is nothing to request. The
+  // record separator is preferred but not mandatory — a real imported configuration omits it and
+  // relies on the runtime's own default, so the adapter falls back to reading the page's detail
+  // links.
+  const hasListing =
+    (typeof value["分类url"] === "string" && value["分类url"] !== "") ||
+    (typeof value["搜索url"] === "string" && value["搜索url"] !== "");
+  return hasListing;
 }
 
 function hasHtmlAdapterConfig(site: RawSite) {
