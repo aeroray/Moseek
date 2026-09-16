@@ -438,7 +438,10 @@ function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
           {item.name}
         </p>
         <p className="truncate text-xs text-muted-foreground">
-          {item.area || "未知地区"} · {item.sourceName}
+          {/* The area is often absent (the list API returns no `vod_area`), and a literal
+              "未知地区" reads as a broken field rather than as missing metadata. Show only
+              what is actually known. */}
+          {[item.area, item.sourceName].filter(Boolean).join(" · ")}
         </p>
       </div>
     </div>

@@ -92,33 +92,67 @@ pub async fn browse_source(
         return html::browse_source(source, query, category_id, current_page, current_page_size)
             .await;
     }
+    // Only plain JSON CMS sources get the detail-shaped listing. XML list responses already
+    // carry `<pic>`, and HTTP-extension sources declare their own parameter conventions, so
+    // neither is switched over.
+    let wants_detail = listing_ac(adapter) == "detail";
     let params = match adapter {
         SiteAdapterKind::HttpExtension => extension_params(
-            query,
-            category_id,
+            query.clone(),
+            category_id.clone(),
             current_page,
             current_page_size,
             source.ext.clone(),
         ),
         SiteAdapterKind::Html => unreachable!("HTML 适配器已在参数构造前返回"),
-        _ => cms_params(query, category_id, current_page, current_page_size),
+        _ => cms_params_with_ac(
+            listing_ac(adapter),
+            query.clone(),
+            category_id.clone(),
+            current_page,
+            current_page_size,
+        ),
     };
-    let payload = match adapter {
-        SiteAdapterKind::XmlHttp => parse_xml_payload(&request_text(&source.api, &params).await?)?,
-        SiteAdapterKind::JsonHttp | SiteAdapterKind::HttpExtension => {
-            request_json(&source.api, &params).await?
+    match fetch_catalog(&source, adapter, &params).await {
+        Ok(payload) => {
+            let page = parse_catalog_page(&payload, &source.key, current_page, current_page_size);
+            if !page.items.is_empty() || !wants_detail {
+                return Ok(page);
+            }
         }
-        SiteAdapterKind::Html => unreachable!("HTML 适配器已在载荷请求前返回"),
-        SiteAdapterKind::Spider | SiteAdapterKind::Unsupported => {
-            return Err("该源没有可执行的安全站点适配器。".to_string());
-        }
-    };
+        // A few MacCMS deployments reject `ac=detail` without `ids`. Falling through to the
+        // slim `ac=list` keeps browsing working there, losing only the covers — strictly
+        // better than an empty library.
+        Err(error) if !wants_detail => return Err(error),
+        Err(_) => {}
+    }
+    let slim = cms_params_with_ac("list", query, category_id, current_page, current_page_size);
+    let payload = fetch_catalog(&source, adapter, &slim).await?;
     Ok(parse_catalog_page(
         &payload,
         &source.key,
         current_page,
         current_page_size,
     ))
+}
+
+/// Issues the catalog request for one parameter set. Kept separate so the browse path can
+/// retry with a different `ac` without duplicating the adapter dispatch.
+async fn fetch_catalog(
+    source: &SourceRecord,
+    adapter: SiteAdapterKind,
+    params: &[(String, String)],
+) -> Result<Value, String> {
+    match adapter {
+        SiteAdapterKind::XmlHttp => parse_xml_payload(&request_text(&source.api, params).await?),
+        SiteAdapterKind::JsonHttp | SiteAdapterKind::HttpExtension => {
+            request_json(&source.api, params).await
+        }
+        SiteAdapterKind::Html => unreachable!("HTML 适配器已在载荷请求前返回"),
+        SiteAdapterKind::Spider | SiteAdapterKind::Unsupported => {
+            Err("该源没有可执行的安全站点适配器。".to_string())
+        }
+    }
 }
 
 #[tauri::command]
@@ -358,14 +392,35 @@ async fn request_text(api: &str, params: &[(String, String)]) -> Result<String, 
     fetch_text(url, 15 * 1024 * 1024, "CMS 响应").await
 }
 
-fn cms_params(
+/// Which `ac` a catalog listing should use for a given adapter. Only plain JSON CMS sources
+/// need the detail-shaped listing, because only MacCMS hides `vod_pic` behind `ac=detail`;
+/// XML list responses already carry `<pic>`, and extension sources declare their own
+/// parameters through `ext`, so neither is switched over.
+fn listing_ac(adapter: SiteAdapterKind) -> &'static str {
+    match adapter {
+        SiteAdapterKind::JsonHttp => "detail",
+        _ => "list",
+    }
+}
+
+/// MacCMS distinguishes `ac=list` (slim rows: id, name, type, play_from) from `ac=detail`
+/// (full records including `vod_pic`). Browsing used `ac=list`, so every item arrived without
+/// a poster — measured against real sources, `ac=list` returned 0 covers out of 20 while
+/// `ac=detail` returned 20 out of 20, and `vod_area` was missing for the same reason. Asking
+/// for detail records costs one larger response (~40-180 KiB against a 15 MiB budget) and
+/// still honours `pg`, `wd` and `t`, so no extra request is needed.
+///
+/// `list` is kept for the fallback path: a deployment that rejects `ac=detail` for listings
+/// still browses, just without covers.
+fn cms_params_with_ac(
+    ac: &str,
     query: String,
     category_id: Option<String>,
     page: u32,
     page_size: u32,
 ) -> Vec<(String, String)> {
     let mut params = vec![
-        ("ac".to_string(), "list".to_string()),
+        ("ac".to_string(), ac.to_string()),
         ("pg".to_string(), page.to_string()),
         ("limit".to_string(), page_size.to_string()),
     ];
@@ -385,7 +440,9 @@ fn extension_params(
     page_size: u32,
     ext: Option<String>,
 ) -> Vec<(String, String)> {
-    let mut params = cms_params(query, category_id, page, page_size);
+    // Extension sources declare their own `ac` via `ext`, so this stays on the historical
+    // `list` default rather than inheriting the JSON CMS switch to `ac=detail`.
+    let mut params = cms_params_with_ac("list", query, category_id, page, page_size);
     if let Some(ext) = ext.filter(|value| !value.trim().is_empty()) {
         if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(&ext) {
             for field in ["params", "query", "httpParams"] {
@@ -610,10 +667,10 @@ fn parse_item(value: &Value, source_key: &str) -> VodItem {
             value,
             &["vod_pic", "vod_pic_thumb", "vod_pic_slide", "pic", "poster"],
         ),
-        description: value_text(
+        description: plain_text(&value_text(
             value,
             &["vod_content", "vod_blurb", "content", "description"],
-        ),
+        )),
         year: value_text(value, &["vod_year", "year"]),
         area: value_text(value, &["vod_area", "area"]),
         categories: parse_item_categories(value),
@@ -767,6 +824,66 @@ fn value_text(value: &Value, keys: &[&str]) -> String {
         .unwrap_or_default()
 }
 
+/// `vod_content` is a rich-text field and some sources fill it with markup (measured: one
+/// source returned `<p><span style=...>` in 9 of 20 items). The UI renders descriptions as
+/// escaped text, so the tags would show up literally. Tags are dropped, each tag boundary
+/// becomes a space, and the common entities are decoded.
+fn plain_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '<' => {
+                // Consume the tag; the boundary becomes a space so words do not run together.
+                for inner in chars.by_ref() {
+                    if inner == '>' {
+                        break;
+                    }
+                }
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+            }
+            '&' => {
+                let mut entity = String::new();
+                let mut terminated = false;
+                while let Some(&next) = chars.peek() {
+                    if next == ';' {
+                        chars.next();
+                        terminated = true;
+                        break;
+                    }
+                    if entity.len() > 8 || next.is_whitespace() || next == '&' || next == '<' {
+                        break;
+                    }
+                    entity.push(next);
+                    chars.next();
+                }
+                if terminated {
+                    match entity.as_str() {
+                        "amp" => out.push('&'),
+                        "lt" => out.push('<'),
+                        "gt" => out.push('>'),
+                        "quot" => out.push('"'),
+                        "apos" | "#39" => out.push('\''),
+                        "nbsp" | "#160" => out.push(' '),
+                        _ => {
+                            out.push('&');
+                            out.push_str(&entity);
+                            out.push(';');
+                        }
+                    }
+                } else {
+                    out.push('&');
+                    out.push_str(&entity);
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn value_u64(value: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter()
         .find_map(|key| value.get(*key))
@@ -781,7 +898,10 @@ fn value_u64(value: &Value, keys: &[&str]) -> Option<u64> {
 mod tests {
     use serde_json::json;
 
-    use super::{extension_params, parse_catalog_page, parse_xml_payload};
+    use super::{
+        cms_params_with_ac, extension_params, listing_ac, parse_catalog_page, parse_xml_payload,
+    };
+    use crate::adapters::SiteAdapterKind;
 
     #[test]
     fn parses_tvbox_xml_items_categories_and_cdata() {
@@ -856,5 +976,118 @@ mod tests {
 
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].name, "测试影片");
+    }
+
+    /// Browsing used `ac=list`, whose rows carry no `vod_pic`, so every card rendered without
+    /// a cover. JSON CMS listings now ask for `ac=detail`, which returns full records.
+    #[test]
+    fn json_cms_listings_request_detail_records_so_posters_arrive() {
+        assert_eq!(listing_ac(SiteAdapterKind::JsonHttp), "detail");
+
+        let params = cms_params_with_ac(
+            listing_ac(SiteAdapterKind::JsonHttp),
+            String::new(),
+            None,
+            1,
+            12,
+        );
+
+        assert!(params.contains(&("ac".to_string(), "detail".to_string())));
+        assert!(params.contains(&("pg".to_string(), "1".to_string())));
+        assert!(params.contains(&("limit".to_string(), "12".to_string())));
+    }
+
+    /// XML and extension sources are deliberately left on `ac=list`: XML already returns
+    /// `<pic>`, and extension sources declare their own parameters.
+    #[test]
+    fn xml_and_extension_sources_keep_the_slim_listing() {
+        assert_eq!(listing_ac(SiteAdapterKind::XmlHttp), "list");
+        assert_eq!(listing_ac(SiteAdapterKind::HttpExtension), "list");
+        assert_eq!(listing_ac(SiteAdapterKind::Html), "list");
+        assert_eq!(listing_ac(SiteAdapterKind::Unsupported), "list");
+    }
+
+    /// The fallback path must still be able to ask for the slim listing.
+    #[test]
+    fn slim_listing_variant_still_uses_ac_list() {
+        let params = cms_params_with_ac("list", "关键词".to_string(), Some("电影".to_string()), 3, 20);
+
+        assert!(params.contains(&("ac".to_string(), "list".to_string())));
+        assert!(params.contains(&("pg".to_string(), "3".to_string())));
+        assert!(params.contains(&("wd".to_string(), "关键词".to_string())));
+        assert!(params.contains(&("t".to_string(), "电影".to_string())));
+    }
+
+    /// Extension sources declare their own `ac` through `ext`, so they must keep the `list`
+    /// default rather than silently inheriting the JSON CMS switch.
+    #[test]
+    fn extension_params_keep_the_list_default() {
+        let params = extension_params(String::new(), None, 1, 20, None);
+
+        assert!(params.contains(&("ac".to_string(), "list".to_string())));
+    }
+
+    /// `vod_content` is rich text; some sources return markup and the UI renders descriptions
+    /// as escaped text, so tags would appear literally.
+    #[test]
+    fn strips_markup_from_item_descriptions() {
+        let page = parse_catalog_page(
+            &json!({
+                "list": [{
+                    "vod_id": "movie-2",
+                    "vod_name": "测试影片",
+                    "vod_content": "<p><span style=\"color: rgb(17, 17, 17);\">第一段 &amp; 第二段</span></p><br/>第三段"
+                }]
+            }),
+            "cms-api",
+            1,
+            20,
+        );
+
+        assert_eq!(page.items[0].description, "第一段 & 第二段 第三段");
+    }
+
+    #[test]
+    fn keeps_plain_descriptions_intact() {
+        let page = parse_catalog_page(
+            &json!({
+                "list": [{
+                    "vod_id": "movie-3",
+                    "vod_name": "测试影片",
+                    "vod_content": "改编自同名小说。\n顾长歌穿越到玄幻世界。"
+                }]
+            }),
+            "cms-api",
+            1,
+            20,
+        );
+
+        assert_eq!(page.items[0].description, "改编自同名小说。 顾长歌穿越到玄幻世界。");
+    }
+
+    /// `vod_area` is frequently absent, which is why the card showed "未知地区". The parser
+    /// must pass the empty string through so the UI can omit the field rather than invent one.
+    #[test]
+    fn missing_area_stays_empty_rather_than_becoming_a_placeholder() {
+        let page = parse_catalog_page(
+            &json!({
+                "list": [{ "vod_id": "movie-4", "vod_name": "测试影片" }]
+            }),
+            "cms-api",
+            1,
+            20,
+        );
+
+        assert_eq!(page.items[0].area, "");
+    }
+
+    #[test]
+    fn plain_text_handles_entities_and_stray_markup() {
+        assert_eq!(super::plain_text("a &lt; b &gt; c"), "a < b > c");
+        assert_eq!(super::plain_text("x&nbsp;y"), "x y");
+        assert_eq!(super::plain_text("未知实体 &foo; 保留"), "未知实体 &foo; 保留");
+        assert_eq!(super::plain_text("<b>粗体</b>普通"), "粗体 普通");
+        assert_eq!(super::plain_text("  多   空格  "), "多 空格");
+        assert_eq!(super::plain_text(""), "");
     }
 }
