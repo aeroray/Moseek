@@ -113,27 +113,106 @@ pub async fn browse_source(
             current_page_size,
         ),
     };
-    match fetch_catalog(&source, adapter, &params).await {
+    let mut page = match fetch_catalog(&source, adapter, &params).await {
         Ok(payload) => {
-            let page = parse_catalog_page(&payload, &source.key, current_page, current_page_size);
-            if !page.items.is_empty() || !wants_detail {
-                return Ok(page);
+            let parsed =
+                parse_catalog_page(&payload, &source.key, current_page, current_page_size);
+            if parsed.items.is_empty() && wants_detail {
+                None
+            } else {
+                Some(parsed)
             }
         }
         // A few MacCMS deployments reject `ac=detail` without `ids`. Falling through to the
         // slim `ac=list` keeps browsing working there, losing only the covers — strictly
         // better than an empty library.
         Err(error) if !wants_detail => return Err(error),
-        Err(_) => {}
+        Err(_) => None,
+    };
+    if page.is_none() {
+        let slim = cms_params_with_ac(
+            "list",
+            query.clone(),
+            category_id.clone(),
+            current_page,
+            current_page_size,
+        );
+        let payload = fetch_catalog(&source, adapter, &slim).await?;
+        page = Some(parse_catalog_page(
+            &payload,
+            &source.key,
+            current_page,
+            current_page_size,
+        ));
     }
-    let slim = cms_params_with_ac("list", query, category_id, current_page, current_page_size);
-    let payload = fetch_catalog(&source, adapter, &slim).await?;
-    Ok(parse_catalog_page(
-        &payload,
-        &source.key,
-        current_page,
-        current_page_size,
-    ))
+    let page = page.expect("a catalog page was produced above");
+
+    // Some deployments strip covers from `ac=list` even over XML, where the listing was assumed
+    // to always carry `<pic>`. Measured on a real source: `at/xml/?ac=list` returned no `<pic>`
+    // element at all, while `?ac=detail` returned one for every item. Nothing distinguishes
+    // "this listing has no covers" from "this deployment hides them behind `ac=detail`", so the
+    // only reliable test is to ask. An upgrade is accepted only when it actually yields covers,
+    // so a source that genuinely has none keeps the cheaper listing.
+    //
+    // The detail response is merged into the listing rather than replacing it: on that same
+    // deployment `?ac=detail` returned covers for all 20 items but **zero** `<ty>` categories,
+    // while `?ac=list` returned 61. Taking the detail page wholesale silently emptied the
+    // category filter — a fix for one missing field that broke another.
+    if should_retry_for_covers(adapter, wants_detail, &page) {
+        let detail = cms_params_with_ac(
+            "detail",
+            query.clone(),
+            category_id.clone(),
+            current_page,
+            current_page_size,
+        );
+        if let Ok(payload) = fetch_catalog(&source, adapter, &detail).await {
+            let detailed =
+                parse_catalog_page(&payload, &source.key, current_page, current_page_size);
+            if detailed.items.iter().any(|item| !item.poster.trim().is_empty()) {
+                return Ok(merge_catalog_page(page, detailed));
+            }
+        }
+    }
+    Ok(page)
+}
+
+/// Folds a richer detail listing into the listing that was already parsed.
+///
+/// The two responses describe the same page of items, so the detail one supplies the fields the
+/// slim listing omitted (covers, synopsis) while anything it does not carry — most importantly
+/// the category list, which some XML deployments only emit for `ac=list` — is kept from the
+/// original. Categories are taken from whichever side actually has them.
+fn merge_catalog_page(base: CatalogPage, detail: CatalogPage) -> CatalogPage {
+    CatalogPage {
+        items: detail.items,
+        categories: if detail.categories.is_empty() {
+            base.categories
+        } else {
+            detail.categories
+        },
+        ..detail
+    }
+}
+
+/// Whether a listing that came back without any covers is worth re-requesting as `ac=detail`.
+///
+/// XML listings are documented to carry `<pic>` in the list response, but at least one real
+/// deployment omits it there and only fills it for `ac=detail` — the same shape MacCMS has for
+/// JSON. Since a coverless listing and a deployment that hides covers look identical, the
+/// listing is retried once and the result is kept only if it actually contains a cover.
+fn should_retry_for_covers(
+    adapter: SiteAdapterKind,
+    wants_detail: bool,
+    page: &CatalogPage,
+) -> bool {
+    !wants_detail
+        && matches!(
+            adapter,
+            SiteAdapterKind::XmlHttp | SiteAdapterKind::JsonHttp
+        )
+        && !page.items.is_empty()
+        && page.items.iter().all(|item| item.poster.trim().is_empty())
 }
 
 /// Issues the catalog request for one parameter set. Kept separate so the browse path can
@@ -900,6 +979,7 @@ mod tests {
 
     use super::{
         cms_params_with_ac, extension_params, listing_ac, parse_catalog_page, parse_xml_payload,
+        should_retry_for_covers,
     };
     use crate::adapters::SiteAdapterKind;
 
@@ -997,14 +1077,97 @@ mod tests {
         assert!(params.contains(&("limit".to_string(), "12".to_string())));
     }
 
-    /// XML and extension sources are deliberately left on `ac=list`: XML already returns
-    /// `<pic>`, and extension sources declare their own parameters.
+    /// XML and extension sources start on `ac=list`: XML normally returns `<pic>`, and
+    /// extension sources declare their own parameters. A coverless XML listing is retried
+    /// separately by `should_retry_for_covers`.
     #[test]
     fn xml_and_extension_sources_keep_the_slim_listing() {
         assert_eq!(listing_ac(SiteAdapterKind::XmlHttp), "list");
         assert_eq!(listing_ac(SiteAdapterKind::HttpExtension), "list");
         assert_eq!(listing_ac(SiteAdapterKind::Html), "list");
         assert_eq!(listing_ac(SiteAdapterKind::Unsupported), "list");
+    }
+
+    /// Measured against a real source: `at/xml/?ac=list` returned no `<pic>` element at all,
+    /// while `?ac=detail` returned one per item. The XML listing is documented to carry `<pic>`,
+    /// so the adapter never asked for the detail shape and every card rendered without a cover.
+    /// A coverless listing must therefore be retried as `ac=detail`.
+    #[test]
+    fn a_coverless_xml_listing_is_retried_as_detail() {
+        let page = parse_catalog_page(
+            &parse_xml_payload(
+                r#"<rss><list recordcount="2" pagecount="1"><video><id>1</id><name>甲</name><dt>snm3u8</dt></video><video><id>2</id><name>乙</name><dt>snm3u8</dt></video></list></rss>"#,
+            )
+            .unwrap(),
+            "xml-source",
+            1,
+            20,
+        );
+        assert_eq!(page.items.len(), 2);
+        assert!(page.items.iter().all(|item| item.poster.is_empty()));
+
+        assert!(should_retry_for_covers(
+            SiteAdapterKind::XmlHttp,
+            false,
+            &page
+        ));
+    }
+
+    /// The retry is not free, so it must not fire when it cannot help: a listing that already
+    /// has covers, an empty listing, a source already asking for detail, and adapters that
+    /// declare their own parameters are all left alone.
+    #[test]
+    fn the_cover_retry_only_fires_for_a_coverless_listing() {
+        let with_cover = parse_catalog_page(
+            &parse_xml_payload(
+                r#"<rss><list recordcount="1" pagecount="1"><video><id>1</id><name>甲</name><pic>https://img.example/a.jpg</pic></video></list></rss>"#,
+            )
+            .unwrap(),
+            "xml-source",
+            1,
+            20,
+        );
+        assert!(!with_cover.items.is_empty());
+        assert!(!should_retry_for_covers(
+            SiteAdapterKind::XmlHttp,
+            false,
+            &with_cover
+        ));
+
+        let coverless = parse_catalog_page(
+            &parse_xml_payload(
+                r#"<rss><list recordcount="1" pagecount="1"><video><id>1</id><name>甲</name></video></list></rss>"#,
+            )
+            .unwrap(),
+            "xml-source",
+            1,
+            20,
+        );
+        // Already asking for detail: there is no cheaper shape left to try.
+        assert!(!should_retry_for_covers(
+            SiteAdapterKind::JsonHttp,
+            true,
+            &coverless
+        ));
+        // Extension sources own their parameter conventions.
+        assert!(!should_retry_for_covers(
+            SiteAdapterKind::HttpExtension,
+            false,
+            &coverless
+        ));
+        // An empty listing is not a cover problem, and must not be retried as one.
+        let empty = parse_catalog_page(
+            &parse_xml_payload(r#"<rss><list recordcount="0" pagecount="1"></list></rss>"#).unwrap(),
+            "xml-source",
+            1,
+            20,
+        );
+        assert!(empty.items.is_empty());
+        assert!(!should_retry_for_covers(
+            SiteAdapterKind::XmlHttp,
+            false,
+            &empty
+        ));
     }
 
     /// The fallback path must still be able to ask for the slim listing.
@@ -1081,6 +1244,71 @@ mod tests {
         assert_eq!(page.items[0].area, "");
     }
 
+    /// The cover retry must not cost the category list. Measured on a real deployment:
+    /// `at/xml/?ac=detail` returned a cover for all 20 items but **zero** `<ty>` categories,
+    /// while `?ac=list` returned 61. Replacing the listing with the detail page silently emptied
+    /// the category filter, so the two are merged.
+    #[test]
+    fn the_cover_retry_keeps_categories_the_detail_response_omits() {
+        let base = super::CatalogPage {
+            source_key: "xml-source".to_string(),
+            items: vec![],
+            categories: vec![
+                super::VodCategory {
+                    id: "6".to_string(),
+                    name: "动作片".to_string(),
+                },
+                super::VodCategory {
+                    id: "13".to_string(),
+                    name: "国产剧".to_string(),
+                },
+            ],
+            page: 1,
+            page_count: 7229,
+            page_size: 20,
+            total: 144_580,
+        };
+        let detail = super::CatalogPage {
+            source_key: "xml-source".to_string(),
+            items: vec![],
+            categories: vec![],
+            page: 1,
+            page_count: 7229,
+            page_size: 20,
+            total: 144_580,
+        };
+
+        let merged = super::merge_catalog_page(base, detail);
+        assert_eq!(merged.categories.len(), 2);
+        assert_eq!(merged.categories[0].name, "动作片");
+    }
+
+    /// When the detail response does carry its own categories, those win — they describe the
+    /// same page and are the more complete record.
+    #[test]
+    fn detail_categories_win_when_both_sides_have_them() {
+        let category = |id: &str, name: &str| super::VodCategory {
+            id: id.to_string(),
+            name: name.to_string(),
+        };
+        let page = |categories: Vec<super::VodCategory>| super::CatalogPage {
+            source_key: "xml-source".to_string(),
+            items: vec![],
+            categories,
+            page: 1,
+            page_count: 1,
+            page_size: 20,
+            total: 0,
+        };
+
+        let merged = super::merge_catalog_page(
+            page(vec![category("1", "旧分类")]),
+            page(vec![category("2", "新分类")]),
+        );
+        assert_eq!(merged.categories.len(), 1);
+        assert_eq!(merged.categories[0].name, "新分类");
+    }
+
     #[test]
     fn plain_text_handles_entities_and_stray_markup() {
         assert_eq!(super::plain_text("a &lt; b &gt; c"), "a < b > c");
@@ -1090,4 +1318,5 @@ mod tests {
         assert_eq!(super::plain_text("  多   空格  "), "多 空格");
         assert_eq!(super::plain_text(""), "");
     }
+
 }
