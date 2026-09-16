@@ -136,9 +136,26 @@ import type {
   SourceTestStatus,
 } from "@/types/moseek";
 
-type SourceFilter = "all" | CapabilityStatus;
+/**
+ * The list groups sources by the only distinction a user acts on: whether it can run.
+ *
+ * The five-way split the parser produces (supported / partial / needs-adapter / blocked /
+ * invalid) is accurate but not actionable — "部分可用" and "待适配" both mean "not usable right
+ * now", and asking a user to pick between them is asking them to learn the taxonomy. 全部 exists
+ * so the unusable ones can be found and pruned.
+ */
+type SourceFilter = "available" | "unusable" | "all";
 type AdapterFilter = "all" | AdapterExecution;
 type ImportMode = "remote" | "local";
+
+function matchesSourceFilter(
+  capability: CapabilityStatus,
+  filter: SourceFilter,
+) {
+  if (filter === "all") return true;
+  const usable = capability === "supported" || capability === "partial";
+  return filter === "available" ? usable : !usable;
+}
 
 export function ConfigCenter() {
   const configDocuments = useAppStore((state) => state.configDocuments);
@@ -149,6 +166,7 @@ export function ConfigCenter() {
   const normalizedConfig = useAppStore((state) => state.normalizedConfig);
   const lastImportedAt = useAppStore((state) => state.lastImportedAt);
   const toggleSource = useAppStore((state) => state.toggleSource);
+  const removeSources = useAppStore((state) => state.removeSources);
   const setConfigDocument = useAppStore((state) => state.setConfigDocument);
   const setSourceTestResult = useAppStore((state) => state.setSourceTestResult);
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
@@ -157,7 +175,12 @@ export function ConfigCenter() {
   );
   const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
   const [query, setQuery] = useState("");
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
+  /**
+   * Defaults to 可用. A configuration usually carries far more sources than a user can act on,
+   * and the ones that cannot run are not what they came to look at — they are what they may
+   * later want to prune. Starting on 全部 made the page open on a wall of unusable rows.
+   */
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("available");
   const [adapterFilter, setAdapterFilter] = useState<AdapterFilter>("all");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
     null,
@@ -222,12 +245,22 @@ export function ConfigCenter() {
     () => sources.filter(isTestableSource),
     [sources],
   );
-  const testedCmsCount = sources.filter(
-    (source) => source.sourceType === "cms" && source.testStatus === "passed",
-  ).length;
-  const testedLiveCount = sources.filter(
-    (source) => source.sourceType === "live" && source.testStatus === "passed",
-  ).length;
+  /**
+   * The sources worth offering to delete: those with no usable adapter, and those a test found to
+   * return nothing. A source that passed, or that has simply not been tested yet, is left alone —
+   * "untested" is not evidence of being useless.
+   */
+  const removableSources = useMemo(
+    () =>
+      sources.filter(
+        (source) => !isTestableSource(source) || source.testStatus === "empty",
+      ),
+    [sources],
+  );
+  const removableKeys = useMemo(
+    () => new Set(removableSources.map((source) => source.key)),
+    [removableSources],
+  );
   const adapterRows = useMemo(
     () =>
       adapterRegistry.map((adapter) => ({
@@ -346,8 +379,7 @@ export function ConfigCenter() {
   const filteredSources = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return sources.filter((source) => {
-      const matchesFilter =
-        sourceFilter === "all" || source.capability === sourceFilter;
+      const matchesFilter = matchesSourceFilter(source.capability, sourceFilter);
       const matchesQuery =
         !normalizedQuery ||
         [source.name, source.key, source.api].some((value) =>
@@ -431,6 +463,32 @@ export function ConfigCenter() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "源状态保存失败";
       setParseState({ type: "error", message });
+    }
+  };
+
+  const handleRemoveSources = async (
+    keys: string[],
+    description: string,
+  ) => {
+    if (keys.length === 0) return;
+    const confirmed = window.confirm(
+      `将从当前配置中删除${description}，共 ${keys.length} 个。此操作会同时修改原始配置，不能撤销。`,
+    );
+    if (!confirmed) return;
+    try {
+      await removeSources(keys);
+      if (inspectedSourceKey && keys.includes(inspectedSourceKey)) {
+        setInspectedSourceKey(null);
+      }
+      setParseState({
+        type: "success",
+        message: `已从配置中删除 ${keys.length} 个源。`,
+      });
+    } catch (error) {
+      setParseState({
+        type: "error",
+        message: error instanceof Error ? error.message : "删除源失败",
+      });
     }
   };
 
@@ -1032,6 +1090,30 @@ export function ConfigCenter() {
                       />
                       导入配置
                     </Button>
+                    {/* Pruning the whole configuration at once: the sources that cannot run are
+                        usually the majority, and removing them one at a time is the tedious
+                        part of ending up with a configuration that works. */}
+                    {removableSources.length > 0 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5 text-muted-foreground hover:text-destructive"
+                        onClick={() =>
+                          void handleRemoveSources(
+                            removableSources.map((source) => source.key),
+                            "全部不可用的源",
+                          )
+                        }
+                      >
+                        <Trash2
+                          className="size-3.5"
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
+                        清理不可用 ({removableSources.length})
+                      </Button>
+                    )}
                   </div>
                 </div>
                 <div className="mt-4 flex items-center gap-2">
@@ -1061,17 +1143,14 @@ export function ConfigCenter() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
-                        <SelectItem value="all">全部状态</SelectItem>
-                        <SelectItem value="supported">可用</SelectItem>
-                        <SelectItem value="partial">部分可用</SelectItem>
-                        <SelectItem value="needs-adapter">待适配</SelectItem>
-                        <SelectItem value="blocked">不可用</SelectItem>
-                        <SelectItem value="invalid">配置无效</SelectItem>
+                        <SelectItem value="available">可用</SelectItem>
+                        <SelectItem value="unusable">不可用</SelectItem>
+                        <SelectItem value="all">全部</SelectItem>
                       </SelectGroup>
                     </SelectContent>
                   </Select>
                   <span className="shrink-0 text-xs text-muted-foreground">
-                    共 {filteredSources.length} 个 · 已通过 {testedCmsCount + testedLiveCount} 个
+                    共 {filteredSources.length} 个
                   </span>
                 </div>
               </CardHeader>
@@ -1223,6 +1302,31 @@ export function ConfigCenter() {
                                   />
                                 </Button>
                               )}
+                              {/* Pruning is offered for sources that cannot run, so the
+                                  configuration can be reduced to the part that works. A source
+                                  that works, or that has simply not been tested, is not
+                                  something to invite deletion of. */}
+                              {removableKeys.has(source.key) && (
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon-sm"
+                                  className="ml-1 text-muted-foreground hover:text-destructive"
+                                  aria-label={`删除 ${source.name}`}
+                                  onClick={() =>
+                                    void handleRemoveSources(
+                                      [source.key],
+                                      `「${source.name}」`,
+                                    )
+                                  }
+                                >
+                                  <Trash2
+                                    className="size-3.5"
+                                    data-icon="inline-start"
+                                    aria-hidden="true"
+                                  />
+                                </Button>
+                              )}
                             </TableCell>
                           </TableRow>
                         ))}
@@ -1231,28 +1335,28 @@ export function ConfigCenter() {
                     <ScrollBar />
                   </ScrollArea>
                 ) : (
-                  <Empty className="min-h-80">
-                    <EmptyHeader>
-                      <EmptyMedia variant="icon">
-                        <Search className="size-4" data-icon="inline-start" aria-hidden="true" />
-                      </EmptyMedia>
-                      <EmptyTitle>没有匹配的源</EmptyTitle>
-                      <EmptyDescription>
-                        调整关键词或清除状态筛选后重试。
-                      </EmptyDescription>
-                    </EmptyHeader>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => {
-                        setQuery("");
-                        setSourceFilter("all");
-                      }}
-                    >
-                      <X className="size-4" data-icon="inline-start" aria-hidden="true" />
-                      清除筛选
-                    </Button>
-                  </Empty>
+                  /* Padded to match the table's own inset: the card's content area has no
+                     padding (the table brings its own), so an empty state flush against it
+                     pressed its dashed border against the card edge. */
+                  <div className="p-4">
+                    <Empty className="min-h-72">
+                      <EmptyHeader>
+                        <EmptyMedia variant="icon">
+                          <Search className="size-4" data-icon="inline-start" aria-hidden="true" />
+                        </EmptyMedia>
+                        <EmptyTitle>
+                          {sourceFilter === "available" && !query.trim()
+                            ? "当前配置没有可用的源"
+                            : "没有匹配的源"}
+                        </EmptyTitle>
+                        <EmptyDescription>
+                          {sourceFilter === "available" && !query.trim()
+                            ? "这些源都缺少可用的适配器。切换到「不可用」可以查看并清理它们。"
+                            : "调整关键词或筛选条件后重试。"}
+                        </EmptyDescription>
+                      </EmptyHeader>
+                    </Empty>
+                  </div>
                 )}
               </CardContent>
             </Card>

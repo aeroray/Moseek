@@ -15,6 +15,15 @@ if (typeof window !== "undefined" && window.Element) {
   window.Element.prototype.scrollIntoView = () => {};
 }
 
+// jsdom does not implement the pointer-capture API, which Radix's Select calls on the trigger
+// while opening. Without the stubs the click is still handled, but the failure surfaces later as
+// an unhandled error that vitest reports as a failed run even when every assertion passed.
+if (typeof window !== "undefined" && window.Element) {
+  window.Element.prototype.hasPointerCapture = () => false;
+  window.Element.prototype.setPointerCapture = () => {};
+  window.Element.prototype.releasePointerCapture = () => {};
+}
+
 // jsdom does not implement ResizeObserver, which Radix's ScrollArea constructs as soon as a
 // scrollbar is actually mounted (`type="auto"`/`"always"`). Without the stub those scroll
 // areas throw during layout instead of being asserted on.

@@ -188,6 +188,17 @@ export async function setSourceEnabled(
   });
 }
 
+/**
+ * Removes sources from a saved configuration, in both the normalized snapshot and the raw text
+ * the user imported, so a removed source does not come back on the next import or export.
+ */
+export async function removeSources(documentId: number, sourceKeys: string[]) {
+  return invokeCommand<StoredConfigDocument>("remove_sources", {
+    documentId,
+    sourceKeys,
+  });
+}
+
 export async function setSourceScriptArchive(
   documentId: number,
   sourceKey: string,

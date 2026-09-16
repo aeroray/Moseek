@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import {
+  removeSources as removeSourcesInConfig,
   setSourceEnabled,
   type ConfigDocumentSummary,
   type StoredConfigDocument,
@@ -41,6 +42,7 @@ interface AppStore {
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
   setAutoEpgEnabled: (enabled: boolean) => void;
+  removeSources: (keys: string[]) => Promise<void>;
   toggleSource: (key: string) => Promise<void>;
   setSourceTestResult: (key: string, result: SourceTestResult) => void;
   setConfigDocuments: (documents: ConfigDocumentSummary[]) => void;
@@ -81,6 +83,32 @@ export const useAppStore = create<AppStore>()(
       setActiveView: (activeView) => set({ activeView }),
       setTheme: (theme) => set({ theme }),
       setAutoEpgEnabled: (autoEpgEnabled) => set({ autoEpgEnabled }),
+      /**
+       * Removes sources from the active configuration. The keys are removed from the saved
+       * document (both its snapshot and its raw text) and from the in-memory state, so the
+       * library stops listing them immediately.
+       */
+      removeSources: async (keys) => {
+        const state = get();
+        if (state.activeConfigId === null || keys.length === 0) return;
+        const removing = new Set(keys);
+        const document = await removeSourcesInConfig(state.activeConfigId, keys);
+        if (!document) throw new Error("浏览器预览不会删除源。");
+        set((current) => ({
+          sources: current.sources.filter(
+            (source) => !removing.has(source.key),
+          ),
+          // Favourites and history are keyed by source too; a source that no longer exists
+          // should not leave entries pointing at nothing.
+          favorites: current.favorites.filter(
+            (favorite) => !removing.has(favorite.sourceKey),
+          ),
+          history: current.history.filter(
+            (record) => !removing.has(record.item.sourceKey),
+          ),
+        }));
+        get().setConfigDocument(document);
+      },
       toggleSource: async (key) => {
         const initialState = get();
         if (initialState.activeConfigId === null) return;

@@ -500,6 +500,93 @@ fn update_normalized_source_test(
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
 }
 
+/// Removes one source from a document, and the same entry from its raw configuration.
+///
+/// A user pruning their configuration wants the source gone, not merely hidden: it should stop
+/// appearing in the library, stop being probed, and stop being exported. So the removal is
+/// applied to both the normalized snapshot and the raw text the user imported — leaving the raw
+/// text untouched would resurrect the source on the next import or export.
+pub(super) fn remove_sources_in_connection(
+    connection: &mut Connection,
+    document_id: i64,
+    source_keys: &[String],
+) -> Result<ConfigDocument, String> {
+    if source_keys.is_empty() {
+        return Err("没有指定要删除的源".to_string());
+    }
+    let document = load_config_document(connection, document_id)?
+        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
+
+    let removing: std::collections::HashSet<&str> =
+        source_keys.iter().map(String::as_str).collect();
+    let sources: Vec<SourceRecord> = document
+        .sources
+        .iter()
+        .filter(|source| !removing.contains(source.key.as_str()))
+        .cloned()
+        .collect();
+    if sources.len() == document.sources.len() {
+        return Err("配置中找不到要删除的源".to_string());
+    }
+
+    let sources_json = serialize_sources(&sources)?;
+    let normalized_config =
+        remove_sources_from_config(&document.normalized_config, &removing);
+    let raw_config = remove_sources_from_config(&document.raw_config, &removing);
+    // `source_count` is derived from `sources_json` when the document is read, so only the live
+    // tally is stored alongside it.
+    let live_count = sources
+        .iter()
+        .filter(|source| source.source_type == "live")
+        .count() as i64;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2, raw_config = ?3, live_count = ?4 WHERE id = ?5",
+            params![
+                sources_json,
+                normalized_config,
+                raw_config,
+                live_count,
+                document_id
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    load_config_document(connection, document_id)?.ok_or_else(|| "配置更新后无法读取".to_string())
+}
+
+/// Drops matching entries from the `sites` / `lives` arrays of a configuration text.
+///
+/// Returns the input unchanged when it is not parseable, so an unparseable configuration is never
+/// silently emptied by a removal.
+fn remove_sources_from_config(
+    config_text: &str,
+    removing: &std::collections::HashSet<&str>,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(config_text) else {
+        return config_text.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return config_text.to_string();
+    };
+    for section in ["sites", "lives"] {
+        let Some(items) = object.get_mut(section).and_then(Value::as_array_mut) else {
+            continue;
+        };
+        items.retain(|item| {
+            item.get("key")
+                .and_then(Value::as_str)
+                .map(|key| !removing.contains(key))
+                .unwrap_or(true)
+        });
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| config_text.to_string())
+}
+
 pub(super) fn set_source_enabled_in_connection(
     connection: &mut Connection,
     document_id: i64,
@@ -1061,6 +1148,150 @@ mod tests {
             )
             .unwrap();
         connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn removing_sources_drops_them_from_both_the_snapshot_and_the_raw_config() {
+        // A pruned source has to leave the raw text too. If only the snapshot were updated, the
+        // next import or export would bring the source straight back, which is exactly what the
+        // user was trying to get rid of.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"key":"keep","name":"保留"},{"key":"drop","name":"删除"}],"lives":[{"key":"droplive"}]}"#;
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 1)",
+                params![
+                    "可清理配置",
+                    raw,
+                    raw,
+                    serialize_sources(&[
+                        test_source_with_key("keep", true),
+                        test_source_with_key("drop", true),
+                        test_live_source(),
+                    ])
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        let document_id = connection.last_insert_rowid();
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["drop".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(updated.sources.len(), 2);
+        assert!(updated.sources.iter().all(|source| source.key != "drop"));
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let site_keys: Vec<&str> = raw_value["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["key"].as_str())
+            .collect();
+        assert_eq!(site_keys, vec!["keep"]);
+
+        let normalized: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+        assert_eq!(normalized["sites"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn removing_sources_updates_the_stored_counts() {
+        // The document list shows these counts, so leaving them stale would report sources that
+        // are no longer there.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"key":"a"},{"key":"b"}],"lives":[{"key":"live-relative"}]}"#;
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 1)",
+                params![
+                    "计数配置",
+                    raw,
+                    raw,
+                    serialize_sources(&[
+                        test_source_with_key("a", true),
+                        test_source_with_key("b", true),
+                        test_live_source(),
+                    ])
+                    .unwrap()
+                ],
+            )
+            .unwrap();
+        let document_id = connection.last_insert_rowid();
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["b".to_string(), "live-relative".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(updated.sources.len(), 1);
+        assert_eq!(updated.live_count, 0);
+    }
+
+    #[test]
+    fn removing_a_source_that_is_not_there_is_rejected() {
+        // Silently succeeding would let a stale UI report a deletion that never happened.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id =
+            insert_document_with_sources(&connection, "配置 A", "{\"a\":1}", &["a"], None);
+
+        let error = match remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["missing".to_string()],
+        ) {
+            Ok(_) => panic!("removing an absent source should be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("找不到"), "unexpected error: {error}");
+        let unchanged = load_config_document(&connection, document_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.sources.len(), 1);
+    }
+
+    #[test]
+    fn removing_sources_leaves_unparseable_raw_config_untouched() {
+        // The raw text is whatever the user imported. If it cannot be parsed, a removal must not
+        // replace it with an empty object — that would destroy their configuration.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_document_with_sources(
+            &connection,
+            "坏配置",
+            "not json at all",
+            &["a", "b"],
+            None,
+        );
+
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["a".to_string()])
+                .unwrap();
+
+        assert_eq!(updated.raw_config, "not json at all");
+        assert_eq!(updated.sources.len(), 1);
+    }
+
+    #[test]
+    fn removing_sources_only_affects_the_target_document() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let first = insert_document_with_sources(&connection, "配置 A", "{\"a\":1}", &["a", "b"], None);
+        let second = insert_document_with_sources(&connection, "配置 B", "{\"b\":1}", &["a", "b"], None);
+
+        remove_sources_in_connection(&mut connection, first, &["a".to_string()]).unwrap();
+
+        let other = load_config_document(&connection, second).unwrap().unwrap();
+        assert_eq!(other.sources.len(), 2);
     }
 
     #[test]

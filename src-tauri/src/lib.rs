@@ -43,6 +43,7 @@ pub fn run() {
             config::commands::activate_config_document,
             config::commands::delete_config_document,
             config::commands::set_source_enabled,
+            config::commands::remove_sources,
             config::commands::set_source_script_archive,
             config::commands::update_source_test,
             config::commands::export_config,

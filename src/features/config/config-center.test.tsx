@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConfigCenter } from "@/features/config/config-center";
@@ -84,6 +84,16 @@ function renderCenter() {
   return render(<ConfigCenter />);
 }
 
+/** Radix Select renders its list in a portal and needs a pointer sequence to open. */
+function chooseFilter(label: string) {
+  const trigger = screen.getByLabelText("筛选状态");
+  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+  fireEvent.click(trigger);
+  const option = screen.getByRole("option", { name: label });
+  fireEvent.pointerUp(option);
+  fireEvent.click(option);
+}
+
 describe("config center", () => {
   afterEach(cleanup);
 
@@ -133,17 +143,58 @@ describe("config center", () => {
     expect(screen.queryByText("能力")).not.toBeInTheDocument();
   });
 
+  it("opens on the usable sources rather than the whole configuration", () => {
+    // A configuration carries far more unusable sources than usable ones, so 全部 opened the page
+    // on a wall of rows the user cannot act on.
+    renderCenter();
+
+    expect(screen.getByText("可用的源")).toBeInTheDocument();
+    expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
+    expect(screen.queryByText("待适配的源")).not.toBeInTheDocument();
+  });
+
+  it("groups the filter into usable and unusable rather than five parser states", () => {
+    // 部分可用 / 待适配 / 配置无效 all mean "not usable right now"; asking a user to choose
+    // between them is asking them to learn the parser's taxonomy.
+    renderCenter();
+
+    const trigger = screen.getByLabelText("筛选状态");
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+
+    expect(screen.getByRole("option", { name: "可用" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "不可用" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "全部" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "部分可用" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "待适配" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "配置无效" })).not.toBeInTheDocument();
+  });
+
+  it("filters to the unusable sources when asked", () => {
+    renderCenter();
+
+    chooseFilter("不可用");
+
+    expect(screen.getByText("不可用的源")).toBeInTheDocument();
+    expect(screen.getByText("待适配的源")).toBeInTheDocument();
+    expect(screen.queryByText("可用的源")).not.toBeInTheDocument();
+  });
+
   it("states whether an adapter is working instead of repeating the status badge", () => {
     // The adapter cell showed the adapter's own execution badge, so a blocked source read
     // "已阻止" twice in the same row.
     renderCenter();
+    chooseFilter("不可用");
 
     const rows = screen.getAllByRole("row");
     const blockedRow = rows.find((row) => row.textContent?.includes("不可用的源"));
     expect(blockedRow).toBeTruthy();
     expect(within(blockedRow as HTMLElement).getByText("未适配")).toBeInTheDocument();
 
-    const okRow = rows.find((row) => row.textContent?.includes("可用的源"));
+    chooseFilter("可用");
+    const okRow = screen
+      .getAllByRole("row")
+      .find((row) => row.textContent?.includes("可用的源"));
     expect(within(okRow as HTMLElement).getByText("可执行")).toBeInTheDocument();
   });
 
@@ -153,6 +204,8 @@ describe("config center", () => {
     renderCenter();
 
     expect(screen.getByRole("switch", { name: "启用 可用的源" })).toBeInTheDocument();
+
+    chooseFilter("不可用");
     expect(
       screen.queryByRole("switch", { name: "启用 不可用的源" }),
     ).not.toBeInTheDocument();
@@ -163,8 +216,9 @@ describe("config center", () => {
 
   it("does not offer a connection test for a source that cannot run", () => {
     // A test for a source with no working adapter can only fail, which tells the user nothing.
-    // Those rows offer 详情 instead, so the test button count matches the usable sources.
+    // Those rows offer 详情 instead.
     renderCenter();
+    chooseFilter("全部");
 
     expect(screen.getAllByRole("button", { name: /^测试$/ })).toHaveLength(1);
     expect(screen.getAllByRole("button", { name: /详情/ })).toHaveLength(2);
@@ -172,6 +226,7 @@ describe("config center", () => {
 
   it("points an unusable source at its details instead of a dead end", () => {
     renderCenter();
+    chooseFilter("不可用");
 
     const detailButtons = screen.getAllByRole("button", { name: /详情/ });
     expect(detailButtons.length).toBeGreaterThan(0);
@@ -196,20 +251,150 @@ describe("config center", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps the list searchable and filterable", () => {
+  it("keeps the list searchable", () => {
     renderCenter();
 
     fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
-      target: { value: "不可用" },
+      target: { value: "可用" },
     });
 
-    expect(screen.getByText("不可用的源")).toBeInTheDocument();
-    expect(screen.queryByText("可用的源")).not.toBeInTheDocument();
+    expect(screen.getByText("可用的源")).toBeInTheDocument();
+    expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
   });
 
-  it("reports how many sources the current filter is showing", () => {
+  it("reports how many sources are showing, without an unexplained pass count", () => {
+    // "已通过 N 个" left the reader guessing what had passed — a test? a filter? The list is
+    // already the answer, so only the size of the result is stated.
     renderCenter();
 
-    expect(screen.getByText(/共 3 个/)).toBeInTheDocument();
+    expect(screen.getByText("共 1 个")).toBeInTheDocument();
+    expect(screen.queryByText(/已通过/)).not.toBeInTheDocument();
+  });
+
+  it("offers no action button in the empty state", () => {
+    // Nothing to clear: the filter is a control the user can see and change, so a second button
+    // for the same thing only raised the question of what else it might reset.
+    renderCenter();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
+      target: { value: "不存在的关键词" },
+    });
+
+    expect(screen.getByText("没有匹配的源")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /清除筛选/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("explains an empty usable list instead of just saying nothing matched", () => {
+    // When every source is unusable, "没有匹配的源" implies the filter is wrong when in fact the
+    // configuration has nothing usable in it.
+    useAppStore.setState({
+      sources: [blocked, needsAdapter],
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 2, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    render(<ConfigCenter />);
+
+    expect(screen.getByText("当前配置没有可用的源")).toBeInTheDocument();
+    expect(screen.getByText(/切换到「不可用」/)).toBeInTheDocument();
+  });
+
+  it("insets the empty state from the card edge", () => {
+    // The card's content area carries no padding (the table brings its own), so an empty state
+    // dropped straight into it pressed its dashed border against the card border. jsdom cannot
+    // measure the gap, but it can confirm the wrapper that creates it.
+    renderCenter();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
+      target: { value: "不存在的关键词" },
+    });
+
+    const empty = screen.getByText("没有匹配的源").closest("[data-slot='empty']");
+    expect(empty).toBeTruthy();
+    expect(empty?.parentElement?.className).toContain("p-4");
+  });
+
+  it("offers to delete an unusable source, and only an unusable one", () => {
+    // Pruning is how a user reduces a configuration to the part that works. Offering it for a
+    // source that works would invite deleting the good ones.
+    renderCenter();
+
+    expect(
+      screen.queryByRole("button", { name: "删除 可用的源" }),
+    ).not.toBeInTheDocument();
+
+    chooseFilter("不可用");
+    expect(
+      screen.getByRole("button", { name: "删除 不可用的源" }),
+    ).toBeInTheDocument();
+  });
+
+  it("removes a source through the store after confirming", async () => {
+    const removeSources = vi.fn(async () => undefined);
+    useAppStore.setState({ removeSources });
+    renderCenter();
+    chooseFilter("不可用");
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 不可用的源" }));
+
+    await waitFor(() => {
+      expect(removeSources).toHaveBeenCalledWith(["no"]);
+    });
+  });
+
+  it("does not delete anything when the confirmation is declined", () => {
+    const removeSources = vi.fn(async () => undefined);
+    useAppStore.setState({ removeSources });
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderCenter();
+    chooseFilter("不可用");
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 不可用的源" }));
+
+    expect(removeSources).not.toHaveBeenCalled();
+  });
+
+  it("offers to clear every unusable source at once", async () => {
+    // The unusable sources are usually the majority, and removing them one at a time is the
+    // tedious part.
+    const removeSources = vi.fn(async () => undefined);
+    useAppStore.setState({ removeSources });
+    renderCenter();
+
+    const bulk = screen.getByRole("button", { name: /清理不可用/ });
+    // Two of the three fixture sources cannot run.
+    expect(bulk.textContent).toContain("2");
+
+    fireEvent.click(bulk);
+
+    await waitFor(() => {
+      expect(removeSources).toHaveBeenCalledWith(["no", "wait"]);
+    });
+  });
+
+  it("hides the bulk cleanup when every source is usable", () => {
+    useAppStore.setState({
+      sources: [supported],
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 1, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    render(<ConfigCenter />);
+
+    expect(
+      screen.queryByRole("button", { name: /清理不可用/ }),
+    ).not.toBeInTheDocument();
   });
 });

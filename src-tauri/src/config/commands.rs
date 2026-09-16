@@ -272,6 +272,16 @@ pub fn set_source_enabled(
 }
 
 #[tauri::command]
+pub fn remove_sources(
+    document_id: i64,
+    source_keys: Vec<String>,
+    state: State<'_, AppDatabase>,
+) -> Result<ConfigDocument, String> {
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    storage::remove_sources_in_connection(&mut connection, document_id, &source_keys)
+}
+
+#[tauri::command]
 pub fn set_source_script_archive(
     document_id: i64,
     source_key: String,
