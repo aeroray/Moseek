@@ -23,6 +23,8 @@ incremental = false
 
 [dependencies]
 base64 = "0.22"
+# Used to poll several live-stream probes concurrently instead of trying lines one by one.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 quick-xml = "0.41"
 scraper = "0.20"

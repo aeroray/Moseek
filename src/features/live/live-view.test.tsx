@@ -31,6 +31,22 @@ vi.mock("@/features/player/media-diagnostic-panel", () => ({
   MediaDiagnosticPanel: () => <div data-testid="diagnostic-panel" />,
 }));
 
+const probeStreamUrls = vi.fn();
+
+vi.mock("@/lib/tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tauri")>();
+  return {
+    ...actual,
+    isTauriRuntime: () => true,
+    resolvePlayback: async (url: string) => ({
+      url,
+      mediaKind: "hls",
+      adapterId: "test",
+    }),
+    probeStreamUrls: (...args: unknown[]) => probeStreamUrls(...args),
+  };
+});
+
 const { useAppStore } = await import("@/stores/app-store");
 
 function liveSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
@@ -68,6 +84,42 @@ const catalog: LiveCatalog = {
   ],
   groups: [{ id: "news", name: "News" }],
 };
+
+/** A channel with three lines, for the concurrent line-probe behaviour. */
+const multiLineCatalog: LiveCatalog = {
+  channels: [
+    {
+      id: "live-main:News:City News",
+      name: "City News",
+      groupId: "news",
+      groupName: "News",
+      logoUrl: "",
+      streamUrl: "https://stream.example/line-1.m3u8",
+      streamUrls: [
+        "https://stream.example/line-1.m3u8",
+        "https://stream.example/line-2.m3u8",
+        "https://stream.example/line-3.m3u8",
+      ],
+      mediaKind: "hls",
+      sourceKey: "live-main",
+      epgId: "news.one",
+    },
+  ],
+  groups: [{ id: "news", name: "News" }],
+};
+
+function probe(index: number, ok: boolean, elapsedMs = 100) {
+  return {
+    index,
+    url: `https://stream.example/line-${index + 1}.m3u8`,
+    ok,
+    status: ok ? 200 : null,
+    contentType: ok ? "application/vnd.apple.mpegurl" : null,
+    mediaKind: "hls",
+    elapsedMs,
+    message: ok ? "可用" : "无法连接",
+  };
+}
 
 describe("LiveView EPG rendering", () => {
   // This project does not enable vitest `globals`, so Testing Library's automatic cleanup
@@ -168,17 +220,22 @@ describe("LiveView EPG rendering", () => {
     expect(root?.className).toContain("min-h-0");
   });
 
-  it("labels the group filter chips so a single unfamiliar group reads as a filter", async () => {
+  it("exposes the group filter as a labelled dropdown", async () => {
+    // The filter used to be one chip per group. A playlist can carry dozens of groups, which
+    // pushed the bar past the viewport and read as noise; a dropdown keeps the bar a fixed
+    // height and scales to any number of groups.
     render(<LiveView />);
 
     await waitFor(() => {
       expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
     });
 
-    const chip = screen.getByRole("button", { name: "News" });
-    expect(chip).toHaveAttribute("aria-pressed", "true");
-    expect(chip).toHaveAttribute("title", "只看「News」分组的频道");
-    expect(screen.getByText("分组")).toBeInTheDocument();
+    const trigger = screen.getByLabelText("频道分组");
+    expect(trigger).toBeInTheDocument();
+    // Radix renders the selected item's text inside the trigger.
+    expect(trigger).toHaveTextContent("News");
+    // The old chip row is gone.
+    expect(screen.queryByText("分组")).not.toBeInTheDocument();
   });
 
   it("substitutes the TVBox epg template before requesting the guide", async () => {
@@ -275,5 +332,101 @@ describe("LiveView EPG rendering", () => {
     expect(
       await screen.findByText("节目单源未收录该频道"),
     ).toBeInTheDocument();
+  });
+});
+
+describe("LiveView concurrent line probing", () => {
+  afterEach(cleanup);
+
+  beforeEach(() => {
+    loadLiveCatalog.mockReset();
+    loadEpg.mockReset();
+    probeStreamUrls.mockReset();
+    loadLiveCatalog.mockResolvedValue({ data: multiLineCatalog, error: null });
+    loadEpg.mockResolvedValue({
+      data: { programs: [] },
+      mode: "empty",
+      origin: "configured",
+      error: null,
+    });
+    useAppStore.setState({
+      sources: [liveSource()],
+      liveFavorites: [],
+      autoEpgEnabled: false,
+    });
+  });
+
+  it("probes every line at once instead of waiting for each to fail in turn", async () => {
+    // Lines used to be tried strictly in order: the player spent its whole timeout failing on
+    // line 1 before line 2 was even attempted. All lines are now probed in one parallel pass.
+    probeStreamUrls.mockResolvedValue([probe(0, false), probe(1, true), probe(2, false)]);
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(probeStreamUrls).toHaveBeenCalled();
+    });
+    // One call carrying every line is what makes the probing concurrent.
+    expect(probeStreamUrls).toHaveBeenCalledWith([
+      "https://stream.example/line-1.m3u8",
+      "https://stream.example/line-2.m3u8",
+      "https://stream.example/line-3.m3u8",
+    ]);
+  });
+
+  it("switches to the fastest reachable line when the default one is dead", async () => {
+    probeStreamUrls.mockResolvedValue([
+      probe(0, false, 30),
+      probe(1, true, 250),
+      probe(2, true, 90),
+    ]);
+    render(<LiveView />);
+
+    // Line 2 (index 2) is reachable and quicker than line 3, so it should be selected.
+    await waitFor(() => {
+      expect(screen.getByLabelText("线路 3（可用）")).toHaveClass("bg-primary");
+    });
+  });
+
+  it("marks unreachable lines without hiding them", async () => {
+    // A probe can be wrong about an operator-restricted address, so a dead line stays
+    // clickable and merely dimmed rather than being removed.
+    probeStreamUrls.mockResolvedValue([probe(0, true), probe(1, false), probe(2, false)]);
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("线路 2（不可用）")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("线路 3（不可用）")).toBeEnabled();
+  });
+
+  it("explains an operator-restricted channel instead of inviting a pointless retry", async () => {
+    // China Mobile IPTV addresses only answer on China Mobile's own network; when every line
+    // fails the cause is upstream, so the UI must say so rather than imply retrying helps.
+    probeStreamUrls.mockResolvedValue([
+      probe(0, false),
+      probe(1, false),
+      probe(2, false),
+    ]);
+    render(<LiveView />);
+
+    // The banner appears from the probe result alone, without waiting for the player to time
+    // out through every line.
+    expect(
+      await screen.findByText("该频道所有线路均无法连接"),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/3 条线路/)).toBeInTheDocument();
+    expect(screen.getByText(/运营商网络/)).toBeInTheDocument();
+  });
+
+  it("does not claim every line failed while one is still usable", async () => {
+    probeStreamUrls.mockResolvedValue([probe(0, false), probe(1, true), probe(2, false)]);
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(probeStreamUrls).toHaveBeenCalled();
+    });
+    expect(
+      screen.queryByText("该频道所有线路均无法连接"),
+    ).not.toBeInTheDocument();
   });
 });

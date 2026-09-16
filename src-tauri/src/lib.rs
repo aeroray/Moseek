@@ -56,6 +56,7 @@ pub fn run() {
             live::get_epg,
             resolver::fetch_media_resource,
             resolver::resolve_playback,
+            resolver::probe_stream_urls,
             resolver::sniff_with_companion,
             script_runtime::execute_script,
             script_runtime::archive::test_script_source,

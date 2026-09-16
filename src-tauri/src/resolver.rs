@@ -1,6 +1,7 @@
-use std::{collections::HashMap, net::IpAddr, time::Duration};
+use std::{collections::HashMap, net::IpAddr, time::Duration, time::Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use futures_util::future::join_all;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,6 +43,27 @@ pub struct MediaResource {
     pub content_type: Option<String>,
     pub url: String,
 }
+
+/// One line's probe outcome. `ok` means the address really served a playable manifest, not
+/// merely that it answered.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamProbe {
+    pub index: usize,
+    pub url: String,
+    pub ok: bool,
+    pub status: Option<u16>,
+    pub content_type: Option<String>,
+    pub media_kind: String,
+    pub elapsed_ms: u64,
+    pub message: String,
+}
+
+const PROBE_TIMEOUT_MS: u64 = 4_000;
+/// Enough for a manifest; anything larger is not a playlist we can use.
+const PROBE_MAX_BYTES: usize = 512 * 1024;
+/// Bounds the fan-out so a playlist with hundreds of mirrors cannot open hundreds of sockets.
+const MAX_PROBE_URLS: usize = 12;
 
 const DEFAULT_SNIFFER_COMPANION_URL: &str = "http://127.0.0.1:57573/sniffer";
 const MAX_PARSE_REQUEST_BODY_BYTES: usize = 128 * 1024;
@@ -125,6 +147,112 @@ pub async fn resolve_playback(
         adapter_id: "direct-http".to_string(),
         parse_service_id: None,
     })
+}
+
+/// Probes several candidate stream URLs at once and reports which ones actually serve a
+/// playable manifest, fastest first.
+///
+/// The workspace used to try lines strictly in order: line 1 was handed to the player, the
+/// player spent its timeout failing, and only then was line 2 attempted. With several lines
+/// that is a long serial wait, and the line that works is often not the first. Probing in
+/// parallel costs one request per line but returns the usable ones in a single round trip.
+#[tauri::command]
+pub async fn probe_stream_urls(
+    urls: Vec<String>,
+    timeout_ms: Option<u64>,
+) -> Result<Vec<StreamProbe>, String> {
+    let timeout = timeout_ms.unwrap_or(PROBE_TIMEOUT_MS).clamp(500, 15_000);
+    let mut pending = Vec::with_capacity(urls.len());
+    for (index, url) in urls.into_iter().enumerate() {
+        if index >= MAX_PROBE_URLS {
+            break;
+        }
+        pending.push((index, url));
+    }
+    // `join_all` polls every probe concurrently on the current runtime; the requests are
+    // independent, so there is no reason to await them one at a time.
+    let results = join_all(
+        pending
+            .into_iter()
+            .map(|(index, url)| async move { probe_one(index, &url, timeout).await }),
+    )
+    .await;
+    let mut probes = results;
+    sort_probes(&mut probes);
+    Ok(probes)
+}
+
+/// Orders probes so the caller can take the head of the list: reachable lines first, then the
+/// quickest response, then the original order as a stable tiebreak.
+fn sort_probes(probes: &mut [StreamProbe]) {
+    probes.sort_by(|left, right| {
+        right
+            .ok
+            .cmp(&left.ok)
+            .then_with(|| left.elapsed_ms.cmp(&right.elapsed_ms))
+            .then_with(|| left.index.cmp(&right.index))
+    });
+}
+
+async fn probe_one(index: usize, url: &str, timeout_ms: u64) -> StreamProbe {
+    let started = Instant::now();
+    let mut probe = StreamProbe {
+        index,
+        url: url.to_string(),
+        ok: false,
+        status: None,
+        content_type: None,
+        media_kind: String::new(),
+        elapsed_ms: 0,
+        message: String::new(),
+    };
+    let parsed = match Url::parse(url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            probe.message = format!("地址无效：{error}");
+            return probe;
+        }
+    };
+    if let Err(error) = validate_remote_url(&parsed) {
+        probe.message = error;
+        return probe;
+    }
+    // A manifest is small; the cap keeps a mislabelled URL from streaming megabytes. The
+    // overall deadline is the probe's own, not the shared 15s client timeout, so one slow line
+    // cannot hold the whole comparison.
+    let fetched = tokio::time::timeout(
+        Duration::from_millis(timeout_ms),
+        fetch_media_bytes(parsed, PROBE_MAX_BYTES, "直播线路探测", &[]),
+    )
+    .await;
+    match fetched {
+        Err(_) => {
+            probe.elapsed_ms = started.elapsed().as_millis() as u64;
+            probe.message = format!("探测超时（{} 毫秒）", timeout_ms);
+        }
+        Ok(Ok((body, content_type, final_url))) => {
+            probe.elapsed_ms = started.elapsed().as_millis() as u64;
+            probe.content_type = content_type;
+            probe.status = Some(200);
+            let text = String::from_utf8_lossy(&body);
+            let looks_like_manifest = text.trim_start().starts_with("#EXTM3U");
+            let kind = media_kind(final_url.as_str());
+            probe.media_kind = kind.to_string();
+            // A 200 alone is not enough: an expired line often answers with an HTML error page
+            // or an empty body, which the player then fails on. Require a real manifest.
+            if looks_like_manifest || kind == "hls" {
+                probe.ok = true;
+                probe.message = "可用".to_string();
+            } else {
+                probe.message = "响应不是有效的直播清单".to_string();
+            }
+        }
+        Ok(Err(error)) => {
+            probe.elapsed_ms = started.elapsed().as_millis() as u64;
+            probe.message = error;
+        }
+    }
+    probe
 }
 
 #[tauri::command]
@@ -340,5 +468,49 @@ mod tests {
         assert!(is_supported_parser_method("GET"));
         assert!(is_supported_parser_method("post"));
         assert!(!is_supported_parser_method("PUT"));
+    }
+
+    fn probe(index: usize, ok: bool, elapsed_ms: u64) -> super::StreamProbe {
+        super::StreamProbe {
+            index,
+            url: format!("https://stream.example/line-{index}.m3u8"),
+            ok,
+            status: None,
+            content_type: None,
+            media_kind: "hls".to_string(),
+            elapsed_ms,
+            message: String::new(),
+        }
+    }
+
+    /// The caller takes the head of the list, so reachable lines must come first and the
+    /// quickest of those must lead — otherwise probing in parallel would still hand the player
+    /// a dead line.
+    #[test]
+    fn probe_results_lead_with_the_fastest_reachable_line() {
+        let mut probes = vec![
+            probe(0, false, 10),
+            probe(1, true, 250),
+            probe(2, true, 90),
+            probe(3, false, 5),
+        ];
+        super::sort_probes(&mut probes);
+
+        assert_eq!(probes[0].index, 2, "fastest reachable line should lead");
+        assert_eq!(probes[1].index, 1);
+        // Unreachable lines sink to the bottom, even though one answered quickly.
+        assert!(!probes[2].ok);
+        assert!(!probes[3].ok);
+    }
+
+    #[test]
+    fn probe_ordering_is_stable_for_equal_timings() {
+        let mut probes = vec![probe(2, true, 100), probe(0, true, 100), probe(1, true, 100)];
+        super::sort_probes(&mut probes);
+
+        assert_eq!(
+            probes.iter().map(|item| item.index).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 }

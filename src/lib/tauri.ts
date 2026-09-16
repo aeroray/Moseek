@@ -70,6 +70,18 @@ export interface MediaResource {
   url: string;
 }
 
+/** Outcome of probing one live line. `ok` means a real manifest was served, not just a 200. */
+export interface StreamProbe {
+  index: number;
+  url: string;
+  ok: boolean;
+  status?: number | null;
+  contentType?: string | null;
+  mediaKind: string;
+  elapsedMs: number;
+  message: string;
+}
+
 export interface ScriptExecutionRequest {
   script: string;
   entry?: string;
@@ -292,6 +304,19 @@ export async function fetchMediaResource(
     url,
     headers,
     maxBytes: maxBytes ?? null,
+  });
+}
+
+/**
+ * Probes every candidate line at once and returns them ordered with the usable ones first
+ * (fastest response leading). Returns null outside the desktop runtime, where the command is
+ * not registered.
+ */
+export async function probeStreamUrls(urls: string[], timeoutMs?: number) {
+  if (!isTauriRuntime()) return null;
+  return invokeCommand<StreamProbe[]>("probe_stream_urls", {
+    urls,
+    timeoutMs: timeoutMs ?? null,
   });
 }
 

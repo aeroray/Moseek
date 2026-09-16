@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
-  CircleAlert,
   Heart,
   Search,
+  TriangleAlert,
   Tv,
 } from "lucide-react";
 
@@ -31,8 +31,10 @@ import {
 } from "@/lib/live-adapter";
 import {
   isTauriRuntime,
+  probeStreamUrls,
   resolvePlayback,
   type PlaybackResolution,
+  type StreamProbe,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
@@ -78,7 +80,11 @@ export function LiveView() {
     useState<PlaybackResolution | null>(null);
   const [streamIndex, setStreamIndex] = useState(0);
   const [showDiagnosticPanel, setShowDiagnosticPanel] = useState(false);
+  const [streamProbes, setStreamProbes] = useState<StreamProbe[] | null>(null);
+  const [isProbing, setIsProbing] = useState(false);
   const streamIndexRef = useRef(0);
+  /** Set once the user picks a line by hand, so auto-probing stops overriding their choice. */
+  const pinnedStreamRef = useRef(false);
 
   useEffect(() => {
     if (!liveSources.some((source) => source.key === liveSourceKey)) {
@@ -177,8 +183,66 @@ export function LiveView() {
 
   useEffect(() => {
     streamIndexRef.current = 0;
+    pinnedStreamRef.current = false;
     setStreamIndex(0);
+    setStreamProbes(null);
   }, [selectedChannel?.id]);
+
+  // Probe every line at once and start on the one that actually answers fastest.
+  //
+  // The workspace used to try lines strictly in order: line 1 was handed to the player, the
+  // player spent its own timeout failing, and only then was line 2 attempted. That is a long
+  // serial wait and the working line is often not the first. Probing in parallel costs one
+  // small request per line and picks a usable one immediately.
+  //
+  // The user's manual choice always wins: once they click a line number, `pinnedStreamRef`
+  // suppresses the automatic override.
+  const streamUrlsKey = streamUrls.join("|");
+  useEffect(() => {
+    let cancelled = false;
+    if (pinnedStreamRef.current || !selectedChannel || streamUrls.length < 2) {
+      setStreamProbes(null);
+      setIsProbing(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setIsProbing(true);
+    void probeStreamUrls(streamUrls)
+      .then((probes) => {
+        if (cancelled) return;
+        setStreamProbes(probes);
+        if (!probes) return;
+        // Pick the quickest reachable line here rather than trusting the backend's ordering,
+        // so the choice stays correct even if the list arrives unsorted.
+        const fastest = probes
+          .filter((probe) => probe.ok)
+          .reduce<StreamProbe | null>(
+            (best, probe) =>
+              !best || probe.elapsedMs < best.elapsedMs ? probe : best,
+            null,
+          );
+        if (!fastest) return;
+        // Only move if the current line is not itself usable, so a working default is not
+        // disturbed.
+        const current = probes.find(
+          (probe) => probe.index === streamIndexRef.current,
+        );
+        if (!current?.ok) {
+          streamIndexRef.current = fastest.index;
+          setStreamIndex(fastest.index);
+          setResolvedStream(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setIsProbing(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Keyed on the channel plus the resolved URL list: `streamUrls` is rebuilt on every render,
+    // so depending on the array itself would re-probe in a loop.
+  }, [selectedChannel?.id, streamUrlsKey]);
 
   const tryNextStream = () => {
     const lastAttemptIndex =
@@ -190,6 +254,17 @@ export function LiveView() {
     setResolvedStream(null);
     return true;
   };
+
+  /**
+   * True once every line has been probed and none served a manifest. In that case the failure
+   * is upstream — the addresses are unreachable from this machine — and cycling through them
+   * again cannot help, so the UI should say that instead of implying a retry might work.
+   */
+  const allLinesUnreachable = Boolean(
+    streamProbes &&
+      streamProbes.length > 0 &&
+      streamProbes.every((probe) => !probe.ok),
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -329,42 +404,36 @@ export function LiveView() {
           />
         </div>
 
-        {/* Group filter chips. The group name comes from the playlist's own
-            `group-title` attribute, so a source that ships a single group renders a single
-            chip whose name is unfamiliar and whose click is a no-op (it re-selects the group
-            already shown). Label it so it reads as a filter rather than an action, and
-            expose selection via aria-pressed instead of colour alone. */}
-        <div className="flex min-w-0 items-center gap-1.5 overflow-x-auto py-1">
-          {groups.length > 0 && (
-            <span className="shrink-0 text-xs text-muted-foreground/70">
-              分组
-            </span>
-          )}
-          {groups.map((group) => {
-            const isActive = group.id === groupId;
-            return (
-              <button
-                key={group.id}
-                type="button"
-                aria-pressed={isActive}
-                title={`只看「${group.name}」分组的频道`}
-                onClick={() => {
-                  setGroupId(group.id);
-                  const firstInGroup = channels.find((c) => c.groupId === group.id);
-                  if (firstInGroup) selectChannel(firstInGroup);
-                }}
-                className={cn(
-                  "shrink-0 rounded px-2.5 py-1 text-xs font-medium transition-colors",
-                  isActive
-                    ? "bg-primary text-primary-foreground font-semibold"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-              >
-                {group.name}
-              </button>
-            );
-          })}
-        </div>
+        {/* Group filter. A playlist can carry dozens of `group-title` values, and rendering
+            one chip per group pushed the row past the viewport and made the header read as
+            noise. A dropdown keeps the bar a fixed height and scales to any number of groups,
+            and it shows the active group's name even when the list is long. */}
+        <Select
+          value={groupId}
+          onValueChange={(value) => {
+            setGroupId(value);
+            const firstInGroup = channels.find((c) => c.groupId === value);
+            if (firstInGroup) selectChannel(firstInGroup);
+          }}
+          disabled={groups.length === 0}
+        >
+          <SelectTrigger
+            size="sm"
+            className="h-8 w-40 shrink-0 font-medium border-border/60 bg-muted/40 text-foreground"
+            aria-label="频道分组"
+          >
+            <SelectValue placeholder="选择分组" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {groups.map((group) => (
+                <SelectItem key={group.id} value={group.id}>
+                  {group.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
 
         <div className="ml-auto flex items-center gap-2 shrink-0">
           <Button
@@ -418,13 +487,15 @@ export function LiveView() {
       {(loadError || epgError) && (
         <div className="shrink-0 px-3 pt-2">
           <Alert variant="destructive" className="py-2">
-            <CircleAlert
+            <TriangleAlert
               className="size-4"
               data-icon="inline-start"
               aria-hidden="true"
             />
-            <AlertTitle className="text-xs">直播数据请求失败</AlertTitle>
-            <AlertDescription className="text-xs">
+            <AlertTitle className="text-xs font-semibold">
+              直播数据请求失败
+            </AlertTitle>
+            <AlertDescription className="text-xs text-destructive/90">
               {loadError ?? epgError}
             </AlertDescription>
           </Alert>
@@ -517,13 +588,29 @@ export function LiveView() {
               </div>
             )}
 
-            {/* Error or Channel Info Overlay */}
-            {diagnostic && (
+            {/* Error overlay. `variant="destructive"` already colours the text red, so the
+                previous `bg-destructive/90` override painted red text onto a red surface and
+                the message was unreadable. Keep the dark surface and let the destructive
+                variant supply the red foreground, and lead with an icon so the state reads at
+                a glance instead of relying on colour alone.
+                `allLinesUnreachable` raises this banner on its own: the probe already knows
+                every line is dead, so there is no reason to make the user wait while the
+                player times out through each one in turn. */}
+            {(diagnostic || allLinesUnreachable) && (
               <div className="absolute top-3 left-3 right-3 z-30">
-                <Alert variant="destructive" className="py-2 backdrop-blur-md bg-destructive/90">
-                  <CircleAlert className="size-4" data-icon="inline-start" aria-hidden="true" />
-                  <AlertTitle className="text-xs">播放受阻</AlertTitle>
-                  <AlertDescription className="text-xs">{diagnostic}</AlertDescription>
+                <Alert
+                  variant="destructive"
+                  className="py-2 backdrop-blur-md bg-destructive/10 border-destructive/40"
+                >
+                  <TriangleAlert className="size-4" data-icon="inline-start" aria-hidden="true" />
+                  <AlertTitle className="text-xs font-semibold">
+                    {allLinesUnreachable ? "该频道所有线路均无法连接" : "播放受阻"}
+                  </AlertTitle>
+                  <AlertDescription className="text-xs text-destructive/90">
+                    {allLinesUnreachable
+                      ? `已并发测试 ${streamProbes?.length ?? 0} 条线路，全部未能取到直播清单。这类地址通常只对特定运营商网络开放（例如中国移动 IPTV 源需要移动宽带），换用其它频道或其它直播源即可正常观看。`
+                      : diagnostic}
+                  </AlertDescription>
                 </Alert>
               </div>
             )}
@@ -569,22 +656,47 @@ export function LiveView() {
             <div className="flex items-center gap-2 shrink-0">
               {streamUrls.length > 1 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <span>线路：</span>
-                  {streamUrls.map((_, idx) => (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => setStreamIndex(idx)}
-                      className={cn(
-                        "size-6 rounded text-xs font-bold transition-colors",
-                        streamIndex === idx
-                          ? "bg-primary text-primary-foreground"
-                          : "bg-muted/80 hover:bg-muted text-foreground",
-                      )}
-                    >
-                      {idx + 1}
-                    </button>
-                  ))}
+                  <span>{isProbing ? "测速中：" : "线路："}</span>
+                  {streamUrls.map((_, idx) => {
+                    const probe = streamProbes?.find((item) => item.index === idx);
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => {
+                          // A deliberate choice outranks the automatic probe result.
+                          pinnedStreamRef.current = true;
+                          streamIndexRef.current = idx;
+                          setStreamIndex(idx);
+                          setResolvedStream(null);
+                        }}
+                        title={
+                          probe
+                            ? probe.ok
+                              ? `可用 · ${probe.elapsedMs} 毫秒`
+                              : probe.message
+                            : undefined
+                        }
+                        aria-label={
+                          probe
+                            ? `线路 ${idx + 1}${probe.ok ? "（可用）" : "（不可用）"}`
+                            : `线路 ${idx + 1}`
+                        }
+                        className={cn(
+                          "size-6 rounded text-xs font-bold transition-colors",
+                          streamIndex === idx
+                            ? "bg-primary text-primary-foreground"
+                            : "bg-muted/80 hover:bg-muted text-foreground",
+                          // A probed-dead line is dimmed so the working ones stand out, but it
+                          // stays clickable: the probe can be wrong about an operator-restricted
+                          // address, and the user may know better.
+                          probe && !probe.ok && streamIndex !== idx && "opacity-40",
+                        )}
+                      >
+                        {idx + 1}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
 
