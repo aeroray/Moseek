@@ -21,6 +21,14 @@ tauri-build = { version = "2", features = [] }
 [profile.dev]
 incremental = false
 
+[lints.rust]
+# rustc 1.98 added the `linker_messages` lint, which surfaces whatever the linker prints on
+# stdout. MSVC's `link.exe` always announces "正在创建库 … 和对象 …" when it writes a DLL's
+# import library and export file, so every Windows build reports this as a warning even though
+# nothing is wrong. Allowing the lint only silences that chatter: a real linker failure is an
+# error and still stops the build.
+linker_messages = "allow"
+
 [dependencies]
 base64 = "0.22"
 # Used to poll several live-stream probes concurrently instead of trying lines one by one.

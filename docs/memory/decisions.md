@@ -253,3 +253,11 @@
 - **变异验证 8 项**，其中 **1 项第一次存活**（`bulkIgnoresFilter`：把批量集合换回「全部可删源」，因为原测试只覆盖了「未适配」筛选下的完整列表）。补了一项**带搜索词的**测试（把列表收窄到 1 行，断言只删那一行）后被抓到。**教训：批量操作必须用「视图被收窄」的场景来测，全量列表下两种实现的行为完全一样。**
 - 本轮最终：前端 223 项（live-view 26 项、config-center 42 项）、Rust 96 项。真实浏览器实测（1440×900）：`banners = []`（页面上一条 alert 都没有）、`hasRawTcpError = false`、`hasPlaybackBlocked = false`、`hasAllLinesBanner = false`、`hasStreamDiagnosis = false`、`hasGuideFailedNote = true`（播放器下方那条仍在）、`hasPlaybackDiagnosis = true`；点击后 `[role='dialog']` 存在且**内含「已并发测试 3 条线路…运营商网络」**（证明解释确实搬进了诊断）；`pageScrollHeight === pageClientHeight === 805`。
 - **真实浏览器 harness 的一个陷阱值得记**：第一版断言全部「通过」，因为 `document.body.textContent` **把 harness 自己的 verify 脚本源码也算进去了**——而脚本里正写着要搜索的那些字符串。改成只读 `#root` 后才暴露真相。**任何基于 textContent 的断言都必须限定在应用挂载点内，否则测试脚本会给自己作证。** 同一 harness 还踩到：`load_active_config` 返回 null 会让 App 清空文档，**播下 localStorage 的源被丢掉**，表现为「页面一直空」。
+- **构建警告清理（用户贴出 `pnpm tauri dev` 的输出）**。两条，成因完全不同：
+  - **`warning: linker stdout: 正在创建库 …`**：rustc 1.98 新增的 `linker_messages` lint，把链接器写到 stdout 的内容当作警告上报。**MSVC 的 `link.exe` 每次生成 DLL 的导入库和导出文件时都会打印这行**，所以每个 Windows 构建都会报，而实际上什么都没出错。在 `Cargo.toml` 加 `[lints.rust] linker_messages = "allow"`——**只屏蔽这句闲聊：真正的链接失败是 error，依然会中断构建。**
+  - **`(!) Some chunks are larger than 500 kB`**：真正的成因是 `media-diagnostics.ts` **静态 `import Hls from "hls.js"`**。这个模块被**直播页和诊断面板**共同导入，而这两处都不自己播放——于是**只是打开「播放诊断」就把整个播放器（hls.js + Plyr ≈ 700 kB）拉了进来**，诊断面板 chunk 高达 **730 kB**。两处修复：
+    1. `probeMediaEnvironment()` 里的 `Hls.isSupported()` 改为**动态 `await import("hls.js")`**。**我先尝试过「手写一个等价的探测函数」以避免导入，读源码后否掉了**：`Hls.isSupported()` 不止查 MediaSource，还校验 `SourceBuffer.prototype` 的 API 并要求浏览器能播 hls.js 的基线编解码器之一；手写近似版会在**实际播不了的浏览器上报告「支持」**，比多一次导入更糟。动态导入既保住 chunk 划分又保住正确性——**实测面板 chunk 从 730 kB 降到 24 kB**。
+    2. `vite.config.ts` 加 `manualChunks` 把 `hls.js` / `plyr` 分到独立 vendor chunk，避免它们被折进「恰好共享它们的那个功能 chunk」；并让浏览器能把**很少变的库**和**经常变的应用代码**分开缓存。
+  - **`chunkSizeWarningLimit` 调到 600 而不是关掉**：拆分后唯一超限的是 `vendor-hls`（579 kB），**那就是 hls.js 本身的体积**——light 构建能降到 377 kB，但它**砍掉 HEVC 和 AC-3**，而本项目的 IPTV 源实际在用这些，所以不是选项。阈值设在它之上，**这样将来新增的超大 chunk 仍会被报出来**：警告本身有用，只是不该对着一个我们主动选择、且无法再缩小的依赖开火。
+  - 真实浏览器复核：拆分后直播页正常渲染（频道、播放诊断按钮都在），诊断对话框正常打开，环境行显示 `Tauri 桌面端 · MediaSource 支持 · hls.js 支持`——**证明动态导入确实解析成功**，不是悄悄退化成「否」。
+- 本轮最终：`cargo build --no-default-features`（用户原命令）**零警告**，`pnpm build` **零警告**；前端 223 项、Rust 96 项、`clippy` 全通过。

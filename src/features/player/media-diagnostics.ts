@@ -1,4 +1,5 @@
-import Hls, { type ErrorData } from "hls.js";
+import type Hls from "hls.js";
+import type { ErrorData } from "hls.js";
 
 import type { MediaKind } from "@/types/moseek";
 
@@ -64,6 +65,24 @@ export interface MediaDiagnosticSnapshot {
   events: MediaDiagnosticEvent[];
 }
 
+/**
+ * Whether hls.js can play here, asked of hls.js itself.
+ *
+ * The import is dynamic on purpose. A static `import Hls from "hls.js"` made this module depend
+ * on the whole library, and because the diagnostic panel and the live view both import this
+ * module, merely opening 播放诊断 pulled in ~700 kB of player code — the panel chunk was 730 kB.
+ * Loading it lazily keeps the question answerable without the static dependency.
+ *
+ * Reimplementing `Hls.isSupported()` was the other option and was rejected: it does more than
+ * check for MediaSource, also verifying SourceBuffer's API and that the browser can play one of
+ * hls.js's baseline codecs. A hand-written approximation would report support for a browser that
+ * cannot actually play, which is worse than the extra import.
+ */
+async function detectHlsJsSupport() {
+  const { default: Hls } = await import("hls.js");
+  return Hls.isSupported();
+}
+
 const workerProbeTimeoutMs = 800;
 
 let environmentProbe: Promise<MediaEnvironmentReport> | null = null;
@@ -82,7 +101,7 @@ async function runEnvironmentProbe(): Promise<MediaEnvironmentReport> {
     tauriRuntime:
       typeof window !== "undefined" && "__TAURI_INTERNALS__" in window,
     mediaSourceSupported,
-    hlsJsSupported: Hls.isSupported(),
+    hlsJsSupported: await detectHlsJsSupport(),
     avcSupported: isCodecSupported(
       mediaSourceSupported,
       'video/mp4; codecs="avc1.42E01E,mp4a.40.2"',
