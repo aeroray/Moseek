@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -36,7 +36,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAppStore } from "@/stores/app-store";
 import type { CatalogViewMode, ViewKey, VodItem } from "@/types/moseek";
 import { searchVod } from "@/features/browse/cms-adapter";
-import { isCandidateMovieSource, isMovieLibrarySource } from "@/lib/adapters";
+import { isMovieLibrarySource } from "@/lib/adapters";
 import { PlayerView } from "@/features/player/player-view";
 import { cn } from "@/lib/utils";
 
@@ -48,11 +48,13 @@ const pageSize = 12;
 
 export function BrowseView({ onNavigate }: BrowseViewProps) {
   const sources = useAppStore((state) => state.sources);
-  const browseSources = useMemo(() => {
-    const passed = sources.filter(isMovieLibrarySource);
-    if (passed.length > 0) return passed;
-    return sources.filter(isCandidateMovieSource);
-  }, [sources]);
+  // Enabled sources with a usable CMS adapter, in one pass. This was a two-step lookup — sources
+  // whose test passed, falling back to all candidates — but once `enabled` became the only gate
+  // both steps ran the same filter, so the fallback could never contribute anything.
+  const browseSources = useMemo(
+    () => sources.filter(isMovieLibrarySource),
+    [sources],
+  );
   const [sourceKey, setSourceKey] = useState(browseSources[0]?.key ?? "");
   const [searchInput, setSearchInput] = useState("");
   const [query, setQuery] = useState("");
@@ -83,18 +85,44 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
     }
     let cancelled = false;
     setIsLoading(true);
-    void searchVod(selectedSource, query, categoryId, page, pageSize).then(
-      (result) => {
+    void searchVod(selectedSource, query, categoryId, page, pageSize)
+      .then((result) => {
         if (cancelled) return;
         setCatalog(result.data);
         setLoadError(result.error);
         setIsLoading(false);
-      },
-    );
+      })
+      // `searchVod` handles its own failures and resolves with an error field, so this should
+      // never run. It is here because a rejection would otherwise leave `isLoading` true forever
+      // and the view spinning, and the live view had exactly that shape of bug: an unexpected
+      // throw took out the whole workspace.
+      .catch(() => {
+        if (cancelled) return;
+        setCatalog(null);
+        setLoadError("读取影视目录时发生意外错误，请重试或更换影视源。");
+        setIsLoading(false);
+      });
     return () => {
       cancelled = true;
     };
   }, [categoryId, page, query, selectedSource]);
+
+  /**
+   * Drop the category when the source changes.
+   *
+   * Category ids only mean anything within the source that issued them: source A's "5" is not
+   * source B's "5", and source B may have no such category at all. Carrying the id across left
+   * the picker showing nothing while the request still filtered on it, which returned an empty
+   * catalog for a category the user never chose on this source. The live view already resets its
+   * group filter for the same reason.
+   */
+  const previousSourceKey = useRef(selectedSource?.key);
+  useEffect(() => {
+    if (previousSourceKey.current === selectedSource?.key) return;
+    previousSourceKey.current = selectedSource?.key;
+    setCategoryId("all");
+    setPage(1);
+  }, [selectedSource?.key]);
 
   if (selectedItem && selectedSource) {
     // Detail and playback are one page: opening a work loads its first episode straight into
@@ -118,7 +146,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
             </EmptyMedia>
             <EmptyTitle>暂无可用影视源</EmptyTitle>
             <EmptyDescription>
-              请在「配置与源」中导入或启用至少一个普通 CMS 影视源。
+              请在「配置中心」中导入或启用至少一个普通 CMS 影视源。
             </EmptyDescription>
           </EmptyHeader>
           <Button type="button" onClick={() => onNavigate("config")}>
@@ -150,7 +178,11 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
               setPage(1);
             }}
           >
-            <SelectTrigger size="sm" className="h-8 w-44 font-medium border-primary/25 bg-primary/5 text-foreground hover:border-primary/50">
+            <SelectTrigger
+              size="sm"
+              className="h-8 w-44 font-medium border-primary/25 bg-primary/5 text-foreground hover:border-primary/50"
+              aria-label="影视源"
+            >
               <SelectValue placeholder="选择影视源" />
             </SelectTrigger>
             <SelectContent>

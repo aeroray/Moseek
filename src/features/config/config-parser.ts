@@ -445,7 +445,7 @@ function classifySource(
   if (!hasRequiredFields) {
     capability = "invalid";
     capabilityNote =
-      "缺少 key、name 或 api 必填字段，无法建立安全的资源源记录。";
+      "缺少 key、name 或 api 必填字段，无法建立安全的源记录。";
   } else if (hasXbpqConfig) {
     // Checked before the spider/JAR branch: these sources are `type: 3` and ship a JAR, but the
     // configuration Moseek reads is declarative, so they are supported without executing

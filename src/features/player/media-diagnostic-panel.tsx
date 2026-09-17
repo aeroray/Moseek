@@ -191,7 +191,11 @@ export function MediaDiagnosticPanel({
   );
 
   return (
-    <Card className={cn(className)}>
+    /* `gap-0` overrides the Card's own `gap-4`. That gap sat between the header and the content
+       on top of the header's `pb-3`, so the note box ended up ~28px below the description — far
+       more separation than the note needs from the heading it belongs to. The header's own
+       padding is now the only spacing between them. */
+    <Card className={cn("gap-0", className)}>
       <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-3">
           <div>

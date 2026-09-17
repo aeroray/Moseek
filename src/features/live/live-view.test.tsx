@@ -297,10 +297,29 @@ describe("LiveView EPG rendering", () => {
 
     const trigger = screen.getByLabelText("频道分组");
     expect(trigger).toBeInTheDocument();
-    // Radix renders the selected item's text inside the trigger.
-    expect(trigger).toHaveTextContent("News");
+    // Radix renders the selected item's text inside the trigger. The default is every group, not
+    // the first one: a playlist's first group is an arbitrary slice of it, so opening on it hid
+    // most of the channels for no stated reason.
+    expect(trigger).toHaveTextContent("全部分组");
     // The old chip row is gone.
     expect(screen.queryByText("分组")).not.toBeInTheDocument();
+  });
+
+  it("defaults the group filter to every group, not the first one", async () => {
+    // The control used to open on the playlist's first group, which is an arbitrary slice of it
+    // and hid most of the channels for no stated reason. This fixture has one group, so the
+    // point is that the trigger names the *scope* rather than that group.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+
+    const trigger = screen.getByLabelText("频道分组");
+    expect(trigger).toHaveTextContent("全部分组");
+    expect(trigger).not.toHaveTextContent("News");
+    // With no narrowing, the footer reports the whole catalog without a "filtered" count.
+    expect(screen.getByText("1 个频道")).toBeInTheDocument();
   });
 
   it("groups the source and the group filter on the left with a centred widened search", async () => {
@@ -648,6 +667,16 @@ describe("LiveView search scope", () => {
     });
   }
 
+  /** Picks a group from the dropdown. The default is now 全部分组, so tests select explicitly. */
+  async function selectGroup(label: string) {
+    const trigger = screen.getByLabelText("频道分组");
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+    const option = await screen.findByRole("option", { name: label });
+    fireEvent.pointerUp(option);
+    fireEvent.click(option);
+  }
+
   /**
    * Channel names appear both in the list and in the player stub's title, so `getByText` is
    * ambiguous. Query inside the channel-list aside instead.
@@ -667,8 +696,11 @@ describe("LiveView search scope", () => {
     await waitFor(() => {
       expect(channelListText()).toContain("CCTV-1 综合");
     });
-    // 央视频道 is selected, so the 湖南 channel is not listed yet.
-    expect(channelListText()).not.toContain("湖南卫视高清");
+    // Narrow to 央视频道 explicitly, so the 湖南 channel is not listed yet.
+    await selectGroup("央视频道");
+    await waitFor(() => {
+      expect(channelListText()).not.toContain("湖南卫视高清");
+    });
 
     search("湖南");
 
@@ -686,7 +718,10 @@ describe("LiveView search scope", () => {
     await waitFor(() => {
       expect(channelListText()).toContain("CCTV-1 综合");
     });
-    expect(screen.getByLabelText("频道分组")).toHaveTextContent("央视频道");
+    await selectGroup("央视频道");
+    await waitFor(() => {
+      expect(screen.getByLabelText("频道分组")).toHaveTextContent("央视频道");
+    });
 
     search("卫视");
 
@@ -703,6 +738,11 @@ describe("LiveView search scope", () => {
     await waitFor(() => {
       expect(channelListText()).toContain("CCTV-1 综合");
     });
+    await selectGroup("央视频道");
+    await waitFor(() => {
+      expect(screen.getByLabelText("频道分组")).toHaveTextContent("央视频道");
+    });
+
     search("湖南");
     await waitFor(() => {
       expect(screen.getByLabelText("频道分组")).toHaveTextContent(/全部分组/);
@@ -723,8 +763,12 @@ describe("LiveView search scope", () => {
     await waitFor(() => {
       expect(channelListText()).toContain("CCTV-1 综合");
     });
-    // Group A holds two of the three channels, so the count is narrowed from the start.
-    expect(screen.getByText("2 / 3 个频道")).toBeInTheDocument();
+    // Every group is listed by default, so the count starts at the whole catalog.
+    expect(screen.getByText("3 个频道")).toBeInTheDocument();
+
+    // Group A holds two of the three channels, so selecting it narrows the count.
+    await selectGroup("央视频道");
+    expect(await screen.findByText("2 / 3 个频道")).toBeInTheDocument();
 
     search("湖南");
 

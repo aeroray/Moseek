@@ -135,12 +135,6 @@ fn looks_like_live_source(url: &str, text: &str) -> bool {
 }
 
 #[tauri::command]
-pub fn load_latest_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocument>, String> {
-    let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    storage::load_latest_document(&connection)
-}
-
-#[tauri::command]
 pub fn load_active_config(state: State<'_, AppDatabase>) -> Result<Option<ConfigDocument>, String> {
     let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
     storage::load_active_document(&connection)

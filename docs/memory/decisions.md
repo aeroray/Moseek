@@ -261,3 +261,20 @@
   - **`chunkSizeWarningLimit` 调到 600 而不是关掉**：拆分后唯一超限的是 `vendor-hls`（579 kB），**那就是 hls.js 本身的体积**——light 构建能降到 377 kB，但它**砍掉 HEVC 和 AC-3**，而本项目的 IPTV 源实际在用这些，所以不是选项。阈值设在它之上，**这样将来新增的超大 chunk 仍会被报出来**：警告本身有用，只是不该对着一个我们主动选择、且无法再缩小的依赖开火。
   - 真实浏览器复核：拆分后直播页正常渲染（频道、播放诊断按钮都在），诊断对话框正常打开，环境行显示 `Tauri 桌面端 · MediaSource 支持 · hls.js 支持`——**证明动态导入确实解析成功**，不是悄悄退化成「否」。
 - 本轮最终：`cargo build --no-default-features`（用户原命令）**零警告**，`pnpm build` **零警告**；前端 223 项、Rust 96 项、`clippy` 全通过。
+- **播放诊断的间距**：用户指出报错横幅离上方标题太远。成因是 `Card` 自身有 `gap-4`，**而它叠在 `CardHeader` 的 `pb-3` 之上**，于是标题与内容的间距是两者相加。改为 `<Card className="cn("gap-0", ...)">`，让 header 自己的 padding 成为唯一间距。**实测（真实浏览器，量 `getBoundingClientRect`）：34px → 18px**；`gapFromHeader` 从 16px 变 0（内容紧接 header 的 padding 边界）。
+  - **测量方法本身踩了一个坑**：第一次量到 33px 用的是「按文本内容找 description」，结果匹配到了 **Dialog 自己的 `sr-only` description**，不是卡片里的那个。改用 `[data-slot='card-description']` 这类结构选择器才量对。**`sr-only` 元素有真实的 rect，按文本找元素会先撞上它们。**
+- **分组筛选默认改为「全部分组」**（用户要求「默认选项是全部分组都被勾选，而不是只勾选里面的第一个分组」）。影视库本来就是 `all`，**只有直播页是 `groups[0]`**——而播放列表的第一个分组只是它一个**任意的切片**，默认落在上面等于无缘无故藏起大部分频道。
+  - 顺带修掉一个隐患：原来的回退条件 `if (groupId !== ALL_GROUPS_ID && !groups.some(...))` 在 `groupId === ""`（初始值）时也会触发 `setGroupId(groups[0].id)`——**这正是「默认选中第一个分组」的实际机制**。现在初始值直接是 `ALL_GROUPS_ID`，并且回退条件排除了 `""`，只有在**当前选中的分组确实不存在**（源被换掉）时才回退。
+  - 这次改动让 **5 个既有测试失败**，因为它们都建立在「默认选中第一个分组」之上。**这些测试的意图（搜索跨分组、清除搜索后恢复分组筛选）依然成立**，所以是测试要跟着改，不是代码错——新增 `selectGroup()` helper 让它们显式选分组。
+- **审查影视库与电视直播发现的真实问题**：
+  - **切换影视源时不重置分类**（真 bug）。分类 id **只在签发它的那个源里有意义**：A 源的 `"5"` 不是 B 源的 `"5"`，B 源甚至可能没有这个分类。原来的实现让 id 跨源残留，**请求仍按它过滤，于是返回空目录，而用户根本没在这个源上选过那个分类**。直播页早就为同样的理由重置分组筛选，影视库漏了。用 `useRef` 记住上一个源 key，变化时重置为 `all`。
+  - **`searchVod` 没有 `.catch`**。它内部已 `try/catch` 全部路径、永远 resolve，所以**这不是一个已复现的 bug**，而是与直播页 `probeStreamUrls` 崩溃同形的隐患：一旦意外 reject，`setIsLoading(false)` 永不执行，**页面会永远转圈**。补上 `.catch` 并注明这是防御性的。
+  - **影视源下拉框没有 `aria-label`**：分类和分组都有，只有它没有，屏幕阅读器读不出这个控件是什么。补上「影视源」。
+  - **残留的旧页面名**：影视库空状态写「请在**配置与源**中导入…」——这个页面几轮前已改名为「配置中心」，测试里甚至有一条断言在检查新名字。另外「测试**资源源**」「建立安全的**资源源**记录」是重复词。全部改正。**教训与「删除功能后要 grep 它的名字」同源：页面改名后，要 grep 旧名字，包括空状态和报错文案。**
+- **删除的死代码**（用脚本枚举全部 167 个 export，找出**在自身文件之外零引用**的）：
+  - `src/lib/capability-stats.ts`（`getCapabilityCounts`，整个文件无人引用）
+  - `src/features/placeholder-view.tsx`（`PlaceholderView`，整个组件无人引用）
+  - `load_latest_config` 整条链：TS wrapper + Rust command + `lib.rs` 注册。**`load_latest_document` 保留**——它被 `load_active_document` 当兜底调用，仍在使用。
+  - **`isCandidateMovieSource` 与 `isMovieLibrarySource` 已经完全相同**。当初一个是「测试通过的源」、另一个是「没通过的兜底」，等门槛变成只看 `enabled` 之后两者一模一样，**于是影视库里那个两步兜底是死代码：它会用同一个过滤器跑两遍**。合并为一个函数。
+- **变异验证 2 项，全部被抓到**：`categoryResetOnSourceChange`（删掉重置逻辑）、`groupDefaultsToAll`（改回 `setGroupId("")`）。**分组默认值这项尤其值得测**：它是一行状态初始化，没有测试的话很容易被改回去而无人察觉。
+- 本轮最终：前端 **225 项**（browse-view 7 项、live-view 27 项）、Rust 96 项、`clippy` 零警告、`pnpm build` 零警告。

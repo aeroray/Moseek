@@ -194,6 +194,56 @@ describe("BrowseView catalog metadata", () => {
     ).toHaveAttribute("aria-current", "true");
   });
 
+  it("resets the category when the source changes", async () => {
+    // Category ids only mean something inside the source that issued them. Carrying one across
+    // a source switch left the request filtering on a category the new source may not have,
+    // which returned an empty catalog for a choice the user never made on that source.
+    const twoSources = [
+      cmsSource({ key: "cms-main", name: "主用影视源" }),
+      cmsSource({ key: "cms-backup", name: "备用影视源" }),
+    ];
+    useAppStore.setState({ sources: twoSources, favorites: [] });
+    searchVod.mockResolvedValue({
+      ...page([vodItem()]),
+      data: {
+        ...page([vodItem()]).data,
+        categories: [{ id: "cat-2", name: "电视剧" }],
+      },
+    });
+    render(<BrowseView onNavigate={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("测试影片")).toBeInTheDocument();
+    });
+
+    // Pick a category on the first source.
+    fireEvent.click(screen.getByLabelText("影片分类"));
+    fireEvent.click(await screen.findByRole("option", { name: "电视剧" }));
+    await waitFor(() => {
+      expect(searchVod).toHaveBeenLastCalledWith(
+        expect.anything(),
+        expect.anything(),
+        "cat-2",
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
+    // Switch source; the category must go back to 全部分类 rather than leak across.
+    fireEvent.click(screen.getByLabelText("影视源"));
+    fireEvent.click(await screen.findByRole("option", { name: "备用影视源" }));
+
+    await waitFor(() => {
+      expect(searchVod).toHaveBeenLastCalledWith(
+        expect.objectContaining({ key: "cms-backup" }),
+        expect.anything(),
+        "all",
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+  });
+
   it("filters the catalog by a category chosen from the dropdown", async () => {
     // The categories used to be a row of chips capped at the first eight, which hid the rest of
     // the list and crowded the toolbar. The dropdown replaced them and must still filter.

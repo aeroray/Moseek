@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   getAdapterProfile,
-  isCandidateMovieSource,
   isMovieLibrarySource,
   isTestableCmsSource,
   isTestableLiveSource,
@@ -139,9 +138,8 @@ describe("adapter registry", () => {
     expect(
       isMovieLibrarySource(source({ enabled: false, testStatus: "passed" })),
     ).toBe(false);
-    expect(isCandidateMovieSource(source({ testStatus: "untested" }))).toBe(true);
-    expect(
-      isCandidateMovieSource(source({ enabled: false, testStatus: "untested" })),
-    ).toBe(false);
+    // There is no second predicate any more: the fallback that used to exist ran the same
+    // filter, so an untested enabled source is simply listed.
+    expect(isMovieLibrarySource(source({ testStatus: "untested" }))).toBe(true);
   });
 });

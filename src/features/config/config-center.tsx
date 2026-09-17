@@ -592,7 +592,7 @@ export function ConfigCenter() {
       const result = await testSource(source);
       if (!result) {
         throw new Error(
-          "浏览器预览不会直接请求 CMS 或直播源，请在 Tauri 桌面应用中测试资源源。",
+          "浏览器预览不会直接请求 CMS 或直播源，请在 Tauri 桌面应用中测试。",
         );
       }
       const persistedDocument =

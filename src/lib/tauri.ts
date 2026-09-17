@@ -137,10 +137,6 @@ export function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-export async function loadLatestConfig() {
-  return invokeCommand<StoredConfigDocument | null>("load_latest_config");
-}
-
 export async function listConfigDocuments() {
   return invokeCommand<ConfigDocumentSummary[]>("list_config_documents");
 }

@@ -276,11 +276,11 @@ export function isTestableSource(source: SourceRecord) {
  * check the user chooses to run, and a source they have chosen to keep enabled should be
  * selectable whether or not they have run it. Sources that fail or come back empty are switched
  * off by the test run itself, which is what removes them from here.
+ *
+ * This used to be two functions — one requiring `testStatus === "passed"`, with the other as a
+ * fallback when nothing had passed yet. Once the gate became `enabled` alone the two were
+ * identical, so the fallback was dead code that ran the same filter twice.
  */
 export function isMovieLibrarySource(source: SourceRecord) {
-  return source.enabled && isTestableCmsSource(source);
-}
-
-export function isCandidateMovieSource(source: SourceRecord) {
   return source.enabled && isTestableCmsSource(source);
 }

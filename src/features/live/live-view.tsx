@@ -110,7 +110,7 @@ export function LiveView() {
     setLoadError(null);
     setEpgPrograms([]);
     setEpgError(null);
-    setGroupId("");
+    setGroupId(ALL_GROUPS_ID);
     setSelectedChannelId("");
     setDiagnostic(null);
     setMediaDiagnostic(null);
@@ -136,8 +136,16 @@ export function LiveView() {
   const groups = catalog.groups;
 
   useEffect(() => {
-    if (groupId !== ALL_GROUPS_ID && !groups.some((group) => group.id === groupId)) {
-      setGroupId(groups[0]?.id ?? "");
+    // Default to every group rather than the first one. A playlist's first group is an arbitrary
+    // slice of it — often a small category the user did not ask for — so opening on it hid most
+    // of the channels for no stated reason. Only fall back to a specific group when the current
+    // selection no longer exists (the source changed under us).
+    if (
+      groupId !== ALL_GROUPS_ID &&
+      groupId !== "" &&
+      !groups.some((group) => group.id === groupId)
+    ) {
+      setGroupId(groups[0]?.id ?? ALL_GROUPS_ID);
     }
     if (!channels.some((channel) => channel.id === selectedChannelId)) {
       setSelectedChannelId(channels[0]?.id ?? "");
