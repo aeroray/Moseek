@@ -63,7 +63,12 @@ const PROBE_TIMEOUT_MS: u64 = 4_000;
 /// Enough for a manifest; anything larger is not a playlist we can use.
 const PROBE_MAX_BYTES: usize = 512 * 1024;
 /// Bounds the fan-out so a playlist with hundreds of mirrors cannot open hundreds of sockets.
-const MAX_PROBE_URLS: usize = 12;
+///
+/// This was 12, which silently ignored every line past the twelfth. A channel carrying 16 lines
+/// is ordinary for IPTV, so the probe reported "all lines failed" while never having looked at
+/// four of them — and the caller had no way to tell. 32 covers realistic playlists while still
+/// refusing to open a socket per entry in a list of hundreds.
+const MAX_PROBE_URLS: usize = 32;
 
 const DEFAULT_SNIFFER_COMPANION_URL: &str = "http://127.0.0.1:57573/sniffer";
 const MAX_PARSE_REQUEST_BODY_BYTES: usize = 128 * 1024;
@@ -162,13 +167,7 @@ pub async fn probe_stream_urls(
     timeout_ms: Option<u64>,
 ) -> Result<Vec<StreamProbe>, String> {
     let timeout = timeout_ms.unwrap_or(PROBE_TIMEOUT_MS).clamp(500, 15_000);
-    let mut pending = Vec::with_capacity(urls.len());
-    for (index, url) in urls.into_iter().enumerate() {
-        if index >= MAX_PROBE_URLS {
-            break;
-        }
-        pending.push((index, url));
-    }
+    let pending = probe_targets(urls);
     // `join_all` polls every probe concurrently on the current runtime; the requests are
     // independent, so there is no reason to await them one at a time.
     let results = join_all(
@@ -180,6 +179,17 @@ pub async fn probe_stream_urls(
     let mut probes = results;
     sort_probes(&mut probes);
     Ok(probes)
+}
+
+/// Selects which lines to probe, keeping each one's original index.
+///
+/// The index is what ties a result back to its position in the channel's line list, so dropping
+/// it — rather than the cap itself — is what would make the UI label the wrong line.
+fn probe_targets(urls: Vec<String>) -> Vec<(usize, String)> {
+    urls.into_iter()
+        .enumerate()
+        .take(MAX_PROBE_URLS)
+        .collect()
 }
 
 /// Orders probes so the caller can take the head of the list: reachable lines first, then the
@@ -512,5 +522,27 @@ mod tests {
             probes.iter().map(|item| item.index).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
+    }
+
+    /// A 16-line channel is ordinary for IPTV. The cap used to be 12, so four lines were never
+    /// looked at while the caller was told every line had failed.
+    #[test]
+    fn probes_every_line_of_a_sixteen_line_channel() {
+        let urls: Vec<String> = (0..16)
+            .map(|index| format!("https://stream.example/line-{index}.m3u8"))
+            .collect();
+        let targets = super::probe_targets(urls);
+        assert_eq!(targets.len(), 16);
+        // Indices must survive, because they map results back to the UI's line buttons.
+        assert_eq!(targets[15].0, 15);
+    }
+
+    #[test]
+    fn still_bounds_a_pathological_line_list() {
+        let urls: Vec<String> = (0..500)
+            .map(|index| format!("https://stream.example/line-{index}.m3u8"))
+            .collect();
+        let targets = super::probe_targets(urls);
+        assert_eq!(targets.len(), super::MAX_PROBE_URLS);
     }
 }

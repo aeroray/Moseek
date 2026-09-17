@@ -56,6 +56,30 @@ describe("HLS failure messages", () => {
     expect(message).toContain("对端在返回任何响应前就关闭了连接");
   });
 
+  it("reports a timeout as a timeout, not as a closed connection", () => {
+    // `error sending request` is reqwest's generic prefix on every transport failure, so
+    // matching it made this timeout read as "对端在返回任何响应前就关闭了连接" — blaming the peer
+    // for our own deadline.
+    const message = formatHlsError(
+      "manifestLoadError",
+      0,
+      "媒体资源请求失败：error sending request for url (http://137.175.111.185/migu/?id=)；operation timed out",
+    );
+    expect(message).toContain("超时");
+    expect(message).not.toContain("对端在返回任何响应前就关闭了连接");
+  });
+
+  it("does not treat every transport error as a closed connection", () => {
+    // Only the generic prefix, nothing else: there is no specific cause to name.
+    const message = formatHlsError(
+      "manifestLoadError",
+      0,
+      "媒体资源请求失败：error sending request for url (http://example.com/a.m3u8)",
+    );
+    expect(message).not.toContain("对端在返回任何响应前就关闭了连接");
+    expect(message).toContain("上游播放地址可能已失效或拒绝访问");
+  });
+
   it("keeps a generic hint for unexplained manifest failures", () => {
     const message = formatHlsError("manifestLoadError", 0, undefined);
     expect(message).toContain("上游播放地址可能已失效或拒绝访问");

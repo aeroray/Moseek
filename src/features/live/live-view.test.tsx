@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -26,10 +27,21 @@ vi.mock("@/lib/live-adapter", async (importOriginal) => {
 
 // The player pulls in Plyr and hls.js, which need a real media element. This suite is
 // about the live workspace's own render contract, so the player is replaced by a stub.
+//
+// The stub records the `onStatus` callback it is handed and exposes it on `window`, so a test
+// can make the player report a failure. Without that the failover path is unreachable here, and
+// an assertion that no line changed would pass whether or not the code still walks the list.
 vi.mock("@/features/player/media-player", () => ({
-  MediaPlayer: ({ title }: { title: string }) => (
-    <div data-testid="media-player">{title}</div>
-  ),
+  MediaPlayer: ({
+    title,
+    onStatus,
+  }: {
+    title: string;
+    onStatus?: (status: string, message?: string) => void;
+  }) => {
+    (globalThis as Record<string, unknown>).__playerOnStatus = onStatus;
+    return <div data-testid="media-player">{title}</div>;
+  },
   usesHlsPipeline: () => true,
 }));
 
@@ -502,6 +514,43 @@ describe("LiveView concurrent line probing", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("线路 3（可用）")).toHaveClass("bg-primary");
     });
+  });
+
+  it("says the lines were tested at once, so the numbers do not read as polling", async () => {
+    // The old label was just "线路：". Combined with walking lines 1, 2, 3 in sequence after a
+    // failure, the workspace looked like it was polling when the probe is concurrent.
+    probeStreamUrls.mockResolvedValue([probe(0, false), probe(1, true), probe(2, false)]);
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/并发测速 1\/3 可用/)).toBeInTheDocument();
+    });
+  });
+
+  it("does not walk the remaining lines once the probe has already compared them", async () => {
+    // After the probe reported every line dead, the player used to fail on line 1 and then hand
+    // itself line 2, then line 3 — a serial replay of a comparison that had already finished.
+    probeStreamUrls.mockResolvedValue([probe(0, false), probe(1, false), probe(2, false)]);
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("线路 1（不可用）")).toBeInTheDocument();
+    });
+
+    // Make the player report a failure, which is what triggered the sequential walk.
+    const onStatus = (globalThis as Record<string, unknown>).__playerOnStatus as (
+      status: string,
+      message?: string,
+    ) => void;
+    expect(onStatus).toBeTypeOf("function");
+    await act(async () => {
+      onStatus("error", "播放失败");
+    });
+
+    // Nothing may move to another line, because the probe already knows none is better.
+    expect(screen.getByLabelText("线路 1（不可用）")).toHaveClass("bg-primary");
+    expect(screen.getByLabelText("线路 2（不可用）")).not.toHaveClass("bg-primary");
+    expect(screen.getByLabelText("线路 3（不可用）")).not.toHaveClass("bg-primary");
   });
 
   it("marks unreachable lines without hiding them", async () => {

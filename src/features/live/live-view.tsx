@@ -279,6 +279,13 @@ export function LiveView() {
   }, [selectedChannel?.id, streamUrlsKey]);
 
   const tryNextStream = () => {
+    // Every line has already been tested concurrently, so walking them one at a time would
+    // replay a sequence the probe just finished — which is what made the player look like it was
+    // polling line 1, then 2, then 3, when the results were known from the start. If the probe
+    // found nothing usable there is no next line worth trying; if it found one, we are already
+    // on it. A channel whose lines were never probed (a pinned manual choice, or a probe that
+    // failed to run) keeps the sequential fallback, because nothing else has compared them.
+    if (streamProbes) return false;
     const lastAttemptIndex =
       Math.min(streamUrls.length, maxAutomaticStreamAttempts) - 1;
     if (streamIndexRef.current >= lastAttemptIndex) return false;
@@ -301,8 +308,15 @@ export function LiveView() {
       streamProbes.every((probe) => !probe.ok),
   );
 
+  // The backend caps how many lines it will open at once, so the probe can cover fewer lines
+  // than the channel carries. Saying "all lines failed" when four were never tried would be
+  // wrong, so the count states both numbers.
   const allLinesUnreachableNote = allLinesUnreachable
-    ? `已并发测试 ${streamProbes?.length ?? 0} 条线路，全部未能取到直播清单。这类地址通常只对特定运营商网络开放（例如中国移动 IPTV 源需要移动宽带），换用其它频道或其它直播源即可正常观看。`
+    ? `已并发测试 ${streamProbes?.length ?? 0} 条线路${
+        streamProbes && streamProbes.length < streamUrls.length
+          ? `（共 ${streamUrls.length} 条，其余超出单次测试上限）`
+          : ""
+      }，全部未能取到直播清单。这类地址通常只对特定运营商网络开放（例如中国移动 IPTV 源需要移动宽带），换用其它频道或其它直播源即可正常观看。`
     : null;
 
   useEffect(() => {
@@ -731,7 +745,21 @@ export function LiveView() {
             <div className="flex items-center gap-2 shrink-0">
               {streamUrls.length > 1 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <span>{isProbing ? "测速中：" : "线路："}</span>
+                  {/* The label states that every line was tested at once, and how many answered.
+                      It used to say only "线路：", which — combined with the old behaviour of
+                      walking lines 1, 2, 3 in sequence after a failure — made the workspace look
+                      like it was polling. It never was: the probe is concurrent. Saying so is
+                      what makes the numbers read as one simultaneous result rather than a queue
+                      being worked through. */}
+                  <span>
+                    {isProbing
+                      ? `并发测速 ${streamUrls.length} 条线路…`
+                      : streamProbes
+                        ? `线路（并发测速 ${
+                            streamProbes.filter((probe) => probe.ok).length
+                          }/${streamProbes.length} 可用）：`
+                        : "线路："}
+                  </span>
                   {streamUrls.map((_, idx) => {
                     const probe = streamProbes?.find((item) => item.index === idx);
                     return (

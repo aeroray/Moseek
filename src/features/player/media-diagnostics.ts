@@ -312,6 +312,11 @@ export function formatHlsError(
       if (upstreamStatus === 401 || upstreamStatus === 403) {
         return `上游拒绝访问当前频道${status}。这类地址通常只对特定运营商网络或授权客户端开放。`;
       }
+      // Timeout before the connection markers: a timed-out request also reads as "connection
+      // closed" in some stacks, and the deadline is the more accurate explanation.
+      if (looksLikeTimeout(responseText)) {
+        return "连接上游超时，对方没有在限定时间内返回直播清单。该地址可能只对特定运营商网络开放，或当前网络到该地址的链路不通。";
+      }
       if (looksLikeConnectionFailure(responseText)) {
         return "无法与上游建立可用连接：对端在返回任何响应前就关闭了连接。该地址可能已失效，或只对特定运营商网络开放。";
       }
@@ -335,17 +340,37 @@ export function formatHlsError(
   }
 }
 
+/**
+ * Whether the upstream closed the connection before answering.
+ *
+ * The markers must be specific. This list used to include `error sending request`, which is
+ * reqwest's generic prefix on *every* transport failure — a timeout, a DNS failure and a closed
+ * connection all start with it. So `…；operation timed out` was reported to the user as "对端在
+ * 返回任何响应前就关闭了连接", blaming the peer for what was our own deadline. Only markers that
+ * name the actual condition belong here.
+ */
 function looksLikeConnectionFailure(responseText?: string) {
   if (!responseText) return false;
   const text = responseText.toLowerCase();
   return [
-    "error sending request",
     "connection closed",
     "connection reset",
     "connection refused",
     "unexpected eof",
     "broken pipe",
     "无法解析远程主机",
-    "请求失败",
+  ].some((marker) => text.includes(marker));
+}
+
+/** Whether the request ran out of time rather than being refused. */
+function looksLikeTimeout(responseText?: string) {
+  if (!responseText) return false;
+  const text = responseText.toLowerCase();
+  return [
+    "operation timed out",
+    "timed out",
+    "timeout",
+    "deadline has elapsed",
+    "超时",
   ].some((marker) => text.includes(marker));
 }
