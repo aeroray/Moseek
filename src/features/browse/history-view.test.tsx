@@ -19,7 +19,15 @@ function item(name: string): VodItem {
     categories: [],
     actors: [],
     directors: [],
-    playLines: [],
+    // The record names its line by looking it up here, so the fixture has to carry the lines the
+    // real snapshot does.
+    playLines: [
+      {
+        id: "line-1",
+        name: "线路一",
+        episodes: [{ id: "ep-1", name: "第01集", url: "https://cdn/1.m3u8" }],
+      },
+    ],
   };
 }
 
@@ -116,12 +124,38 @@ describe("HistoryView", () => {
     expect(names).toEqual(["更新的", "更早的"]);
   });
 
-  it("states the episode and position for a work", () => {
+  it("states the episode, the line it played on, and the position", () => {
     useAppStore.setState({ history: [vodFootprint()] });
+    const { container } = render(<HistoryView onNavigate={() => {}} />);
+
+    expect(screen.getByText("第01集")).toBeInTheDocument();
+    // The line is named rather than shown as an id: it is what the user picked in the rail.
+    expect(screen.getByText(/线路 线路一/)).toBeInTheDocument();
+    // The position is stated and drawn as a bar, since a timestamp alone does not say how far
+    // through that is. Scoped to the bar's own class, because Radix's scroll viewport also
+    // carries inline styles.
+    expect(screen.getByText("10:20")).toBeInTheDocument();
+    const bar = container.querySelector("span[style*='width']");
+    expect(bar).not.toBeNull();
+    expect(bar?.className).toContain("bg-primary/70");
+  });
+
+  it("omits the progress bar when there is no position to show", () => {
+    // A bar at zero would claim the user had started, which "刚开始看" does not mean.
+    useAppStore.setState({ history: [vodFootprint({ progress: 0 })] });
+    const { container } = render(<HistoryView onNavigate={() => {}} />);
+
+    expect(screen.getByText("第01集")).toBeInTheDocument();
+    expect(container.querySelector("span[style*='width']")).toBeNull();
+  });
+
+  it("names the channel's group rather than a line", () => {
+    // A channel has no line; showing an empty one would be worse than showing nothing.
+    useAppStore.setState({ history: [liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    expect(screen.getByText(/第01集/)).toBeInTheDocument();
-    expect(screen.getByText(/看到 10:20/)).toBeInTheDocument();
+    expect(screen.getByText("新闻")).toBeInTheDocument();
+    expect(screen.queryByText(/线路/)).toBeNull();
   });
 
   it("explains how to get a first record when there are none", () => {

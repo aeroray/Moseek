@@ -11,6 +11,7 @@ import {
 
 import { CapabilityBadge } from "@/components/capability-badge";
 import { MediaPoster } from "@/components/media-poster";
+import { PosterZoomButton } from "@/components/poster-lightbox";
 import { getVodDetail } from "@/features/browse/cms-adapter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -479,12 +480,24 @@ export function PlayerView({
                 page is about — a heading parked in a toolbar reads as chrome. The description is
                 line-clamped so a long synopsis cannot grow the column into a scrollbar. */}
             <div className="flex gap-4 border-t border-border/60 pt-4">
-              <div className="aspect-[2/3] w-28 shrink-0 overflow-hidden rounded-md border border-border/70 bg-muted/40">
+              <div className="group/poster relative aspect-[2/3] w-28 shrink-0 overflow-hidden rounded-md border border-border/70 bg-muted/40">
                 <MediaPoster
                   src={detail.poster}
                   alt={`${detail.name} 海报`}
                   className="size-full"
                 />
+                {/* The poster is metadata on this page, so the viewer is an action on the artwork
+                    itself rather than a control in the toolbar — it appears on hover, where the
+                    user's attention already is when they are looking at the image. */}
+                {detail.poster?.trim() && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/45 opacity-0 transition-opacity duration-200 group-hover/poster:opacity-100 focus-within:opacity-100">
+                    <PosterZoomButton
+                      name={detail.name}
+                      poster={detail.poster}
+                      className="size-8 bg-primary text-primary-foreground hover:bg-primary/90 hover:text-primary-foreground"
+                    />
+                  </div>
+                )}
               </div>
               <div className="flex min-w-0 flex-1 flex-col gap-2">
                 <h1 className="font-display text-xl font-bold tracking-tight text-balance text-foreground">

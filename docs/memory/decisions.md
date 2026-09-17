@@ -372,3 +372,23 @@
 - 真实浏览器端到端实测：`dots.count: 0`、`logoIsButton: false`、`navLabel.hasTrail: true` 且 `hasOldName: false`、**打开影片后 `afterOpeningFilm: { count: 1, kind: "vod", name: "冬城猎凶", episode: "第01集" }`**、足迹页 `entryCount: 1` 且 `timelineButtons: 0`（**确实不可点击**）、看过直播后 `afterLive: { count: 2, kinds: ["live","vod"] }`、足迹页两条都在。
 - 几何实测：两条记录各 **89px 高、宽 768**、**2 个圆点、1 条连接线**（最后一条不画线，时间线在历史结束处收住）。
 - 本轮最终：前端 **301 项**（新增 history-view 7 项、app-store 足迹 4 项、player-view 2 项、live-view 2 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。
+- **海报大图的入口位置纠正**：用户要的是**观看页底部作品详情里的那张作品图**，不是影视库列表卡片。列表卡片已经意味着「播放这个」，在封面上再放第二个动作会和它竞争；**看海报属于作品自己的页面，那里海报本来就是元数据**。收藏页的放大按钮也一并移除，只保留「取消收藏」。
+- **高清图解析**（`poster-candidates.ts`）：源列出的常常是缩略图，同一张图通常还有更大的版本。**没有办法从字段判断，所以只能推导候选地址、实际加载、按像素面积取最大的那个**。
+  - 推导两类：**去掉 CDN 的缩放参数**（`x-oss-process=image/resize,w_200` 这类，最可靠的信号），以及**去掉文件名末尾的缩略图后缀**（`_thumb` / `-small`）。**只去掉紧贴扩展名的后缀**，所以名字中间含 "small" 的作品不受影响。
+  - **原始地址永远在候选列表里**：猜错只损失一次图片加载，结果绝不会比什么都不做更差。
+  - 实测：源列出 `/poster_thumb.jpg`（200px）→ 实际显示 `/poster.jpg`（**1200px**）。
+- **查看器加了缩放与拖动**：放大/缩小/重置三个图标 + 只带图标的下载按钮；**滚轮缩放、放大后按住拖动**。
+  - 缩放级别用百分比文字表示，**它是这一行唯一需要读的当前状态**。
+  - 滚轮**必须用非 passive 监听器**（React 的 `onWheel` 是 passive 的，`preventDefault` 会被忽略，背后页面会跟着滚）；而且**必须用 callback ref 挂载**——Radix 通过 portal 在后续 commit 才挂上节点，**effect 首次运行时节点还不存在，监听器根本没挂上**。
+  - **下载保存的是解析后的高清地址**，不是源列出的缩略图：**给用户看了大图再塞小图是暗中的偷换**。
+- **两个真 bug，都是浏览器实测抓出来的**：
+  1. **拖动的第一次移动被丢弃**。`isDragging` 是 React state，**state 要到下一次渲染才更新**，所以紧接着到达的 `pointermove` 读到旧值直接 return——**每次拖动的第一步都无效，看起来就是「拖不动」**。改用 `useRef` 同步置位，state 只用来驱动光标。
+  2. **`setPointerCapture` 会抛异常**（pointer id 不是活跃指针时），**未捕获会让整个 handler 中断，拖动根本开始不了**。包在 try/catch 里：capture 只是增强（指针离开画面仍能拖），不是前提。
+- **测试能力的一个真实边界**：`dragFlagAsState` 这个变异在单元测试里**抓不到**，因为 `fireEvent` 会把每个事件包在 `act` 里并**同步 flush 重渲染**，那个竞态在 jsdom 里根本不会发生。**这个 bug 是在真实浏览器里发现并确认的**，测试只守住行为本身。**jsdom 也不实现 `PointerEvent`**——补了一个 `MouseEvent` 子类作为 polyfill，真实的拖动手势才变得可测（在此之前只能退而断言纯函数）。**遇到环境缺失时，先补环境，而不是把断言降级。**
+- **足迹补齐线路与进度**（用户要求）：显示**线路名**（从 `item.playLines` 里按 `lineId` 查名字，而不是显示 id——用户看到的是名字）和**进度条**。
+  - **用进度条而不是只写时间**：「看到 10:20」说明了位置，但没说明「看到多少了」。
+  - **进度条按名义时长（45 分钟）缩放**：记录里只有秒数、没有总时长（源很少提供），**猜一个总时长比不猜更糟**，所以这个条诚实地表达「开头/一半/快完了」，不假装精确。
+- **足迹布局不再左重右轻**：根因还是 **Radix 的 `display: table` 包裹层**（`mx-auto` 因此永远不居中），加 `viewportClassName="[&>div]:!block"` 后改为**两列网格 + `max-w-6xl` 居中**。实测内容块左 164 / 右 108、2 列。
+- 变异验证共 15 项。**4 项第一次存活，逐一定位后都补齐或确认了真实原因**：`savesThumbnail`（jsdom 不加载图片，解析器总是返回原图，所以必须先 mock 解析器）、`noUpperClamp`（按钮会自我禁用，**只有滚轮这条路径能越界**，改从滚轮测）、`resetLeavesPan`（1x 的 effect 已经清了偏移，**这行是冗余的，直接删掉而不是补测试**）、`noOffsetClear`/`dragFlagAsState`（补 PointerEvent polyfill 后才可测）。
+- 真实浏览器实测：列表卡片上放大按钮 **0 个**、观看页详情图里有入口、源列缩略图 → 显示 **1200px**、滚轮 `1200%`/回到 `100%`、按钮两次点击 `scale(2)`、**拖动 `translate(60px, 40px)`**、重置回到 `translate(0px, 0px) scale(1)`、下载调用的是解析后地址、足迹显示「第01集 · 线路 dytt · 主用影视源」且进度条存在。
+- 本轮最终：前端 **322 项**（新增 poster-lightbox 12 项、poster-candidates 7 项、history-view 2 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。

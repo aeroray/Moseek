@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 
 import { MediaPoster } from "@/components/media-poster";
-import { PosterZoomButton } from "@/components/poster-lightbox";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -211,14 +210,9 @@ function VodFavoritesGrid({
                   <Play className="size-4 fill-current" aria-hidden="true" />
                 </span>
               </div>
-              {/* Same actions as a library card, in the same corner: an image to inspect and a
-                  favourite to remove. */}
-              <div className="absolute top-1.5 right-1.5 z-10 flex flex-col gap-1">
-                <PosterZoomButton
-                  name={favorite.item.name}
-                  poster={favorite.item.poster}
-                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                />
+              {/* Removing a favourite stays on the card: it is an action on the collection, not on
+                  the artwork, and the collection is what this page is. */}
+              <div className="absolute top-1.5 right-1.5 z-10">
                 <button
                   type="button"
                   onClick={(event) => {

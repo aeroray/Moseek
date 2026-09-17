@@ -12,7 +12,6 @@ import {
 } from "lucide-react";
 
 import { MediaPoster } from "@/components/media-poster";
-import { PosterZoomButton } from "@/components/poster-lightbox";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -426,15 +425,10 @@ function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
           </div>
         </div>
 
-        {/* Poster actions, top-right. Reachable without opening the work, which is the point:
-            favouriting should not cost a navigation. */}
-        <div className="absolute top-1.5 right-1.5 z-10 flex flex-col gap-1">
-          <PosterZoomButton
-            name={item.name}
-            poster={item.poster}
-            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-          />
-        </div>
+        {/* No poster-viewer trigger here. On a browsing grid the card already means "play this",
+            and a second action on the artwork competed with that without being the thing the user
+            came to the grid for. Inspecting a poster belongs on the work's own page, where the
+            artwork is shown as metadata. */}
 
         {/* Category badge at bottom corner */}
         {item.categories[0] && (
