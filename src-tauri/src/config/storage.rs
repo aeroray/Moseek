@@ -494,6 +494,11 @@ fn update_normalized_source_test(
                     "requestCount".to_string(),
                     Value::Number(request_count.into()),
                 );
+                // Mirrors the snapshot: a source proved broken stops being offered, so the
+                // stored configuration and the exported result agree with what the list shows.
+                if result.status == "failed" || result.status == "empty" {
+                    object.insert("enabled".to_string(), Value::Bool(false));
+                }
             }
         }
     }
@@ -688,6 +693,13 @@ pub(super) fn set_source_test_in_connection(
         source.last_checked_at = result.tested_at.clone();
         if result.status != "blocked" {
             source.request_count += 1;
+        }
+        // A source the test found to be broken is switched off, so it stops appearing in the
+        // library and in live. Leaving it enabled would keep offering a source we have just
+        // proved does not work. `passed` and `blocked` are left alone: the first works, and the
+        // second was never enabled by a test in the first place.
+        if result.status == "failed" || result.status == "empty" {
+            source.enabled = false;
         }
         source.request_count
     };
@@ -1086,6 +1098,113 @@ mod tests {
         assert_eq!(updated_value["sites"][0]["testItemCount"], 8);
         assert_eq!(untouched.sources[0].test_status, None);
         assert_eq!(untouched_value["sites"][0]["testStatus"], Value::Null);
+    }
+
+    #[test]
+    fn a_failed_test_switches_the_source_off() {
+        // A source proved broken must stop being offered, in the stored snapshot and in the
+        // exported configuration alike. Leaving it enabled would keep listing it in the library.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_test_document(&connection, "配置", true);
+
+        let result = cms::SourceTestResult {
+            source_key: "shared-key".to_string(),
+            status: "failed".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "请求失败".to_string(),
+            item_count: 0,
+            category_count: 0,
+            duration_ms: 30,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
+        };
+
+        let updated =
+            set_source_test_in_connection(&mut connection, document_id, "shared-key", &result)
+                .unwrap();
+        let value: Value = serde_json::from_str(&updated.normalized_config).unwrap();
+
+        assert!(!updated.sources[0].enabled);
+        assert_eq!(value["sites"][0]["enabled"], Value::Bool(false));
+        assert_eq!(updated.sources[0].test_status.as_deref(), Some("failed"));
+    }
+
+    #[test]
+    fn an_empty_test_switches_the_source_off() {
+        // "Request succeeded but there is nothing to watch" is not usable either.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_test_document(&connection, "配置", true);
+
+        let result = cms::SourceTestResult {
+            source_key: "shared-key".to_string(),
+            status: "empty".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "响应中没有内容".to_string(),
+            item_count: 0,
+            category_count: 0,
+            duration_ms: 30,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
+        };
+
+        let updated =
+            set_source_test_in_connection(&mut connection, document_id, "shared-key", &result)
+                .unwrap();
+
+        assert!(!updated.sources[0].enabled);
+    }
+
+    #[test]
+    fn a_passing_test_leaves_the_source_switched_on() {
+        // Passing must not silently re-enable something the user turned off deliberately.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_test_document(&connection, "配置", true);
+
+        let result = cms::SourceTestResult {
+            source_key: "shared-key".to_string(),
+            status: "passed".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "请求成功".to_string(),
+            item_count: 5,
+            category_count: 2,
+            duration_ms: 30,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
+        };
+
+        let updated =
+            set_source_test_in_connection(&mut connection, document_id, "shared-key", &result)
+                .unwrap();
+
+        assert!(updated.sources[0].enabled);
+    }
+
+    #[test]
+    fn a_passing_test_does_not_re_enable_a_disabled_source() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_test_document(&connection, "配置", false);
+
+        let result = cms::SourceTestResult {
+            source_key: "shared-key".to_string(),
+            status: "passed".to_string(),
+            adapter_id: "builtin-cms".to_string(),
+            message: "请求成功".to_string(),
+            item_count: 5,
+            category_count: 2,
+            duration_ms: 30,
+            tested_at: "2025-01-01T00:00:00Z".to_string(),
+            operations: Vec::new(),
+        };
+
+        let updated =
+            set_source_test_in_connection(&mut connection, document_id, "shared-key", &result)
+                .unwrap();
+
+        assert!(!updated.sources[0].enabled);
     }
 
     #[test]

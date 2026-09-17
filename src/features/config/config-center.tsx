@@ -10,7 +10,6 @@ import {
   AlertTriangle,
   Braces,
   Check,
-  ChevronRight,
   Code2,
   CircleX,
   Download,
@@ -34,6 +33,7 @@ import {
 } from "lucide-react";
 
 import { CapabilityBadge } from "@/components/capability-badge";
+import { useToast } from "@/components/toast-host";
 import { JsonEditor } from "@/components/json-editor";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -169,6 +169,7 @@ function matchesSourceFilter(
 }
 
 export function ConfigCenter() {
+  const toast = useToast();
   const configDocuments = useAppStore((state) => state.configDocuments);
   const configDocumentCache = useAppStore((state) => state.configDocumentCache);
   const activeConfigId = useAppStore((state) => state.activeConfigId);
@@ -498,36 +499,44 @@ export function ConfigCenter() {
   const handleRemoveSources = (
     keys: string[],
     description: string,
+    options: { needsConfirmation: boolean },
   ) => {
     if (keys.length === 0) return;
-    // Deleting rewrites the configuration the user imported, so the confirmation is a real
-    // dialog that names what is about to go and what will change, rather than a browser confirm
-    // that can be dismissed without reading.
+    // Removing a source that cannot run is the ordinary way to tidy a configuration, so it goes
+    // through without a prompt. Removing one that works is the surprising case — the user is
+    // discarding something usable — and only that asks.
+    if (!options.needsConfirmation) {
+      void performRemoveSources(keys);
+      return;
+    }
     setRemoveRequest({ keys, description });
+  };
+
+  const performRemoveSources = async (keys: string[]) => {
+    try {
+      await removeSources(keys);
+      if (inspectedSourceKey && keys.includes(inspectedSourceKey)) {
+        setInspectedSourceKey(null);
+      }
+      toast({
+        variant: "success",
+        title: "已删除源",
+        description: `从配置中移除了 ${keys.length} 个源。`,
+      });
+    } catch (error) {
+      toast({
+        variant: "error",
+        title: "删除失败",
+        description: error instanceof Error ? error.message : "删除源失败",
+      });
+    }
   };
 
   const confirmRemoveSources = async () => {
     const request = removeRequest;
     if (!request) return;
     setRemoveRequest(null);
-    try {
-      await removeSources(request.keys);
-      if (
-        inspectedSourceKey &&
-        request.keys.includes(inspectedSourceKey)
-      ) {
-        setInspectedSourceKey(null);
-      }
-      setParseState({
-        type: "success",
-        message: `已从配置中删除 ${request.keys.length} 个源。`,
-      });
-    } catch (error) {
-      setParseState({
-        type: "error",
-        message: error instanceof Error ? error.message : "删除源失败",
-      });
-    }
+    await performRemoveSources(request.keys);
   };
 
   const handleBindScriptArchive = async (
@@ -585,15 +594,31 @@ export function ConfigCenter() {
       } else {
         setSourceTestResult(source.key, result);
       }
-      setParseState({
-        type: result.status === "passed" ? "success" : "error",
-        title: `${source.sourceType === "live" ? "直播" : "CMS"} 源审计完成`,
-        message: `${source.name}：${result.message}`,
+      // Reported as a toast rather than a banner: this describes one finished operation, and a
+      // banner left it on the page until the next action replaced it. A test that found the
+      // source unusable also switches it off, which is worth saying because the switch in the
+      // row will have moved on its own.
+      const disabled =
+        result.status === "failed" || result.status === "empty";
+      toast({
+        variant: result.status === "passed" ? "success" : "error",
+        title: `${source.name}：${
+          result.status === "passed" ? "测试通过" : "测试未通过"
+        }`,
+        description: `${result.message}${
+          disabled ? " 已自动关闭该源的启用开关。" : ""
+        }`,
       });
       return result;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "源测试失败";
-      setParseState({ type: "error", message });
+      // Reported the same way as a completed test: this is the outcome of the same action, and
+      // mixing a toast with a page banner for the failure case would make the error look like a
+      // different kind of event.
+      toast({
+        variant: "error",
+        title: `${source.name}：测试失败`,
+        description: error instanceof Error ? error.message : "源测试失败",
+      });
       return null;
     } finally {
       setTestingKeys((current) => {
@@ -691,22 +716,25 @@ export function ConfigCenter() {
     const passedCount = results.filter(
       (result) => result.status === "passed",
     ).length;
+    const disabledCount = results.filter(
+      (result) => result.status === "failed" || result.status === "empty",
+    ).length;
     if (cancelled) {
-      setParseState({
-        type: "error",
+      toast({
+        variant: "info",
         title: "测速已取消",
-        message: `已测试 ${results.length}/${testableSources.length} 个源，其中 ${passedCount} 个通过。其余未测试的源保持原状态。`,
+        description: `已测试 ${results.length}/${testableSources.length} 个源，其中 ${passedCount} 个通过。其余未测试的源保持原状态。`,
       });
       return;
     }
-    setParseState({
-      type:
-        results.length === testableSources.length &&
-        passedCount === testableSources.length
-          ? "success"
-          : "error",
-      title: "源审计完成",
-      message: `已完成 ${results.length}/${testableSources.length} 个源审计，其中 ${passedCount} 个通过。通过审计的 CMS 可进入影视库，直播源可进入直播。`,
+    toast({
+      variant: passedCount === testableSources.length ? "success" : "info",
+      title: "测速完成",
+      description:
+        `已测试 ${results.length} 个源，${passedCount} 个通过` +
+        (disabledCount > 0
+          ? `，${disabledCount} 个未通过并已自动关闭。`
+          : "。"),
     });
   };
 
@@ -1001,8 +1029,11 @@ export function ConfigCenter() {
   };
 
   return (
-    <div className="h-full overflow-auto">
-      <div className="mx-auto flex w-full max-w-6xl flex-col gap-4 p-5">
+    /* The page fills its viewport and never scrolls as a whole; the source list is the only
+       scrolling region. Everything above it is a fixed header, so the list gets the leftover
+       height instead of the page growing past the window and pushing the controls off-screen. */
+    <div className="flex h-full flex-col overflow-hidden">
+      <div className="mx-auto flex min-h-0 w-full max-w-6xl flex-1 flex-col gap-4 p-5">
         <section className="flex items-center justify-between gap-4 border-b border-border/60 pb-3">
           <div>
             <div className="flex items-center gap-2">
@@ -1116,8 +1147,11 @@ export function ConfigCenter() {
           </CardContent>
         </Card>
 
-        <Tabs defaultValue="sources" className="flex flex-col gap-5">
-          <div className="flex items-center justify-between gap-4">
+        <Tabs
+          defaultValue="sources"
+          className="flex min-h-0 flex-1 flex-col gap-5"
+        >
+          <div className="flex shrink-0 items-center justify-between gap-4">
             <TabsList>
               <TabsTrigger value="sources" className="gap-1.5">
                 <ListFilter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
@@ -1144,14 +1178,17 @@ export function ConfigCenter() {
             </div>
           </div>
 
-          <TabsContent value="sources" className="flex flex-col gap-4">
-            <Card>
-              <CardHeader className="border-b pb-4">
+          <TabsContent
+            value="sources"
+            className="flex min-h-0 flex-1 flex-col gap-4"
+          >
+            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
+              <CardHeader className="shrink-0 border-b pb-4 pt-5">
                 <div className="flex items-center justify-between gap-4">
                   <div>
                     <CardTitle className="text-base">源清单</CardTitle>
                     <CardDescription>
-                      当前配置里的全部源。只有可用的源能测试；测试通过后才会进入影视库。
+                      启用后即可在影视库或直播中使用；测试失败或无内容的源会自动关闭。
                     </CardDescription>
                   </div>
                   {/* Import, export and the bulk test live here rather than in the page header:
@@ -1226,28 +1263,32 @@ export function ConfigCenter() {
                     </Button>
                     {/* Pruning the whole configuration at once: the sources that cannot run are
                         usually the majority, and removing them one at a time is the tedious
-                        part of ending up with a configuration that works. */}
-                    {removableSources.length > 0 && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="gap-1.5 text-muted-foreground hover:text-destructive"
-                        onClick={() =>
-                          void handleRemoveSources(
-                            removableSources.map((source) => source.key),
-                            "全部不可用的源",
-                          )
-                        }
-                      >
-                        <Trash2
-                          className="size-3.5"
-                          data-icon="inline-start"
-                          aria-hidden="true"
-                        />
-                        清理不可用 ({removableSources.length})
-                      </Button>
-                    )}
+                        part of ending up with a configuration that works. Shown only on the
+                        scopes where unusable sources are actually on screen — offering it while
+                        the list is filtered to 可用 would act on rows the user cannot see. */}
+                    {removableSources.length > 0 &&
+                      sourceFilter !== "available" && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5 text-muted-foreground hover:text-destructive"
+                          onClick={() =>
+                            void handleRemoveSources(
+                              removableSources.map((source) => source.key),
+                              "全部不可用的源",
+                              { needsConfirmation: true },
+                            )
+                          }
+                        >
+                          <Trash2
+                            className="size-3.5"
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                          清理不可用 ({removableSources.length})
+                        </Button>
+                      )}
                   </div>
                 </div>
                 <div className="mt-4 flex items-center gap-2">
@@ -1277,9 +1318,11 @@ export function ConfigCenter() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
+                        {/* 全部 first because it is the widest scope and the natural place to
+                            start reading, even though 可用 is what is selected by default. */}
+                        <SelectItem value="all">全部</SelectItem>
                         <SelectItem value="available">可用</SelectItem>
                         <SelectItem value="unusable">不可用</SelectItem>
-                        <SelectItem value="all">全部</SelectItem>
                       </SelectGroup>
                     </SelectContent>
                   </Select>
@@ -1288,9 +1331,12 @@ export function ConfigCenter() {
                   </span>
                 </div>
               </CardHeader>
-              <CardContent className="p-0">
+              <CardContent className="flex min-h-0 flex-1 flex-col p-0">
                 {filteredSources.length > 0 ? (
-                  <ScrollArea className="h-[520px]">
+                  /* The list is the only scrolling region on the page. It takes whatever height
+                     is left after the fixed header above it, so the page itself never scrolls
+                     and the controls stay put. */
+                  <ScrollArea className="min-h-0 flex-1">
                     <Table>
                       <TableHeader>
                         <TableRow className="hover:bg-transparent">
@@ -1404,91 +1450,84 @@ export function ConfigCenter() {
                                 <Button
                                   type="button"
                                   variant="ghost"
-                                  size="sm"
-                                  className="group/test relative gap-1.5"
+                                  size="icon-sm"
+                                  className="group/test relative text-muted-foreground"
                                   disabled={isTesting && !isBatchTesting}
+                                  aria-label={
+                                    isTesting
+                                      ? `取消测试 ${source.name}`
+                                      : `测试 ${source.name}`
+                                  }
+                                  title={
+                                    isTesting
+                                      ? "取消测试"
+                                      : "测试这个源"
+                                  }
                                   onClick={() =>
                                     isTesting
                                       ? handleCancelTestAll()
                                       : void handleTestSource(source)
                                   }
                                 >
+                                  {/* A row stuck on "测试中" is where a user looks when they
+                                      want it to stop, so the cancel control appears exactly
+                                      there on hover rather than only in the toolbar. The
+                                      button stays icon-only, so the label moves into the
+                                      accessible name and the tooltip. */}
                                   {isTesting ? (
                                     <>
-                                      {/* A row stuck on "测试中" is where a user looks when they
-                                          want it to stop, so the cancel control appears exactly
-                                          there on hover rather than only in the toolbar. */}
                                       <LoaderCircle
                                         className="size-3.5 animate-spin group-hover/test:hidden"
-                                        data-icon="inline-start"
                                         aria-hidden="true"
                                       />
                                       <X
                                         className="hidden size-3.5 group-hover/test:block"
-                                        data-icon="inline-start"
                                         aria-hidden="true"
                                       />
-                                      <span className="group-hover/test:hidden">
-                                        测试中
-                                      </span>
-                                      <span className="hidden group-hover/test:inline">
-                                        取消
-                                      </span>
                                     </>
                                   ) : (
-                                    <>
-                                      <TestTube2
-                                        className="size-3.5"
-                                        data-icon="inline-start"
-                                        aria-hidden="true"
-                                      />
-                                      测试
-                                    </>
+                                    <TestTube2
+                                      className="size-3.5"
+                                      aria-hidden="true"
+                                    />
                                   )}
                                 </Button>
                               ) : (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  className="gap-1.5 text-muted-foreground"
-                                  onClick={() =>
-                                    setInspectedSourceKey(source.key)
-                                  }
-                                >
-                                  详情
-                                  <ChevronRight
-                                    className="size-3.5"
-                                    data-icon="inline-end"
-                                    aria-hidden="true"
-                                  />
-                                </Button>
+                                /* No button here: the row itself opens the detail sheet, so a
+                                   "详情" control repeated what clicking anywhere already did. */
+                                <span
+                                  className="inline-block size-6"
+                                  aria-hidden="true"
+                                />
                               )}
-                              {/* Pruning is offered for sources that cannot run, so the
-                                  configuration can be reduced to the part that works. A source
-                                  that works, or that has simply not been tested, is not
-                                  something to invite deletion of. */}
-                              {removableKeys.has(source.key) && (
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon-sm"
-                                  className="ml-1 text-muted-foreground hover:text-destructive"
-                                  aria-label={`删除 ${source.name}`}
-                                  onClick={() =>
-                                    void handleRemoveSources(
-                                      [source.key],
-                                      `「${source.name}」`,
-                                    )
-                                  }
-                                >
-                                  <Trash2
-                                    className="size-3.5"
-                                    data-icon="inline-start"
-                                    aria-hidden="true"
-                                  />
-                                </Button>
-                              )}
+                              {/* Deleting is offered on every row. A source that cannot run
+                                  goes without a prompt, because tidying those away is the
+                                  ordinary case; one that works asks first, because discarding
+                                  something usable is the surprising one. */}
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                className="ml-1 text-muted-foreground hover:text-destructive"
+                                aria-label={`删除 ${source.name}`}
+                                title="从配置中删除"
+                                onClick={() =>
+                                  handleRemoveSources(
+                                    [source.key],
+                                    `「${source.name}」`,
+                                    {
+                                      needsConfirmation:
+                                        !removableKeys.has(source.key),
+                                    },
+                                  )
+                                }
+                              >
+                                <Trash2
+                                  className="size-3.5"
+                                  data-icon="inline-start"
+                                  aria-hidden="true"
+                                />
+                              </Button>
                             </TableCell>
                           </TableRow>
                           );

@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect } from "react";
 
 import { AppShell } from "@/components/app-shell";
+import { ToastHost } from "@/components/toast-host";
+import { ToastProvider } from "@/components/ui/toast";
 import {
   isTauriRuntime,
   listConfigDocuments,
@@ -104,28 +106,32 @@ function App() {
   };
 
   return (
-    <AppShell activeView={activeView} onNavigate={navigate}>
-      <Suspense fallback={<ViewLoading />}>
-        {activeView === "config" && <ConfigCenter />}
-        {activeView === "settings" && (
-          <SettingsView
-            theme={theme}
-            onThemeChange={setTheme}
-            autoEpgEnabled={autoEpgEnabled}
-            onAutoEpgEnabledChange={setAutoEpgEnabled}
-            historyCount={history.length}
-            favoriteCount={favorites.length}
-            progressCount={Object.keys(playbackProgress).length}
-            onClearHistory={clearHistory}
-            onClearFavorites={clearFavorites}
-          />
-        )}
-        {activeView === "browse" && <BrowseView onNavigate={navigate} />}
-        {activeView === "live" && <LiveView />}
-        {activeView === "favorites" && <FavoritesView onNavigate={navigate} />}
-        {activeView === "history" && <HistoryView onNavigate={navigate} />}
-      </Suspense>
-    </AppShell>
+    <ToastProvider>
+      <ToastHost>
+        <AppShell activeView={activeView} onNavigate={navigate}>
+          <Suspense fallback={<ViewLoading />}>
+            {activeView === "config" && <ConfigCenter />}
+            {activeView === "settings" && (
+              <SettingsView
+                theme={theme}
+                onThemeChange={setTheme}
+                autoEpgEnabled={autoEpgEnabled}
+                onAutoEpgEnabledChange={setAutoEpgEnabled}
+                historyCount={history.length}
+                favoriteCount={favorites.length}
+                progressCount={Object.keys(playbackProgress).length}
+                onClearHistory={clearHistory}
+                onClearFavorites={clearFavorites}
+              />
+            )}
+            {activeView === "browse" && <BrowseView onNavigate={navigate} />}
+            {activeView === "live" && <LiveView />}
+            {activeView === "favorites" && <FavoritesView onNavigate={navigate} />}
+            {activeView === "history" && <HistoryView onNavigate={navigate} />}
+          </Suspense>
+        </AppShell>
+      </ToastHost>
+    </ToastProvider>
   );
 }
 

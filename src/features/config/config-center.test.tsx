@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ToastHost } from "@/components/toast-host";
+import { ToastProvider } from "@/components/ui/toast";
 import { ConfigCenter } from "@/features/config/config-center";
 import { testSource as testSourceCommand } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
@@ -81,6 +83,18 @@ const needsAdapter = source({
   api: "proxy://demo",
 });
 
+/**
+ * Renders the page inside the toast host it depends on. The page reports the outcome of a test
+ * run through a toast, so without the host every render would throw.
+ */
+function renderPage(ui: React.ReactElement) {
+  return render(
+    <ToastProvider>
+      <ToastHost>{ui}</ToastHost>
+    </ToastProvider>,
+  );
+}
+
 function renderCenter() {
   const configText = JSON.stringify({
     sites: [
@@ -99,7 +113,7 @@ function renderCenter() {
     activeConfigId: 1,
     lastImportedAt: "2026-01-01T00:00:00.000Z",
   });
-  return render(<ConfigCenter />);
+  return renderPage(<ConfigCenter />);
 }
 
 /** Radix Select renders its list in a portal and needs a pointer sequence to open. */
@@ -234,24 +248,51 @@ describe("config center", () => {
 
   it("does not offer a connection test for a source that cannot run", () => {
     // A test for a source with no working adapter can only fail, which tells the user nothing.
-    // Those rows offer 详情 instead.
     renderCenter();
     chooseFilter("全部");
 
-    expect(screen.getAllByRole("button", { name: /^测试$/ })).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: /详情/ })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /^测试 / })).toHaveLength(1);
   });
 
-  it("points an unusable source at its details instead of a dead end", () => {
+  it("opens the detail sheet by clicking the row, with no extra button", () => {
+    // The row already opens the sheet, so a "详情" control repeated what a click anywhere did.
+    // Checked on both branches: the testable rows render a test button and the others render
+    // nothing, so a stray control could hide in whichever branch the default filter shows.
     renderCenter();
-    chooseFilter("不可用");
 
-    const detailButtons = screen.getAllByRole("button", { name: /详情/ });
-    expect(detailButtons.length).toBeGreaterThan(0);
+    for (const filter of ["可用", "不可用"] as const) {
+      chooseFilter(filter);
+      expect(
+        screen.queryByRole("button", { name: /详情/ }),
+        filter,
+      ).not.toBeInTheDocument();
+    }
 
-    fireEvent.click(detailButtons[0]);
-    // The sheet opens with the source's own explanation.
+    const okRow = screen
+      .getAllByRole("row")
+      .find((row) => row.textContent?.includes("不可用的源"));
+    fireEvent.click(okRow as HTMLElement);
+
     expect(screen.getByText(/适配器边界/)).toBeInTheDocument();
+  });
+
+  it("keeps the page itself from scrolling and gives the list the scrollbar", () => {
+    // The list is the tallest thing here; letting the page scroll as a whole pushed the controls
+    // out of view. jsdom cannot measure overflow, so the class contract is what is pinned.
+    renderCenter();
+
+    const page = screen.getByRole("heading", { name: "配置中心" })
+      .closest("div.flex.h-full");
+    expect(page?.className).toContain("overflow-hidden");
+    expect(page?.className).not.toContain("overflow-auto");
+  });
+
+  it("labels the test button for assistive technology instead of showing text", () => {
+    renderCenter();
+
+    expect(
+      screen.getByRole("button", { name: "测试 可用的源" }),
+    ).toBeInTheDocument();
   });
 
   it("moves import, export and bulk test next to the list they act on", () => {
@@ -318,7 +359,7 @@ describe("config center", () => {
       activeConfigId: 1,
       lastImportedAt: "2026-01-01T00:00:00.000Z",
     });
-    render(<ConfigCenter />);
+    renderPage(<ConfigCenter />);
 
     expect(screen.getByText("当前配置没有可用的源")).toBeInTheDocument();
     expect(screen.getByText(/切换到「不可用」/)).toBeInTheDocument();
@@ -339,14 +380,14 @@ describe("config center", () => {
     expect(empty?.parentElement?.className).toContain("p-4");
   });
 
-  it("offers to delete an unusable source, and only an unusable one", () => {
-    // Pruning is how a user reduces a configuration to the part that works. Offering it for a
-    // source that works would invite deleting the good ones.
+  it("offers a delete button on every row", () => {
+    // Removing a source is a normal part of tidying a configuration, so the control is on every
+    // row rather than only on the ones that look broken.
     renderCenter();
 
     expect(
-      screen.queryByRole("button", { name: "删除 可用的源" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "删除 可用的源" }),
+    ).toBeInTheDocument();
 
     chooseFilter("不可用");
     expect(
@@ -354,9 +395,8 @@ describe("config center", () => {
     ).toBeInTheDocument();
   });
 
-  it("removes a source through the store after confirming in a dialog", async () => {
-    // The confirmation is a real dialog rather than window.confirm: deleting rewrites the
-    // configuration the user imported, so the risk has to be stated where it can be read.
+  it("deletes an unusable source without a confirmation prompt", () => {
+    // Tidying away a source that cannot run is the ordinary case, so it does not interrupt.
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
     renderCenter();
@@ -364,26 +404,35 @@ describe("config center", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "删除 不可用的源" }));
 
-    // Nothing happens until the dialog is confirmed.
+    expect(removeSources).toHaveBeenCalledWith(["no"]);
+    expect(screen.queryByText("从配置中删除这些源？")).not.toBeInTheDocument();
+  });
+
+  it("asks before deleting a source that works", () => {
+    // Discarding something usable is the surprising case, so only that one asks.
+    const removeSources = vi.fn(async () => undefined);
+    useAppStore.setState({ removeSources });
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 可用的源" }));
+
     expect(removeSources).not.toHaveBeenCalled();
     expect(screen.getByText("从配置中删除这些源？")).toBeInTheDocument();
     expect(screen.getByText(/原始配置会被一起修改/)).toBeInTheDocument();
-    expect(screen.getByText(/此操作不能撤销/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
-    await waitFor(() => {
-      expect(removeSources).toHaveBeenCalledWith(["no"]);
+    return waitFor(() => {
+      expect(removeSources).toHaveBeenCalledWith(["ok"]);
     });
   });
 
-  it("does not delete anything when the dialog is dismissed", () => {
+  it("does not delete a usable source when the dialog is dismissed", () => {
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
     renderCenter();
-    chooseFilter("不可用");
 
-    fireEvent.click(screen.getByRole("button", { name: "删除 不可用的源" }));
+    fireEvent.click(screen.getByRole("button", { name: "删除 可用的源" }));
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     expect(removeSources).not.toHaveBeenCalled();
@@ -393,6 +442,7 @@ describe("config center", () => {
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
     renderCenter();
+    chooseFilter("不可用");
 
     const bulk = screen.getByRole("button", { name: /清理不可用/ });
     // Two of the three fixture sources cannot run.
@@ -410,6 +460,25 @@ describe("config center", () => {
     });
   });
 
+  it("shows the bulk cleanup only where unusable sources are on screen", () => {
+    // Acting on rows the user cannot see is what makes a bulk button dangerous.
+    renderCenter();
+
+    expect(
+      screen.queryByRole("button", { name: /清理不可用/ }),
+    ).not.toBeInTheDocument();
+
+    chooseFilter("不可用");
+    expect(
+      screen.getByRole("button", { name: /清理不可用/ }),
+    ).toBeInTheDocument();
+
+    chooseFilter("全部");
+    expect(
+      screen.getByRole("button", { name: /清理不可用/ }),
+    ).toBeInTheDocument();
+  });
+
   it("hides the bulk cleanup when every source is usable", () => {
     useAppStore.setState({
       sources: [supported],
@@ -422,27 +491,27 @@ describe("config center", () => {
       activeConfigId: 1,
       lastImportedAt: "2026-01-01T00:00:00.000Z",
     });
-    render(<ConfigCenter />);
+    renderPage(<ConfigCenter />);
 
     expect(
       screen.queryByRole("button", { name: /清理不可用/ }),
     ).not.toBeInTheDocument();
   });
 
-  it("shows the test result on the page, not only inside the import dialog", async () => {
-    // The status banner used to live inside the import dialog, so every message it carried — a
-    // finished test run, a cancelled one, a deleted source — was invisible unless the user
-    // happened to have that dialog open.
+  it("reports a finished test as a toast, not as a banner left on the page", async () => {
+    // The result of one operation used to sit in a banner below the list until the next action
+    // replaced it. A toast says the same thing once and leaves.
     vi.mocked(testSourceCommand).mockResolvedValue(testResult());
     renderCenter();
 
-    fireEvent.click(screen.getByRole("button", { name: /^测试$/ }));
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
 
     await waitFor(() => {
-      expect(screen.getByText(/源审计完成/)).toBeInTheDocument();
+      expect(screen.getByText(/测试通过/)).toBeInTheDocument();
     });
-    expect(screen.queryByText("导入配置")).toBeInTheDocument();
-    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(document.querySelector("[data-slot='toast']")).toBeTruthy();
+    // The banner that used to carry this is gone.
+    expect(document.querySelector("[data-slot='alert']")).toBeNull();
   });
 
   it("names a cancelled run as cancelled rather than a broken configuration", async () => {
@@ -486,7 +555,7 @@ describe("config center", () => {
       activeConfigId: 1,
       lastImportedAt: "2026-01-01T00:00:00.000Z",
     });
-    render(<ConfigCenter />);
+    renderPage(<ConfigCenter />);
 
     // Scoped to the row: "可用" also appears as a filter option.
     const okRow = screen
@@ -508,7 +577,7 @@ describe("config center", () => {
       activeConfigId: 1,
       lastImportedAt: "2026-01-01T00:00:00.000Z",
     });
-    render(<ConfigCenter />);
+    renderPage(<ConfigCenter />);
 
     expect(screen.getByText("无内容")).toBeInTheDocument();
   });
@@ -540,7 +609,7 @@ describe("config center", () => {
       activeConfigId: 1,
       lastImportedAt: "2026-01-01T00:00:00.000Z",
     });
-    render(<ConfigCenter />);
+    renderPage(<ConfigCenter />);
 
     fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
 
@@ -571,11 +640,13 @@ describe("config center", () => {
 
     fireEvent.click(cancel);
 
-    // Cancelling ends the run and reports what was and was not covered.
+    // Cancelling ends the run and reports what was and was not covered, as a toast rather than a
+    // banner left on the page.
     await waitFor(() => {
       expect(screen.getByText("测速已取消")).toBeInTheDocument();
     });
     expect(screen.getByText(/其余未测试的源保持原状态/)).toBeInTheDocument();
+    expect(document.querySelector("[data-slot='toast']")).toBeTruthy();
   });
 
   it("marks the row being tested so it is clear which one is outstanding", async () => {
@@ -594,7 +665,8 @@ describe("config center", () => {
 
   it("lets a single row's test be cancelled from the row itself", async () => {
     // The row is where a user looks when they want it to stop, so the cancel control appears
-    // there on hover rather than only in the toolbar.
+    // there on hover rather than only in the toolbar. The button stays icon-only, so the state
+    // is carried by the accessible name.
     vi.mocked(testSourceCommand).mockImplementation(
       () => new Promise<SourceTestResult>(() => {}),
     );
@@ -602,7 +674,50 @@ describe("config center", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
 
-    const rowCancel = await screen.findByRole("button", { name: /测试中/ });
-    expect(rowCancel.textContent).toContain("取消");
+    const rowCancel = await screen.findByRole("button", {
+      name: /取消测试 可用的源/,
+    });
+    expect(rowCancel).toBeInTheDocument();
+  });
+
+  it("switches off a source the test found unusable", async () => {
+    // A source that fails or comes back empty stops being offered, so it no longer appears in
+    // the library or in live.
+    vi.mocked(testSourceCommand).mockResolvedValue(
+      testResult({ status: "empty", itemCount: 0, message: "响应中没有内容。" }),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().sources[0].enabled).toBe(false);
+    });
+    expect(useAppStore.getState().sources[0].testStatus).toBe("empty");
+  });
+
+  it("leaves a source enabled when the test passes", async () => {
+    vi.mocked(testSourceCommand).mockResolvedValue(testResult());
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().sources[0].testStatus).toBe("passed");
+    });
+    expect(useAppStore.getState().sources[0].enabled).toBe(true);
+  });
+
+  it("says in the toast that an unusable source was switched off", async () => {
+    vi.mocked(testSourceCommand).mockResolvedValue(
+      testResult({ status: "empty", itemCount: 0, message: "响应中没有内容。" }),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/已自动关闭该源的启用开关/)).toBeInTheDocument();
+    });
   });
 });

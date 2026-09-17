@@ -212,3 +212,14 @@
   2. **横幅标题对所有 error 硬编码为「需要修正配置」**，显式传入的 `title` 被丢弃。于是「测速已取消」会宣称用户的配置文件格式有问题。已改为传入的 `title` 优先。
 - **「清理不可用」等删除操作改用真正的确认对话框**（用户明确说不敢点，希望有二次确认）。从 `window.confirm` 换成 Dialog，逐条列出风险：**原始配置会被一起修改**（不是只在这里隐藏）、导出结果不再包含它们、相关收藏和播放记录会一并清理、不能撤销。用户「不敢点」本身就是设计缺陷的信号——**需要二次确认说明后果没有被表达清楚，而不只是缺一个拦截**。
 - 本轮测试：前端 199 项（config-center 31 项）、Rust 89 项（policy 新增 4 项、storage 5 项）。真实浏览器实测：`待测试` 正确显示且 `claimsUsableBeforeTest = false`；`maxConcurrent = 4`；4 行同时模糊、`filter: blur(1px)`、`opacity: 0.6`；取消按钮 `取消测速 (4/5)` 且开始按钮消失；**取消延迟 109ms**；取消横幅**在页面上可见且不在对话框内**；`scrollHeight === clientHeight === 805`。
+- **配置中心第三轮调整**（用户第三轮反馈，8 条）。其中两条是**修正我自己上一轮的设计错误**：
+  - **「进不进影视库」的判据错了**（用户指出）：我让 `isMovieLibrarySource` 要求 `testStatus === "passed"`，也就是「通过审计才能进影视库」。用户的意思是**只取决于 `enabled`**——测速是用户主动运行的检查，不该成为列出的前提。改为 `enabled && isTestableCmsSource(source)`，并让**测速失败/无内容的源自动关闭 `enabled`**，由它来把它们移出影视库和直播。**这比我原来的设计更自洽：一个开关决定一件事，而不是两个条件互相纠缠。**
+  - **「详情」按钮是多余的**（用户指出）：整行点击已经打开详情面板，再加一个按钮是把同一件事做两遍。已删除，并把不可用源那一格的空位补上占位 `<span>` 保持列宽对齐。
+  - **自动关闭在 Rust 侧实现**（`set_source_test_in_connection`），同时写入 `sources_json` 快照和 `normalized_config`；前端 store 的 `setSourceTestResult` 同步同一规则，浏览器预览下行为一致。**`passed` 不会重新启用用户手动关掉的源**——有单测锁住。判定用 `failed || empty`，`blocked` 不动（它本来就没被启用过）。
+  - **页面不再有外层滚动条**：容器改为 `flex h-full flex-col overflow-hidden`，只有源清单是滚动区域（`ScrollArea` 用 `min-h-0 flex-1` 吃掉剩余高度，取代原来的固定 `h-[520px]`）。**实测：页面 `scrollHeight === clientHeight === 805`、`outerScrolls = false`，而列表 `scrollHeight 2392 > clientHeight 423`（确实在内部滚动）。**
+  - **测速结果改用 toast**（新增 `components/ui/toast.tsx` + `components/toast-host.tsx`，基于 Radix Toast，挂在 `App.tsx`）。底部那条「源审计完成」横幅删除。**设计要点：一次只显示最新一条，不堆叠**——这些提示描述的是单个操作的结局，一列过期结果比最新一条更难读。单源测速的成功**和失败**都走 toast，避免同一个动作的两种结局用两种呈现。
+  - **测试按钮改为纯图标**，文字移到 `aria-label` 和 `title`（`测试 <源名>` / `取消测试 <源名>`）。悬停时图标从转圈换成 X 表示可取消。
+  - **删除按钮放到每一行**（原来只给不可用的行）。**不可用的源删除时不弹确认，可用的源才弹**——用户原话是「对于那些状态不是可用的内容，点击删除按钮时不需要二次确认」。这个取舍是合理的：清理不可用是常规操作，删掉能用的才是意外操作，**只在意外的那一边设拦截**。
+  - **筛选顺序改为 `全部` / `可用` / `不可用`**（全部在第一位，但默认仍选中「可用」——**顺序和默认值是两件事**）；**「清理不可用」只在筛选为「不可用」或「全部」时出现**，因为按「可用」过滤时它要动的行根本不在屏幕上。
+- **变异验证 8 项，全部被抓到**，但其中**两项第一次存活**，都是真实的测试盲区：`detailButtonBack`（「详情」按钮只渲染在非可测分支，而默认筛选恰好把它藏起来了）和 `outerScrollBack`（jsdom 量不出溢出）。前者改为**遍历「可用」和「不可用」两个筛选**再断言；后者加 class 契约测试。**教训：「某控件不存在」的断言必须覆盖它可能出现的每一个分支，否则默认视图会替你把缺陷藏起来。**
+- 本轮最终：前端 206 项（config-center 38 项）、Rust 93 项（storage 新增 4 项）。真实浏览器实测：`outerScrolls = false` / 列表 `scrolls = true`；40 个测试按钮 `textContent` 为空而 `aria-label = "测试 源 1"`；`hasDetailButton = false` 但 `rowClickOpensSheet = true`；`deleteButtons = 40`；`bulkVisibleOnAvailable = false`；**测速后「源 1」从 `待测试/checked` 变为 `无内容/unchecked`，而「源 2」保持 `可用/checked`**；toast 出现于 `topOffset 32` 且水平居中，`bannerGone = true`。

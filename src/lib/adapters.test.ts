@@ -123,12 +123,14 @@ describe("adapter registry", () => {
         source({ sourceType: "live", capability: "partial" }),
       ),
     ).toBe(false);
-    expect(isMovieLibrarySource(source({ testStatus: "untested" }))).toBe(
-      false,
-    );
-    expect(isMovieLibrarySource(source({ testStatus: "empty" }))).toBe(false);
-    expect(isMovieLibrarySource(source({ testStatus: "failed" }))).toBe(false);
+    // Listing in the movie library depends on being enabled, not on having been audited. A test
+    // the user has not run yet is not a reason to hide a source they turned on.
+    expect(isMovieLibrarySource(source({ testStatus: "untested" }))).toBe(true);
     expect(isMovieLibrarySource(source({ testStatus: "passed" }))).toBe(true);
+    // A source that fails or returns nothing is switched off by the test run, so it drops out
+    // through `enabled` rather than through its status.
+    expect(isMovieLibrarySource(source({ testStatus: "empty", enabled: false }))).toBe(false);
+    expect(isMovieLibrarySource(source({ testStatus: "failed", enabled: false }))).toBe(false);
     expect(
       isMovieLibrarySource(
         source({ capability: "blocked", testStatus: "passed" }),

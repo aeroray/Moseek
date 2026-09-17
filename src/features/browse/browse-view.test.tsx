@@ -29,8 +29,8 @@ function cmsSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
     capability: "supported",
     capabilityNote: "demo",
     enabled: true,
-    // `isMovieLibrarySource` only lists sources whose test passed, so a fixture without this
-    // is filtered out and the view renders its empty state.
+    // Listing in the movie library depends on `enabled`, not on the test status: a source the
+    // user has switched on is selectable whether or not they have audited it.
     testStatus: "passed",
     lastCheckedAt: "now",
     requestCount: 0,

@@ -187,6 +187,13 @@ export const useAppStore = create<AppStore>()(
                   testDurationMs: result.durationMs,
                   testOperations: result.operations,
                   lastCheckedAt: result.testedAt,
+                  // A source the test found broken stops being offered, matching what the
+                  // backend persists. Leaving it enabled would keep listing a source we have
+                  // just proved does not work.
+                  enabled:
+                    result.status === "failed" || result.status === "empty"
+                      ? false
+                      : source.enabled,
                   requestCount:
                     source.requestCount + (result.status === "blocked" ? 0 : 1),
                 }

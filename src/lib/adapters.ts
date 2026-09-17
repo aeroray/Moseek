@@ -269,12 +269,16 @@ export function isTestableSource(source: SourceRecord) {
   return isTestableCmsSource(source) || isTestableLiveSource(source);
 }
 
+/**
+ * Whether a source belongs in the movie library.
+ *
+ * The only gate is `enabled`. Passing an audit is not a requirement to be listed: auditing is a
+ * check the user chooses to run, and a source they have chosen to keep enabled should be
+ * selectable whether or not they have run it. Sources that fail or come back empty are switched
+ * off by the test run itself, which is what removes them from here.
+ */
 export function isMovieLibrarySource(source: SourceRecord) {
-  return (
-    source.enabled &&
-    isTestableCmsSource(source) &&
-    source.testStatus === "passed"
-  );
+  return source.enabled && isTestableCmsSource(source);
 }
 
 export function isCandidateMovieSource(source: SourceRecord) {
