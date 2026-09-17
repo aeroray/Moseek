@@ -1,11 +1,25 @@
 import * as React from "react"
 import { cn } from "cn"
 
-function Table({ className, ...props }: React.ComponentProps<"table">) {
+function Table({
+  className,
+  containerClassName,
+  ...props
+}: React.ComponentProps<"table"> & {
+  /**
+   * Classes for the scroll wrapper.
+   *
+   * The default wrapper scrolls horizontally, which makes it a scroll container — and a sticky
+   * `<thead>` then sticks to *that* box instead of the outer scroll region, so it never appears
+   * to stick. Passing `overflow-visible` lets an enclosing scroll area own the scrolling and the
+   * header stick to it.
+   */
+  containerClassName?: string;
+}) {
   return (
     <div
       data-slot="table-container"
-      className="relative w-full overflow-x-auto"
+      className={cn("relative w-full overflow-x-auto", containerClassName)}
     >
       <table
         data-slot="table"

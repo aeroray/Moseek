@@ -11,6 +11,7 @@ import {
   Braces,
   Check,
   Code2,
+  CircleCheck,
   CircleX,
   Download,
   FileJson,
@@ -565,7 +566,7 @@ export function ConfigCenter() {
         message:
           archiveId === null
             ? `已解除「${source.name}」的本地脚本绑定。`
-            : `已为「${source.name}」绑定本地脚本档案。请启用档案并重新审计源。`,
+            : `已为「${source.name}」绑定本地脚本档案。请启用档案并重新测试该源。`,
       });
     } catch (error) {
       setParseState({
@@ -666,7 +667,7 @@ export function ConfigCenter() {
     if (testableSources.length === 0) {
       setParseState({
         type: "error",
-        message: "当前配置没有可审计的 CMS 或直播源。",
+        message: "当前配置里没有可测试的源。",
       });
       return;
     }
@@ -1337,15 +1338,15 @@ export function ConfigCenter() {
                      is left after the fixed header above it, so the page itself never scrolls
                      and the controls stay put. */
                   <ScrollArea className="min-h-0 flex-1">
-                    <Table>
-                      <TableHeader>
+                    <Table containerClassName="overflow-visible">
+                      <TableHeader className="sticky top-0 z-10 bg-card">
                         <TableRow className="hover:bg-transparent">
-                          <TableHead className="w-[32%] pl-6">资源名称</TableHead>
+                          <TableHead className="w-[30%] pl-6">资源名称</TableHead>
                           <TableHead>状态</TableHead>
                           <TableHead>适配器</TableHead>
                           <TableHead>连接测试</TableHead>
-                          <TableHead className="text-right">启用</TableHead>
-                          <TableHead className="w-28 pr-6 text-right">
+                          <TableHead className="w-16 text-center">启用</TableHead>
+                          <TableHead className="w-20 pr-6 text-center">
                             操作
                           </TableHead>
                         </TableRow>
@@ -1399,18 +1400,13 @@ export function ConfigCenter() {
                               <SourceStatusBadge source={source} />
                             </TableCell>
                             <TableCell className="max-w-52">
-                              {/* The adapter's own execution badge said "已阻止" a second time,
-                                  under a row whose status column already says the source is
-                                  unusable. The row states the consequence instead: whether an
-                                  adapter is working for this source or not. */}
-                              <div className="flex min-w-0 flex-col gap-0.5">
-                                <span className="truncate text-sm">
-                                  {getAdapterProfile(source).label}
-                                </span>
+                              {/* The adapter badge leads, because the first thing to know is
+                                  whether an adapter exists at all; the name follows at the same
+                                  size as the rest of the row rather than shouting over it. */}
+                              <div className="flex min-w-0 items-center gap-2">
+                                <AdapterPresenceBadge source={source} />
                                 <span className="truncate text-xs text-muted-foreground">
-                                  {isTestableSource(source)
-                                    ? "可执行"
-                                    : "未适配"}
+                                  {getAdapterProfile(source).label}
                                 </span>
                               </div>
                             </TableCell>
@@ -1418,7 +1414,7 @@ export function ConfigCenter() {
                               <SourceTestBadge source={source} />
                             </TableCell>
                             <TableCell
-                              className="text-right"
+                              className="text-center"
                               onClick={(event) => event.stopPropagation()}
                             >
                               {/* A switch that cannot change anything is worse than a disabled
@@ -1443,75 +1439,70 @@ export function ConfigCenter() {
                               )}
                             </TableCell>
                             <TableCell
-                              className="pr-6 text-right"
+                              className="pr-6"
                               onClick={(event) => event.stopPropagation()}
                             >
-                              {isTestableSource(source) ? (
+                              {/* Centred in a flex row so the two icon buttons line up under the
+                                  centred header, and so a row without a test button still has its
+                                  delete button in the same place as every other row. */}
+                              <div className="flex items-center justify-center gap-1">
+                                {isTestableSource(source) && (
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="group/test relative text-muted-foreground"
+                                    disabled={isTesting && !isBatchTesting}
+                                    aria-label={
+                                      isTesting
+                                        ? `取消测试 ${source.name}`
+                                        : `测试 ${source.name}`
+                                    }
+                                    title={
+                                      isTesting ? "取消测试" : "测试这个源"
+                                    }
+                                    onClick={() =>
+                                      isTesting
+                                        ? handleCancelTestAll()
+                                        : void handleTestSource(source)
+                                    }
+                                  >
+                                    {/* A row stuck on "测试中" is where a user looks when they
+                                        want it to stop, so the cancel control appears exactly
+                                        there on hover rather than only in the toolbar. The
+                                        button stays icon-only, so the label moves into the
+                                        accessible name and the tooltip. */}
+                                    {isTesting ? (
+                                      <>
+                                        <LoaderCircle
+                                          className="size-3.5 animate-spin group-hover/test:hidden"
+                                          aria-hidden="true"
+                                        />
+                                        <X
+                                          className="hidden size-3.5 group-hover/test:block"
+                                          aria-hidden="true"
+                                        />
+                                      </>
+                                    ) : (
+                                      <TestTube2
+                                        className="size-3.5"
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                  </Button>
+                                )}
+                                {/* Deleting is offered on every row. A source that cannot run
+                                    goes without a prompt, because tidying those away is the
+                                    ordinary case; one that works asks first, because discarding
+                                    something usable is the surprising one. */}
                                 <Button
                                   type="button"
                                   variant="ghost"
                                   size="icon-sm"
-                                  className="group/test relative text-muted-foreground"
-                                  disabled={isTesting && !isBatchTesting}
-                                  aria-label={
-                                    isTesting
-                                      ? `取消测试 ${source.name}`
-                                      : `测试 ${source.name}`
-                                  }
-                                  title={
-                                    isTesting
-                                      ? "取消测试"
-                                      : "测试这个源"
-                                  }
+                                  className="text-muted-foreground hover:text-destructive"
+                                  aria-label={`删除 ${source.name}`}
+                                  title="从配置中删除"
                                   onClick={() =>
-                                    isTesting
-                                      ? handleCancelTestAll()
-                                      : void handleTestSource(source)
-                                  }
-                                >
-                                  {/* A row stuck on "测试中" is where a user looks when they
-                                      want it to stop, so the cancel control appears exactly
-                                      there on hover rather than only in the toolbar. The
-                                      button stays icon-only, so the label moves into the
-                                      accessible name and the tooltip. */}
-                                  {isTesting ? (
-                                    <>
-                                      <LoaderCircle
-                                        className="size-3.5 animate-spin group-hover/test:hidden"
-                                        aria-hidden="true"
-                                      />
-                                      <X
-                                        className="hidden size-3.5 group-hover/test:block"
-                                        aria-hidden="true"
-                                      />
-                                    </>
-                                  ) : (
-                                    <TestTube2
-                                      className="size-3.5"
-                                      aria-hidden="true"
-                                    />
-                                  )}
-                                </Button>
-                              ) : (
-                                /* No button here: the row itself opens the detail sheet, so a
-                                   "详情" control repeated what clicking anywhere already did. */
-                                <span
-                                  className="inline-block size-6"
-                                  aria-hidden="true"
-                                />
-                              )}
-                              {/* Deleting is offered on every row. A source that cannot run
-                                  goes without a prompt, because tidying those away is the
-                                  ordinary case; one that works asks first, because discarding
-                                  something usable is the surprising one. */}
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="icon-sm"
-                                className="ml-1 text-muted-foreground hover:text-destructive"
-                                aria-label={`删除 ${source.name}`}
-                                title="从配置中删除"
-                                onClick={() =>
                                   handleRemoveSources(
                                     [source.key],
                                     `「${source.name}」`,
@@ -1528,6 +1519,7 @@ export function ConfigCenter() {
                                   aria-hidden="true"
                                 />
                               </Button>
+                              </div>
                             </TableCell>
                           </TableRow>
                           );
@@ -1600,7 +1592,7 @@ export function ConfigCenter() {
                       适配器能力矩阵
                     </CardTitle>
                     <CardDescription>
-                      可执行不等于所有源都可用；源还需要通过能力审计，脚本源还需要启用本地档案。
+                      适配器能运行不代表源一定可用；测试通过后才能确认内容能取到。
                     </CardDescription>
                   </div>
                   <Select
@@ -2195,7 +2187,9 @@ export function ConfigCenter() {
             <>
               <SheetHeader className="px-6 pt-5 pb-4 border-b border-border/60 bg-card/40 shrink-0">
                 <div className="flex items-center gap-2">
-                  <CapabilityBadge status={inspectedSource.capability} />
+                  {/* The same verdict the list shows, so opening the sheet does not appear to
+                      disagree with the row that was clicked. */}
+                  <SourceStatusBadge source={inspectedSource} />
                   <Badge variant="outline" className="text-xs">
                     {inspectedSource.sourceType === "cms"
                       ? "普通 CMS"
@@ -2216,65 +2210,41 @@ export function ConfigCenter() {
 
               <ScrollArea className="flex-1 min-h-0 w-full overflow-hidden">
                 <div className="flex flex-col gap-5 px-6 py-5">
-                  <DetailSection title="标准化字段">
+                  <DetailSection title="基本信息">
                     <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
-                      <DetailRow label="key" value={inspectedSource.key} mono />
                       <DetailRow
-                        label="sourceType"
-                        value={inspectedSource.sourceType}
-                        mono
+                        label="类型"
+                        value={
+                          inspectedSource.sourceType === "cms"
+                            ? "普通 CMS"
+                            : inspectedSource.sourceType === "live"
+                              ? "直播源"
+                              : "解析服务"
+                        }
                       />
+                      <DetailRow label="标识" value={inspectedSource.key} mono />
                       <DetailRow
-                        label="sourceDialect"
-                        value={inspectedSource.sourceDialect ?? "unknown"}
-                        mono
+                        label="解析格式"
+                        value={describeSourceDialect(inspectedSource.sourceDialect)}
                       />
                       {inspectedSource.description && (
                         <DetailRow
-                          label="description"
+                          label="说明"
                           value={inspectedSource.description}
                         />
                       )}
                       <DetailRow
-                        label="status"
-                        value={
-                          inspectedSource.status === false ? "false" : "true"
-                        }
-                        mono
+                        label="配置声明可用"
+                        value={inspectedSource.status === false ? "否" : "是"}
                       />
                       <DetailRow
-                        label="searchable"
-                        value={inspectedSource.searchable ? "true" : "false"}
-                        mono
+                        label="支持搜索"
+                        value={inspectedSource.searchable ? "是" : "否"}
                       />
                       <DetailRow
-                        label="filterable"
-                        value={inspectedSource.filterable ? "true" : "false"}
-                        mono
+                        label="支持分类"
+                        value={inspectedSource.filterable ? "是" : "否"}
                       />
-                      <DetailRow
-                        label="requestCount"
-                        value={String(inspectedSource.requestCount)}
-                        mono
-                      />
-                      <DetailRow
-                        label="testStatus"
-                        value={inspectedSource.testStatus ?? "untested"}
-                        mono
-                      />
-                      {inspectedSource.testMessage && (
-                        <DetailRow
-                          label="testMessage"
-                          value={inspectedSource.testMessage}
-                        />
-                      )}
-                      {inspectedSource.testDurationMs !== undefined && (
-                        <DetailRow
-                          label="testDurationMs"
-                          value={`${inspectedSource.testDurationMs} ms`}
-                          mono
-                        />
-                      )}
                     </div>
                   </DetailSection>
 
@@ -2316,8 +2286,8 @@ export function ConfigCenter() {
                                   {boundScriptArchive === undefined
                                     ? "请重新选择一个本地脚本档案。"
                                     : boundScriptArchive.enabled
-                                      ? "现在可以执行源审计和 CatVod 入口。"
-                                      : "先在设置中启用档案，再执行源审计。"}
+                                      ? "现在可以测试该源并使用 CatVod 入口。"
+                                      : "先在设置中启用档案，再测试该源。"}
                                 </p>
                               </div>
                             </div>
@@ -2355,10 +2325,55 @@ export function ConfigCenter() {
                       </DetailSection>
                     )}
 
-                  {inspectedSource.testOperations &&
-                    inspectedSource.testOperations.length > 0 && (
-                      <DetailSection title="能力审计">
-                        <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+                  <DetailSection title="测试结果">
+                    <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+                      <DetailRow
+                        label="状态"
+                        value={testStatusLabel(inspectedSource)}
+                      />
+                      {inspectedSource.testMessage && (
+                        <DetailRow
+                          label="说明"
+                          value={inspectedSource.testMessage}
+                        />
+                      )}
+                      {inspectedSource.testItemCount !== undefined &&
+                        inspectedSource.testStatus === "passed" && (
+                          <DetailRow
+                            label={
+                              inspectedSource.sourceType === "live"
+                                ? "识别频道"
+                                : "识别内容"
+                            }
+                            value={`${inspectedSource.testItemCount} 个`}
+                          />
+                        )}
+                      {inspectedSource.testCategoryCount !== undefined &&
+                        inspectedSource.testStatus === "passed" && (
+                          <DetailRow
+                            label={
+                              inspectedSource.sourceType === "live"
+                                ? "识别分组"
+                                : "识别分类"
+                            }
+                            value={`${inspectedSource.testCategoryCount} 个`}
+                          />
+                        )}
+                      {inspectedSource.testDurationMs !== undefined && (
+                        <DetailRow
+                          label="耗时"
+                          value={`${inspectedSource.testDurationMs} ms`}
+                        />
+                      )}
+                      <DetailRow
+                        label="累计请求"
+                        value={`${inspectedSource.requestCount} 次`}
+                      />
+                    </div>
+
+                    {inspectedSource.testOperations &&
+                      inspectedSource.testOperations.length > 0 && (
+                        <div className="mt-2.5 rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
                           {inspectedSource.testOperations.map((operation) => (
                             <div
                               key={`${operation.operation}-${operation.message}`}
@@ -2366,7 +2381,7 @@ export function ConfigCenter() {
                             >
                               <div className="min-w-0">
                                 <p className="font-medium text-foreground">
-                                  {operation.operation}
+                                  {operationLabel(operation.operation)}
                                 </p>
                                 <p className="mt-1 leading-5 text-muted-foreground">
                                   {operation.message}
@@ -2374,36 +2389,33 @@ export function ConfigCenter() {
                               </div>
                               <Badge
                                 variant="outline"
-                                className={cn("shrink-0", operationStatusClass(operation.status))}
+                                className={cn(
+                                  "shrink-0",
+                                  operationStatusClass(operation.status),
+                                )}
                               >
                                 {operationStatusLabel(operation.status)}
                               </Badge>
                             </div>
                           ))}
                         </div>
-                      </DetailSection>
-                    )}
+                      )}
+                  </DetailSection>
 
-                  <DetailSection title="远程地址">
+                  <DetailSection title="接口地址">
                     <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
-                      <DetailRow label="api" value={inspectedSource.api} mono />
+                      <DetailRow label="接口地址" value={inspectedSource.api} mono />
                       {inspectedSource.ext && (
-                        <DetailRow label="ext" value={inspectedSource.ext} mono />
+                        <DetailRow label="扩展参数" value={inspectedSource.ext} mono />
                       )}
                       {inspectedSource.jar && (
                         <DetailRow
-                          label="jar"
+                          label="远程 JAR"
                           value={inspectedSource.jar}
                           mono
                           danger
                         />
                       )}
-                    </div>
-                  </DetailSection>
-
-                  <DetailSection title="执行说明">
-                    <div className="rounded-lg border border-border/70 bg-card/40 p-3.5 text-xs leading-5 text-muted-foreground">
-                      {inspectedSource.capabilityNote}
                     </div>
                     {inspectedSource.jar && (
                       <div className="mt-2.5 flex items-start gap-2 rounded-lg border border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] p-3 text-xs leading-5 text-[color:var(--status-blocked)]">
@@ -2455,8 +2467,7 @@ export function ConfigCenter() {
                             aria-hidden="true"
                           />
                         )}
-                        审计{" "}
-                        {inspectedSource.sourceType === "live" ? "直播" : "CMS"}
+                        测试
                       </Button>
                     )}
                     <Button
@@ -2467,7 +2478,7 @@ export function ConfigCenter() {
                         void handleToggleSource(inspectedSource.key)
                       }
                     >
-                      {inspectedSource.enabled ? "停用资源源" : "启用资源源"}
+                      {inspectedSource.enabled ? "停用此源" : "启用此源"}
                     </Button>
                   </div>
                 </div>
@@ -2593,6 +2604,33 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
   );
 }
 
+/**
+ * A small icon that says whether this source has a working adapter.
+ *
+ * It replaces the words 可执行 / 未适配, which wrapped onto a second line and read as a status
+ * report rather than as a property of the source. The icon leads the adapter cell so the answer
+ * to "is this handled at all?" is the first thing seen.
+ */
+function AdapterPresenceBadge({ source }: { source: SourceRecord }) {
+  const usable = isTestableSource(source);
+  const Icon = usable ? CircleCheck : CircleX;
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        "size-5 shrink-0 justify-center rounded-full p-0",
+        usable
+          ? "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]"
+          : "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",
+      )}
+      title={usable ? "已有适配器" : "没有可用适配器"}
+    >
+      <Icon className="size-3" aria-hidden="true" />
+      <span className="sr-only">{usable ? "已有适配器" : "没有可用适配器"}</span>
+    </Badge>
+  );
+}
+
 function SourceStatusBadge({ source }: { source: SourceRecord }) {
   // A source with no working adapter cannot be tested at all, so the adapter verdict is the
   // final word and there is nothing further to say.
@@ -2656,6 +2694,44 @@ function SourceTestBadge({ source }: { source: SourceRecord }) {
       <Icon className="size-3.5" data-icon="inline-start" aria-hidden="true" />
       <span>{display.label}</span>
     </div>
+  );
+}
+
+/** Names a probe in the words a user reads, rather than the operation's internal id. */
+function operationLabel(operation: string) {
+  return (
+    {
+      catalog: "获取内容列表",
+      category: "读取分类",
+      detail: "读取详情",
+      playback: "解析播放地址",
+      search: "搜索",
+    }[operation] ?? operation
+  );
+}
+
+/** Describes how the source is parsed, in plain language. */
+function describeSourceDialect(dialect: string | null | undefined) {
+  if (!dialect) return "未知";
+  return (
+    {
+      tvbox: "TVBox 格式",
+      "json-http": "JSON 接口",
+      "http-extension": "HTTP 扩展",
+      "js-extension": "JavaScript 扩展",
+    }[dialect] ?? dialect
+  );
+}
+
+function testStatusLabel(source: SourceRecord) {
+  return (
+    {
+      untested: "尚未测试",
+      passed: "通过",
+      empty: "没有内容",
+      failed: "失败",
+      blocked: "未执行（缺少适配器）",
+    }[source.testStatus ?? "untested"] ?? "尚未测试"
   );
 }
 

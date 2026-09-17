@@ -17,9 +17,54 @@ pub(super) fn deserialize_sources(
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
-    serde_json::from_str(&value)
-        .map(Some)
-        .map_err(|error| format!("配置源快照解析失败：{error}"))
+    let mut sources: Vec<SourceRecord> = serde_json::from_str(&value)
+        .map_err(|error| format!("配置源快照解析失败：{error}"))?;
+    for source in &mut sources {
+        source.api = unwrap_local_proxy_url(&source.api);
+    }
+    Ok(Some(sources))
+}
+
+/// Unwraps a TVBox local-proxy URL into the address it actually points at.
+///
+/// Published configurations commonly route every source through the TVBox client's own loopback
+/// proxy, e.g. `http://127.0.0.1:9978/proxy?do=live&url=https://example.com/list.m3u`. That
+/// address only resolves while the TVBox app is running on this machine, so fetching it directly
+/// is wrong as well as refused by the address policy — and the refusal describes our rule rather
+/// than the real problem. The `url` parameter holds the source's actual address.
+///
+/// Applied when a document is read, so configurations imported before this existed are corrected
+/// without being re-imported. Only the loopback wrapper is unwrapped, and only when it carries a
+/// usable http(s) target; anything else is left exactly as it was.
+pub(crate) fn unwrap_local_proxy_url(value: &str) -> String {
+    let trimmed = value.trim();
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        return value.to_string();
+    }
+    let Ok(parsed) = reqwest::Url::parse(trimmed) else {
+        return value.to_string();
+    };
+    let Some(host) = parsed.host_str() else {
+        return value.to_string();
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let is_loopback =
+        host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "0.0.0.0";
+    if !is_loopback {
+        return value.to_string();
+    }
+    let target = parsed
+        .query_pairs()
+        .find(|(key, _)| key == "url" || key == "target")
+        .map(|(_, value)| value.into_owned());
+    match target {
+        Some(target)
+            if target.starts_with("http://") || target.starts_with("https://") =>
+        {
+            target
+        }
+        _ => value.to_string(),
+    }
 }
 
 fn ensure_unique_source_keys(sources: &mut [SourceRecord]) {
@@ -1098,6 +1143,51 @@ mod tests {
         assert_eq!(updated_value["sites"][0]["testItemCount"], 8);
         assert_eq!(untouched.sources[0].test_status, None);
         assert_eq!(untouched_value["sites"][0]["testStatus"], Value::Null);
+    }
+
+    #[test]
+    fn a_loopback_proxy_wrapper_is_unwrapped_to_its_target() {
+        // Configurations imported before this was handled keep the wrapper in their stored
+        // snapshot, so reading a document has to correct it rather than requiring a re-import.
+        assert_eq!(
+            unwrap_local_proxy_url(
+                "http://127.0.0.1:9978/proxy?do=live&url=https://x.szyyds.cn/bililive.m3u"
+            ),
+            "https://x.szyyds.cn/bililive.m3u"
+        );
+        assert_eq!(
+            unwrap_local_proxy_url("http://localhost:9978/proxy?url=https://example.com/a.m3u"),
+            "https://example.com/a.m3u"
+        );
+    }
+
+    #[test]
+    fn a_remote_url_that_merely_has_a_url_parameter_is_left_alone() {
+        // Only a loopback host is a local proxy; a real server taking a `url` parameter must be
+        // requested exactly as given.
+        for url in [
+            "https://example.com/proxy?url=https://other.example/x.m3u",
+            "https://example.com/api.php/provide/vod/",
+            "./libs/tv/tvlive.txt",
+            "http://127.0.0.1:9978/proxy?do=live",
+            "http://127.0.0.1:9978/proxy?url=file:///etc/passwd",
+        ] {
+            assert_eq!(unwrap_local_proxy_url(url), url, "{url} should be unchanged");
+        }
+    }
+
+    #[test]
+    fn stored_sources_are_unwrapped_when_read() {
+        let sources = vec![test_live_source()];
+        let mut wrapped = sources.clone();
+        wrapped[0].api =
+            "http://127.0.0.1:9978/proxy?do=live&url=https://x.szyyds.cn/bililive.m3u".to_string();
+
+        let read = deserialize_sources(Some(serialize_sources(&wrapped).unwrap()))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(read[0].api, "https://x.szyyds.cn/bililive.m3u");
     }
 
     #[test]

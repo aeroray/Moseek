@@ -866,8 +866,45 @@ function normalizeParseServices(values: unknown): ParseServiceRecord[] {
   });
 }
 
-function resolveConfiguredUrl(value: string, baseUrl?: string) {
+/**
+ * Unwraps a TVBox local-proxy URL into the address it actually points at.
+ *
+ * Many published configurations route every source through the TVBox client's own loopback
+ * proxy, e.g. `http://127.0.0.1:9978/proxy?do=live&url=https://example.com/list.m3u`. That
+ * address only works while the TVBox app is running on this machine, so fetching it directly is
+ * both wrong (the proxy is not there) and refused by the address policy, which reports it as
+ * "local addresses are not authorised" — a message that describes our rule rather than the real
+ * problem. The `url` parameter is the source's actual address, so it is used instead.
+ *
+ * Only the loopback wrapper is unwrapped, and only when it carries a usable http(s) target.
+ * Anything else is returned untouched so nothing is silently rewritten.
+ */
+export function unwrapLocalProxyUrl(value: string) {
   const trimmed = value.trim();
+  if (!/^https?:\/\//i.test(trimmed)) return trimmed;
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return trimmed;
+  }
+  const host = parsed.hostname.toLowerCase();
+  const isLoopback =
+    host === "127.0.0.1" ||
+    host === "localhost" ||
+    host === "::1" ||
+    host === "[::1]" ||
+    host === "0.0.0.0";
+  if (!isLoopback) return trimmed;
+  // `url` is the parameter TVBox uses; `target` appears in a few variants.
+  const target = parsed.searchParams.get("url") ?? parsed.searchParams.get("target");
+  if (!target) return trimmed;
+  const decoded = target.trim();
+  return /^https?:\/\//i.test(decoded) ? decoded : trimmed;
+}
+
+function resolveConfiguredUrl(value: string, baseUrl?: string) {
+  const trimmed = unwrapLocalProxyUrl(value);
   if (!trimmed || !baseUrl || /^[a-z][a-z\d+.-]*:/i.test(trimmed)) {
     return trimmed;
   }

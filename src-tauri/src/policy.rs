@@ -54,7 +54,9 @@ pub(crate) fn validate_remote_url(url: &Url) -> Result<(), String> {
         return Err("只允许 HTTP 或 HTTPS 地址".to_string());
     }
     let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
-    let denied = "本机和局域网地址默认未授权，请在设置中主动开启".to_string();
+    // The wording names the actual problem. It used to say "enable this in settings", pointing at
+    // a switch that does not exist: the rule is fixed and the address simply cannot be used.
+    let denied = format!("{host} 是本机或局域网地址，Moseek 不会请求它");
     if is_disallowed_host(host) {
         return Err(denied);
     }
@@ -300,7 +302,7 @@ async fn build_http_client(url: &Url) -> Result<Client, String> {
     let resolved_address = match host.parse::<IpAddr>() {
         Ok(address) => {
             if is_disallowed_ip(address) {
-                return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
+                return Err(format!("{host} 是本机或局域网地址，Moseek 不会请求它"));
             }
             address
         }
@@ -309,7 +311,7 @@ async fn build_http_client(url: &Url) -> Result<Client, String> {
             // Any disallowed address rejects the host outright, matching the rule applied to a
             // literal address: a name that can reach the local network is not a name we contact.
             if addresses.iter().any(|address| is_disallowed_ip(address.ip())) {
-                return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
+                return Err(format!("{host} 解析到本机或局域网地址，Moseek 不会请求它"));
             }
             addresses
                 .first()

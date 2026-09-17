@@ -212,22 +212,89 @@ describe("config center", () => {
     expect(screen.queryByText("可用的源")).not.toBeInTheDocument();
   });
 
-  it("states whether an adapter is working instead of repeating the status badge", () => {
-    // The adapter cell showed the adapter's own execution badge, so a blocked source read
-    // "已阻止" twice in the same row.
+  it("leads the adapter cell with an icon saying whether an adapter exists", () => {
+    // The words 可执行 / 未适配 wrapped onto a second line and read as a status report. An icon
+    // badge in front answers "is this handled at all?" first, which is the question that matters
+    // before the adapter's name.
     renderCenter();
     chooseFilter("不可用");
 
-    const rows = screen.getAllByRole("row");
-    const blockedRow = rows.find((row) => row.textContent?.includes("不可用的源"));
+    const blockedRow = screen
+      .getAllByRole("row")
+      .find((row) => row.textContent?.includes("不可用的源"));
     expect(blockedRow).toBeTruthy();
-    expect(within(blockedRow as HTMLElement).getByText("未适配")).toBeInTheDocument();
+    expect(
+      within(blockedRow as HTMLElement).getByText("没有可用适配器"),
+    ).toBeInTheDocument();
+    // The old wording is gone, so nothing wraps onto a second line.
+    expect(
+      within(blockedRow as HTMLElement).queryByText("未适配"),
+    ).not.toBeInTheDocument();
 
     chooseFilter("可用");
     const okRow = screen
       .getAllByRole("row")
       .find((row) => row.textContent?.includes("可用的源"));
-    expect(within(okRow as HTMLElement).getByText("可执行")).toBeInTheDocument();
+    expect(
+      within(okRow as HTMLElement).getByText("已有适配器"),
+    ).toBeInTheDocument();
+    expect(
+      within(okRow as HTMLElement).queryByText("可执行"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the table header in place while the list scrolls", () => {
+    // jsdom cannot scroll, so the class contract that makes the header stick is what is pinned.
+    // It only works because the table wrapper is not itself a scroll container: a sticky header
+    // inside one sticks to that box instead of the outer region and never appears to stick.
+    renderCenter();
+
+    const header = document.querySelector("[data-slot='table-header']");
+    expect(header?.className).toContain("sticky");
+    expect(header?.className).toContain("top-0");
+    expect(
+      document.querySelector("[data-slot='table-container']")?.className,
+    ).toContain("overflow-visible");
+  });
+
+  it("lines the enable and action columns up with their headers", () => {
+    // The header was centred while the cells were right-aligned, so the switch and the buttons
+    // sat in a different place from the labels above them.
+    renderCenter();
+
+    const heads = [...document.querySelectorAll("thead th")];
+    const enableHead = heads.find((h) => h.textContent?.trim() === "启用");
+    const actionHead = heads.find((h) => h.textContent?.trim() === "操作");
+    expect(enableHead?.className).toContain("text-center");
+    expect(actionHead?.className).toContain("text-center");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("可用的源"));
+    const cells = [...(row as HTMLElement).querySelectorAll("td")];
+    // The enable cell and the action cell both centre their contents.
+    expect(cells[cells.length - 2].className).toContain("text-center");
+    expect(
+      cells[cells.length - 1].querySelector("div")?.className,
+    ).toContain("justify-center");
+  });
+
+  it("puts the adapter badge before the adapter name", () => {
+    // The badge answers "is this handled at all?", which is the question to settle before
+    // reading which adapter handles it.
+    renderCenter();
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("可用的源"));
+    const cell = (row as HTMLElement).querySelectorAll("td")[2];
+    const badge = cell.querySelector("[data-slot='badge']");
+    const name = cell.querySelector("span.truncate");
+    expect(badge).toBeTruthy();
+    expect(name).toBeTruthy();
+    expect(
+      badge!.compareDocumentPosition(name!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("does not offer an enable switch for a source that cannot run", () => {
