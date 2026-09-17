@@ -9,14 +9,66 @@ use reqwest::{
 };
 use serde_json::Value;
 
+/// How long a DNS lookup may take before the request is abandoned.
+///
+/// `to_socket_addrs` is a blocking call with no timeout of its own, and on a machine whose
+/// resolver is slow or unreachable it can block for the operating system's full retry budget —
+/// minutes, not seconds. Because it ran on the async executor before the client existed, a test
+/// of one dead host could hold its worker indefinitely while the UI sat on "测速中" with no way
+/// out. The lookup now happens on the blocking pool under a hard deadline.
+const DNS_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn resolve_host(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>, String> {
+    (host, port)
+        .to_socket_addrs()
+        .map(|addresses| addresses.collect())
+        .map_err(|error| format!("无法解析远程主机：{error}"))
+}
+
+async fn resolve_host_with_timeout(
+    host: &str,
+    port: u16,
+) -> Result<Vec<std::net::SocketAddr>, String> {
+    let owned_host = host.to_string();
+    let lookup = tokio::task::spawn_blocking(move || resolve_host(&owned_host, port));
+    match tokio::time::timeout(DNS_TIMEOUT, lookup).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("域名解析任务失败：{error}")),
+        Err(_) => Err(format!(
+            "域名解析超时（{} 秒）：{host}",
+            DNS_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+/// Rejects addresses that must never be contacted.
+///
+/// A literal address is checked here, including IPv4-mapped IPv6 forms such as `[::ffff:127.0.0.1]`
+/// which `Url::host_str` returns bracketed and `is_disallowed_host` therefore misses. Whether a
+/// *name* resolves to a disallowed address is settled in [`build_http_client`], which has to
+/// resolve anyway to pin the connection — checking it in both places meant two blocking lookups
+/// per request, and the one here could not be given a deadline without making this function async
+/// at twenty call sites.
 pub(crate) fn validate_remote_url(url: &Url) -> Result<(), String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("只允许 HTTP 或 HTTPS 地址".to_string());
     }
     let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
-    let port = url.port_or_known_default().unwrap_or(443);
-    if is_disallowed_host(host) || resolves_to_disallowed_address(host, port) {
-        return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
+    let denied = "本机和局域网地址默认未授权，请在设置中主动开启".to_string();
+    if is_disallowed_host(host) {
+        return Err(denied);
+    }
+    // `host_str` returns a bracketed IPv6 literal with the brackets, so strip them before
+    // parsing. Without this `[::ffff:127.0.0.1]` parsed as neither a host name nor an address and
+    // slipped past the check.
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(address) = literal.parse::<IpAddr>() {
+        if is_disallowed_ip(address) {
+            return Err(denied);
+        }
     }
     Ok(())
 }
@@ -124,7 +176,7 @@ async fn fetch_response_bytes(
     let mut current_url = url;
     for redirect_index in 0..=max_redirects {
         validate_remote_url(&current_url)?;
-        let client = build_http_client(&current_url)?;
+        let client = build_http_client(&current_url).await?;
         let mut request = client.request(method.clone(), current_url.clone());
         for (name, value) in headers {
             if matches!(
@@ -240,18 +292,36 @@ fn describe_http_error(message: String, error: &reqwest::Error) -> String {
     described
 }
 
-fn build_http_client(url: &Url) -> Result<Client, String> {
+async fn build_http_client(url: &Url) -> Result<Client, String> {
     let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
     let port = url.port_or_known_default().unwrap_or(443);
-    let resolved_address = (host, port)
-        .to_socket_addrs()
-        .map_err(|error| format!("无法解析远程主机：{error}"))?
-        .find(|address| !is_disallowed_ip(address.ip()))
-        .ok_or_else(|| "远程主机没有通过网络地址策略".to_string())?;
+    // This is the one place a name is resolved, so it is also where the address policy is
+    // enforced for names. A literal address is used as-is and checked directly.
+    let resolved_address = match host.parse::<IpAddr>() {
+        Ok(address) => {
+            if is_disallowed_ip(address) {
+                return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
+            }
+            address
+        }
+        Err(_) => {
+            let addresses = resolve_host_with_timeout(host, port).await?;
+            // Any disallowed address rejects the host outright, matching the rule applied to a
+            // literal address: a name that can reach the local network is not a name we contact.
+            if addresses.iter().any(|address| is_disallowed_ip(address.ip())) {
+                return Err("本机和局域网地址默认未授权，请在设置中主动开启".to_string());
+            }
+            addresses
+                .first()
+                .map(|address| address.ip())
+                .ok_or_else(|| "远程主机没有解析出可用地址".to_string())?
+        }
+    };
     Client::builder()
         .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
-        .resolve(host, resolved_address)
+        .resolve(host, std::net::SocketAddr::new(resolved_address, port))
         .user_agent("Moseek/0.1")
         .build()
         .map_err(|error| error.to_string())
@@ -267,13 +337,6 @@ fn is_disallowed_host(host: &str) -> bool {
     }
     match normalized_host.parse::<IpAddr>() {
         Ok(address) => is_disallowed_ip(address),
-        Err(_) => false,
-    }
-}
-
-fn resolves_to_disallowed_address(host: &str, port: u16) -> bool {
-    match (host, port).to_socket_addrs() {
-        Ok(mut addresses) => addresses.any(|address| is_disallowed_ip(address.ip())),
         Err(_) => false,
     }
 }
@@ -303,7 +366,7 @@ fn is_disallowed_ip(address: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_remote_url;
+    use super::{resolve_host, validate_remote_url, DNS_TIMEOUT};
 
     #[test]
     fn policy_rejects_non_http_and_local_urls() {
@@ -313,5 +376,44 @@ mod tests {
             validate_remote_url(&"http://[::ffff:127.0.0.1]/config.json".parse().unwrap()).is_err()
         );
         assert!(validate_remote_url(&"http://localhost/config.json".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn policy_still_allows_ordinary_public_urls() {
+        // The literal-address check must not become a blanket rejection.
+        assert!(validate_remote_url(&"https://example.com/config.json".parse().unwrap()).is_ok());
+        assert!(validate_remote_url(&"https://93.184.216.34/config.json".parse().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn policy_rejects_private_and_link_local_literals() {
+        for url in [
+            "http://10.0.0.1/a",
+            "http://192.168.1.1/a",
+            "http://172.16.0.1/a",
+            "http://169.254.169.254/a",
+            "http://[fe80::1]/a",
+            "http://[fd00::1]/a",
+        ] {
+            assert!(
+                validate_remote_url(&url.parse().unwrap()).is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolving_a_literal_address_needs_no_lookup() {
+        // A literal must not be handed to the resolver, so it cannot be delayed by one.
+        let addresses = resolve_host("93.184.216.34", 443).unwrap();
+        assert_eq!(addresses.len(), 1);
+        assert_eq!(addresses[0].ip().to_string(), "93.184.216.34");
+    }
+
+    #[test]
+    fn the_dns_deadline_is_bounded() {
+        // The whole point of the fix: an unresolvable name must fail in seconds, not in the
+        // resolver's own retry budget, because the UI waits on this call.
+        assert!(DNS_TIMEOUT.as_secs() > 0 && DNS_TIMEOUT.as_secs() <= 15);
     }
 }

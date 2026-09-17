@@ -122,8 +122,40 @@ fn is_hls_manifest(text: &str) -> bool {
         .starts_with("#EXTM3U")
 }
 
+/// The outer bound on a live test, matching the CMS one: a live source is fetched over HTTP, and
+/// a host that accepts a connection then stalls would otherwise leave the UI on "测速中".
+const LIVE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 #[tauri::command]
 pub async fn test_live_source(source: SourceRecord) -> Result<SourceTestResult, String> {
+    let source_key = source.key.clone();
+    let started = Instant::now();
+    let tested_at = "刚刚".to_string();
+    match tokio::time::timeout(LIVE_TEST_TIMEOUT, test_live_source_inner(source)).await {
+        Ok(result) => result,
+        Err(_) => Ok(SourceTestResult {
+            source_key,
+            status: "failed".to_string(),
+            adapter_id: "builtin-live".to_string(),
+            message: format!(
+                "测试超时（{} 秒），已停止等待。该源可能无法访问或响应过慢。",
+                LIVE_TEST_TIMEOUT.as_secs()
+            ),
+            item_count: 0,
+            category_count: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            tested_at,
+            operations: vec![SourceOperationResult {
+                operation: "catalog".to_string(),
+                status: "failed".to_string(),
+                message: "测试超时。".to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            }],
+        }),
+    }
+}
+
+async fn test_live_source_inner(source: SourceRecord) -> Result<SourceTestResult, String> {
     let source_key = source.key.clone();
     let started = Instant::now();
     let tested_at = "刚刚".to_string();

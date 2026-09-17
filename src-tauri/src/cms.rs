@@ -239,8 +239,46 @@ async fn fetch_catalog(
     }
 }
 
+/// A whole source test must finish within this budget, however many requests it makes.
+///
+/// The per-request timeout does not bound the test: a source is probed with a catalog request,
+/// then a detail request, and each redirect is a fresh request. A host that accepts connections
+/// and then stalls can therefore hold a test open for a multiple of the request timeout, and the
+/// UI shows "测速中" for that whole time. This is the outer bound that makes the operation
+/// terminable no matter what the remote does.
+const SOURCE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
+
 #[tauri::command]
 pub async fn test_source(source: SourceRecord) -> Result<SourceTestResult, String> {
+    let source_key = source.key.clone();
+    let tested_at = "刚刚".to_string();
+    let started = Instant::now();
+    let adapter_id = SiteAdapterKind::from_source(&source).id().to_string();
+    match tokio::time::timeout(SOURCE_TEST_TIMEOUT, test_source_inner(source)).await {
+        Ok(result) => result,
+        Err(_) => Ok(SourceTestResult {
+            source_key,
+            status: "failed".to_string(),
+            adapter_id,
+            message: format!(
+                "测试超时（{} 秒），已停止等待。该源可能无法访问或响应过慢。",
+                SOURCE_TEST_TIMEOUT.as_secs()
+            ),
+            item_count: 0,
+            category_count: 0,
+            duration_ms: started.elapsed().as_millis() as u64,
+            tested_at,
+            operations: vec![SourceOperationResult {
+                operation: "catalog".to_string(),
+                status: "failed".to_string(),
+                message: "测试超时。".to_string(),
+                duration_ms: started.elapsed().as_millis() as u64,
+            }],
+        }),
+    }
+}
+
+async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, String> {
     let adapter = SiteAdapterKind::from_source(&source);
     let adapter_id = adapter.id().to_string();
     let source_key = source.key.clone();

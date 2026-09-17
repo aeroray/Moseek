@@ -49,11 +49,22 @@ const capabilityConfig: Record<
 interface CapabilityBadgeProps {
   status: CapabilityStatus;
   compact?: boolean;
+  /**
+   * Overrides the wording while keeping the status's colour and icon.
+   *
+   * The adapter verdict and the test verdict are different questions — "we can run this" versus
+   * "this actually works" — but they share a palette. This lets a caller say 待测试 in the
+   * adapter colour without redefining the status.
+   */
+  label?: string;
+  className?: string;
 }
 
 export function CapabilityBadge({
   status,
   compact = false,
+  label,
+  className,
 }: CapabilityBadgeProps) {
   const config = capabilityConfig[status];
   const Icon = config.icon;
@@ -61,10 +72,10 @@ export function CapabilityBadge({
   return (
     <Badge
       variant="outline"
-      className={cn("gap-1.5 font-medium", config.className)}
+      className={cn("gap-1.5 font-medium", config.className, className)}
     >
       <Icon className="size-3" data-icon="inline-start" aria-hidden="true" />
-      {!compact && config.label}
+      {!compact && (label ?? config.label)}
     </Badge>
   );
 }

@@ -133,6 +133,7 @@ import type {
   SourceOperationStatus,
   ScriptArchiveSummary,
   SourceRecord,
+  SourceTestResult,
   SourceTestStatus,
 } from "@/types/moseek";
 
@@ -147,6 +148,16 @@ import type {
 type SourceFilter = "available" | "unusable" | "all";
 type AdapterFilter = "all" | AdapterExecution;
 type ImportMode = "remote" | "local";
+
+/**
+ * How many sources a batch test probes at once.
+ *
+ * Serial testing made a large configuration take the sum of every source's latency. Testing all
+ * of them at once would open as many sockets as there are sources, which trips rate limits and
+ * makes every failure look like a local network problem. Four is enough to hide a slow source
+ * behind three others without looking like a flood.
+ */
+const TEST_CONCURRENCY = 4;
 
 function matchesSourceFilter(
   capability: CapabilityStatus,
@@ -211,6 +222,19 @@ export function ConfigCenter() {
   });
   const [isFetchingRemote, setIsFetchingRemote] = useState(false);
   const [testingKeys, setTestingKeys] = useState<Set<string>>(new Set());
+  /**
+   * Set while a batch test is running, so the batch can be stopped and so individual rows know
+   * not to offer their own start button. Cancelling only stops us from starting the next batch
+   * of work: the requests already in flight cannot be recalled, but they are bounded by the
+   * backend's own timeout, and their results are discarded once cancelled.
+   */
+  const [isBatchTesting, setIsBatchTesting] = useState(false);
+  const cancelTestRef = useRef(false);
+  /**
+   * Releases the running batch when the user cancels. Held in a ref so the row-level cancel
+   * buttons and the toolbar button all reach the same in-flight run.
+   */
+  const cancelRunRef = useRef<(() => void) | null>(null);
   const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
     [],
   );
@@ -466,23 +490,37 @@ export function ConfigCenter() {
     }
   };
 
-  const handleRemoveSources = async (
+  const [removeRequest, setRemoveRequest] = useState<{
+    keys: string[];
+    description: string;
+  } | null>(null);
+
+  const handleRemoveSources = (
     keys: string[],
     description: string,
   ) => {
     if (keys.length === 0) return;
-    const confirmed = window.confirm(
-      `将从当前配置中删除${description}，共 ${keys.length} 个。此操作会同时修改原始配置，不能撤销。`,
-    );
-    if (!confirmed) return;
+    // Deleting rewrites the configuration the user imported, so the confirmation is a real
+    // dialog that names what is about to go and what will change, rather than a browser confirm
+    // that can be dismissed without reading.
+    setRemoveRequest({ keys, description });
+  };
+
+  const confirmRemoveSources = async () => {
+    const request = removeRequest;
+    if (!request) return;
+    setRemoveRequest(null);
     try {
-      await removeSources(keys);
-      if (inspectedSourceKey && keys.includes(inspectedSourceKey)) {
+      await removeSources(request.keys);
+      if (
+        inspectedSourceKey &&
+        request.keys.includes(inspectedSourceKey)
+      ) {
         setInspectedSourceKey(null);
       }
       setParseState({
         type: "success",
-        message: `已从配置中删除 ${keys.length} 个源。`,
+        message: `已从配置中删除 ${request.keys.length} 个源。`,
       });
     } catch (error) {
       setParseState({
@@ -566,6 +604,39 @@ export function ConfigCenter() {
     }
   };
 
+  /**
+   * Tests a source as part of a batch, without touching the shared status banner.
+   *
+   * Running the whole list used to write one banner message per source, so the last one to
+   * finish overwrote every other result and the summary was the only thing the user ever saw.
+   * Per-source outcomes belong on the rows; the banner is for the batch.
+   */
+  const runBatchTest = async (source: SourceRecord) => {
+    setTestingKeys((current) => new Set(current).add(source.key));
+    try {
+      const result = await testSource(source);
+      if (!result) return null;
+      const persistedDocument =
+        activeConfigId === null
+          ? null
+          : await updateSourceTest(activeConfigId, source.key, result);
+      if (persistedDocument) {
+        setConfigDocument(persistedDocument);
+      } else {
+        setSourceTestResult(source.key, result);
+      }
+      return result;
+    } catch {
+      return null;
+    } finally {
+      setTestingKeys((current) => {
+        const next = new Set(current);
+        next.delete(source.key);
+        return next;
+      });
+    }
+  };
+
   const handleTestAll = async () => {
     if (testableSources.length === 0) {
       setParseState({
@@ -574,14 +645,60 @@ export function ConfigCenter() {
       });
       return;
     }
-    const results = [];
-    for (const source of testableSources) {
-      const result = await handleTestSource(source);
-      if (result) results.push(result);
-    }
+    setIsBatchTesting(true);
+    cancelTestRef.current = false;
+    // Cancelling has to resolve the batch immediately rather than wait for the requests already
+    // in flight. Those cannot be recalled, and a source that hangs is exactly the case the user
+    // is cancelling to escape — waiting for it would reproduce the freeze the button exists to
+    // fix. The stragglers settle on their own (the backend bounds them) and their results are
+    // dropped because the run is already over.
+    let releaseCancellation: () => void = () => {};
+    const cancelledSignal = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    const cancelRequested = () => {
+      cancelTestRef.current = true;
+      releaseCancellation();
+    };
+    cancelRunRef.current = cancelRequested;
+
+    const queue = [...testableSources];
+    const results: SourceTestResult[] = [];
+    // A small worker pool rather than one request at a time or all at once: testing serially made
+    // a 70-source configuration take as long as the sum of every source's latency, while firing
+    // every request together would open dozens of sockets and trip rate limits.
+    const workers = Array.from(
+      { length: Math.min(TEST_CONCURRENCY, queue.length) },
+      async () => {
+        for (;;) {
+          if (cancelTestRef.current) return;
+          const source = queue.shift();
+          if (!source) return;
+          const outcome = await Promise.race([
+            runBatchTest(source).then((result) => ({ result })),
+            cancelledSignal.then(() => null),
+          ]);
+          if (cancelTestRef.current) return;
+          if (outcome?.result) results.push(outcome.result);
+        }
+      },
+    );
+    await Promise.all(workers);
+    const cancelled = cancelTestRef.current;
+    cancelRunRef.current = null;
+    setIsBatchTesting(false);
+
     const passedCount = results.filter(
       (result) => result.status === "passed",
     ).length;
+    if (cancelled) {
+      setParseState({
+        type: "error",
+        title: "测速已取消",
+        message: `已测试 ${results.length}/${testableSources.length} 个源，其中 ${passedCount} 个通过。其余未测试的源保持原状态。`,
+      });
+      return;
+    }
     setParseState({
       type:
         results.length === testableSources.length &&
@@ -591,6 +708,10 @@ export function ConfigCenter() {
       title: "源审计完成",
       message: `已完成 ${results.length}/${testableSources.length} 个源审计，其中 ${passedCount} 个通过。通过审计的 CMS 可进入影视库，直播源可进入直播。`,
     });
+  };
+
+  const handleCancelTestAll = () => {
+    cancelRunRef.current?.();
   };
 
   const handleLocalFile = async (file: File) => {
@@ -1037,31 +1158,44 @@ export function ConfigCenter() {
                       all three act on the configuration this list is showing, and a page-level
                       "导出" gave no clue what was being exported. */}
                   <div className="flex shrink-0 items-center gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="gap-1.5"
-                      disabled={testableSources.length === 0 || testingKeys.size > 0}
-                      onClick={() => void handleTestAll()}
-                    >
-                      {testingKeys.size > 0 ? (
-                        <LoaderCircle
-                          className="size-3.5 animate-spin"
+                    {/* While a batch is running the same control becomes the way out of it. A
+                        separate cancel button beside a running one leaves the user choosing
+                        between two similar buttons; replacing it means the escape hatch is
+                        always where the start button was. */}
+                    {isBatchTesting ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        onClick={handleCancelTestAll}
+                      >
+                        <X
+                          className="size-3.5"
                           data-icon="inline-start"
                           aria-hidden="true"
                         />
-                      ) : (
+                        取消测速 ({testingKeys.size}/{testableSources.length})
+                      </Button>
+                    ) : (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={
+                          testableSources.length === 0 || testingKeys.size > 0
+                        }
+                        onClick={() => void handleTestAll()}
+                      >
                         <FlaskConical
                           className="size-3.5"
                           data-icon="inline-start"
                           aria-hidden="true"
                         />
-                      )}
-                      {testingKeys.size > 0
-                        ? `测速中 ${testingKeys.size}/${testableSources.length}`
-                        : `全部测速 (${testableSources.length})`}
-                    </Button>
+                        {`全部测速 (${testableSources.length})`}
+                      </Button>
+                    )}
                     <Button
                       type="button"
                       variant="outline"
@@ -1171,10 +1305,18 @@ export function ConfigCenter() {
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        {filteredSources.map((source) => (
+                        {filteredSources.map((source) => {
+                          const isTesting = testingKeys.has(source.key);
+                          return (
                           <TableRow
                             key={source.key}
-                            className="cursor-pointer"
+                            className={cn(
+                              "cursor-pointer",
+                              // While this row is being tested its own cells fade, so it is obvious
+                              // which of several concurrent tests is still outstanding without
+                              // watching a spinner in the corner.
+                              isTesting && "opacity-60 [&>td]:blur-[1px]",
+                            )}
                             onClick={() => setInspectedSourceKey(source.key)}
                           >
                             <TableCell className="pl-6">
@@ -1208,7 +1350,7 @@ export function ConfigCenter() {
                               </div>
                             </TableCell>
                             <TableCell>
-                              <CapabilityBadge status={source.capability} />
+                              <SourceStatusBadge source={source} />
                             </TableCell>
                             <TableCell className="max-w-52">
                               {/* The adapter's own execution badge said "已阻止" a second time,
@@ -1263,26 +1405,46 @@ export function ConfigCenter() {
                                   type="button"
                                   variant="ghost"
                                   size="sm"
-                                  className="gap-1.5"
-                                  disabled={testingKeys.has(source.key)}
-                                  onClick={() => void handleTestSource(source)}
+                                  className="group/test relative gap-1.5"
+                                  disabled={isTesting && !isBatchTesting}
+                                  onClick={() =>
+                                    isTesting
+                                      ? handleCancelTestAll()
+                                      : void handleTestSource(source)
+                                  }
                                 >
-                                  {testingKeys.has(source.key) ? (
-                                    <LoaderCircle
-                                      className="size-3.5 animate-spin"
-                                      data-icon="inline-start"
-                                      aria-hidden="true"
-                                    />
+                                  {isTesting ? (
+                                    <>
+                                      {/* A row stuck on "测试中" is where a user looks when they
+                                          want it to stop, so the cancel control appears exactly
+                                          there on hover rather than only in the toolbar. */}
+                                      <LoaderCircle
+                                        className="size-3.5 animate-spin group-hover/test:hidden"
+                                        data-icon="inline-start"
+                                        aria-hidden="true"
+                                      />
+                                      <X
+                                        className="hidden size-3.5 group-hover/test:block"
+                                        data-icon="inline-start"
+                                        aria-hidden="true"
+                                      />
+                                      <span className="group-hover/test:hidden">
+                                        测试中
+                                      </span>
+                                      <span className="hidden group-hover/test:inline">
+                                        取消
+                                      </span>
+                                    </>
                                   ) : (
-                                    <TestTube2
-                                      className="size-3.5"
-                                      data-icon="inline-start"
-                                      aria-hidden="true"
-                                    />
+                                    <>
+                                      <TestTube2
+                                        className="size-3.5"
+                                        data-icon="inline-start"
+                                        aria-hidden="true"
+                                      />
+                                      测试
+                                    </>
                                   )}
-                                  {testingKeys.has(source.key)
-                                    ? "测试中"
-                                    : "测试"}
                                 </Button>
                               ) : (
                                 <Button
@@ -1329,7 +1491,8 @@ export function ConfigCenter() {
                               )}
                             </TableCell>
                           </TableRow>
-                        ))}
+                          );
+                        })}
                       </TableBody>
                     </Table>
                     <ScrollBar />
@@ -1625,6 +1788,30 @@ export function ConfigCenter() {
             </Card>
           </TabsContent>
         </Tabs>
+
+        {/* The status banner belongs to the page, not to the import dialog. It used to be
+            rendered inside that dialog, so every message it carried — a finished test run, a
+            cancelled one, a deleted source — was invisible unless the user happened to have the
+            import dialog open. Only the import-specific notice stays there. */}
+        {parseState.type !== "idle" && !importOpen && (
+          <Alert
+            variant={parseState.type === "error" ? "destructive" : "default"}
+          >
+            {parseState.type === "success" ? (
+              <Check className="size-4" data-icon="inline-start" aria-hidden="true" />
+            ) : (
+              <AlertTriangle className="size-4" data-icon="inline-start" aria-hidden="true" />
+            )}
+            <AlertTitle>
+              {/* A caller-supplied title wins. Forcing "需要修正配置" onto every error meant a
+                  cancelled test or a failed source audit announced itself as a broken
+                  configuration file, which is a different problem entirely. */}
+              {parseState.title ??
+                (parseState.type === "success" ? "解析完成" : "需要修正配置")}
+            </AlertTitle>
+            <AlertDescription>{parseState.message}</AlertDescription>
+          </Alert>
+        )}
       </div>
 
       <Dialog
@@ -1820,9 +2007,11 @@ export function ConfigCenter() {
                   <AlertTriangle className="size-4" data-icon="inline-start" aria-hidden="true" />
                 )}
                 <AlertTitle>
-                  {parseState.type === "success"
-                    ? (parseState.title ?? "解析完成")
-                    : "需要修正配置"}
+                  {/* A caller-supplied title wins. Forcing "需要修正配置" onto every error meant
+                      a cancelled test or a failed source audit announced itself as a broken
+                      configuration file, which is a different problem entirely. */}
+                  {parseState.title ??
+                    (parseState.type === "success" ? "解析完成" : "需要修正配置")}
                 </AlertTitle>
                 <AlertDescription>{parseState.message}</AlertDescription>
               </Alert>
@@ -1900,6 +2089,57 @@ export function ConfigCenter() {
             </Button>
             <Button type="button" variant="destructive" onClick={handleDelete}>
               删除配置
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(removeRequest)}
+        onOpenChange={(open) => {
+          if (!open) setRemoveRequest(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>从配置中删除这些源？</DialogTitle>
+            <DialogDescription asChild>
+              <div className="flex flex-col gap-3 text-sm">
+                <p>
+                  将删除{removeRequest?.description}，共{" "}
+                  <span className="font-semibold text-foreground">
+                    {removeRequest?.keys.length ?? 0}
+                  </span>{" "}
+                  个源。
+                </p>
+                <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+                  <li>
+                    <span className="text-foreground">原始配置会被一起修改</span>
+                    ，不是只在这里隐藏。之后重新导入同一份配置，这些源不会回来。
+                  </li>
+                  <li>该配置的导出结果里也不会再包含它们。</li>
+                  <li>
+                    相关收藏和播放记录会一并清理。
+                  </li>
+                  <li>此操作不能撤销。</li>
+                </ul>
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setRemoveRequest(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void confirmRemoveSources()}
+            >
+              确认删除
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2312,6 +2552,30 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
       </div>
     </DetailSection>
   );
+}
+
+function SourceStatusBadge({ source }: { source: SourceRecord }) {
+  // A source with no working adapter cannot be tested at all, so the adapter verdict is the
+  // final word and there is nothing further to say.
+  if (!isTestableSource(source)) {
+    return <CapabilityBadge status={source.capability} />;
+  }
+  // The adapter being able to run is a statement about our code, not about the source. Showing
+  // 可用 before anything has been fetched told the user the resource works when all we knew was
+  // that we had a way to ask. Until a test returns something, the honest word is 待测试.
+  const status: SourceTestStatus = source.testStatus ?? "untested";
+  const display: Record<
+    SourceTestStatus,
+    { label: string; tone: CapabilityStatus }
+  > = {
+    untested: { label: "待测试", tone: "needs-adapter" },
+    passed: { label: "可用", tone: "supported" },
+    empty: { label: "无内容", tone: "partial" },
+    failed: { label: "测试失败", tone: "blocked" },
+    blocked: { label: "不可用", tone: "blocked" },
+  };
+  const { label, tone } = display[status];
+  return <CapabilityBadge status={tone} label={label} />;
 }
 
 function SourceTestBadge({ source }: { source: SourceRecord }) {

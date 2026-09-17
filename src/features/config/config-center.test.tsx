@@ -2,8 +2,9 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConfigCenter } from "@/features/config/config-center";
+import { testSource as testSourceCommand } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
-import type { SourceRecord } from "@/types/moseek";
+import type { SourceRecord, SourceTestResult } from "@/types/moseek";
 
 // The page's job is to answer three questions in order: which configuration am I on, what is in
 // it, and which of its sources actually work. These tests pin that shape, and the vocabulary a
@@ -25,6 +26,23 @@ vi.mock("@/lib/tauri", () => ({
   findConfigDuplicate: vi.fn(async () => null),
   fetchConfigUrl: vi.fn(),
 }));
+
+function testResult(
+  overrides: Partial<SourceTestResult> = {},
+): SourceTestResult {
+  return {
+    sourceKey: "ok",
+    status: "passed",
+    adapterId: "builtin-cms",
+    message: "请求成功。",
+    itemCount: 12,
+    categoryCount: 3,
+    durationMs: 40,
+    testedAt: "刚刚",
+    operations: [],
+    ...overrides,
+  } as SourceTestResult;
+}
 
 function source(overrides: Partial<SourceRecord>): SourceRecord {
   return {
@@ -336,34 +354,42 @@ describe("config center", () => {
     ).toBeInTheDocument();
   });
 
-  it("removes a source through the store after confirming", async () => {
+  it("removes a source through the store after confirming in a dialog", async () => {
+    // The confirmation is a real dialog rather than window.confirm: deleting rewrites the
+    // configuration the user imported, so the risk has to be stated where it can be read.
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
     renderCenter();
     chooseFilter("不可用");
 
     fireEvent.click(screen.getByRole("button", { name: "删除 不可用的源" }));
+
+    // Nothing happens until the dialog is confirmed.
+    expect(removeSources).not.toHaveBeenCalled();
+    expect(screen.getByText("从配置中删除这些源？")).toBeInTheDocument();
+    expect(screen.getByText(/原始配置会被一起修改/)).toBeInTheDocument();
+    expect(screen.getByText(/此操作不能撤销/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
     await waitFor(() => {
       expect(removeSources).toHaveBeenCalledWith(["no"]);
     });
   });
 
-  it("does not delete anything when the confirmation is declined", () => {
+  it("does not delete anything when the dialog is dismissed", () => {
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
-    vi.spyOn(window, "confirm").mockReturnValue(false);
     renderCenter();
     chooseFilter("不可用");
 
     fireEvent.click(screen.getByRole("button", { name: "删除 不可用的源" }));
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
     expect(removeSources).not.toHaveBeenCalled();
   });
 
-  it("offers to clear every unusable source at once", async () => {
-    // The unusable sources are usually the majority, and removing them one at a time is the
-    // tedious part.
+  it("asks for confirmation before clearing every unusable source", async () => {
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
     renderCenter();
@@ -373,6 +399,11 @@ describe("config center", () => {
     expect(bulk.textContent).toContain("2");
 
     fireEvent.click(bulk);
+
+    expect(removeSources).not.toHaveBeenCalled();
+    expect(screen.getByText(/全部不可用的源/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
     await waitFor(() => {
       expect(removeSources).toHaveBeenCalledWith(["no", "wait"]);
@@ -396,5 +427,182 @@ describe("config center", () => {
     expect(
       screen.queryByRole("button", { name: /清理不可用/ }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows the test result on the page, not only inside the import dialog", async () => {
+    // The status banner used to live inside the import dialog, so every message it carried — a
+    // finished test run, a cancelled one, a deleted source — was invisible unless the user
+    // happened to have that dialog open.
+    vi.mocked(testSourceCommand).mockResolvedValue(testResult());
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /^测试$/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/源审计完成/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText("导入配置")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("names a cancelled run as cancelled rather than a broken configuration", async () => {
+    // Every error state was titled "需要修正配置", so a cancelled test claimed the imported
+    // configuration file was malformed.
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>(() => {}),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /取消测速/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("测速已取消")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("需要修正配置")).not.toBeInTheDocument();
+  });
+
+  it("says a source is untested rather than calling it usable", () => {
+    // "可用" before anything has been fetched told the user the resource works when all we knew
+    // was that we had a way to ask. The adapter running is a statement about our code.
+    renderCenter();
+
+    const okRow = screen
+      .getAllByRole("row")
+      .find((row) => row.textContent?.includes("可用的源"));
+    expect(within(okRow as HTMLElement).getByText("待测试")).toBeInTheDocument();
+    expect(within(okRow as HTMLElement).queryByText("可用")).not.toBeInTheDocument();
+  });
+
+  it("calls a source usable only after a test found content", () => {
+    useAppStore.setState({
+      sources: [{ ...supported, testStatus: "passed", testItemCount: 12 }],
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 1, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    render(<ConfigCenter />);
+
+    // Scoped to the row: "可用" also appears as a filter option.
+    const okRow = screen
+      .getAllByRole("row")
+      .find((row) => row.textContent?.includes("可用的源"));
+    expect(within(okRow as HTMLElement).getByText("可用")).toBeInTheDocument();
+    expect(within(okRow as HTMLElement).queryByText("待测试")).not.toBeInTheDocument();
+  });
+
+  it("reports a test that found nothing as 无内容 rather than usable", () => {
+    useAppStore.setState({
+      sources: [{ ...supported, testStatus: "empty" }],
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 1, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    render(<ConfigCenter />);
+
+    expect(screen.getByText("无内容")).toBeInTheDocument();
+  });
+
+  it("tests several sources at once instead of one after another", async () => {
+    // Serial testing made a large configuration take the sum of every source's latency. The
+    // concurrency is proved by observing how many requests are open simultaneously.
+    const pending: Array<(value: SourceTestResult) => void> = [];
+    let maxConcurrent = 0;
+    vi.mocked(testSourceCommand).mockImplementation(
+      () =>
+        new Promise<SourceTestResult>((resolve) => {
+          pending.push(resolve);
+          maxConcurrent = Math.max(maxConcurrent, pending.length);
+        }),
+    );
+    useAppStore.setState({
+      sources: [
+        { ...supported, key: "a", name: "源一" },
+        { ...supported, key: "b", name: "源二" },
+        { ...supported, key: "c", name: "源三" },
+      ],
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 3, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    render(<ConfigCenter />);
+
+    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+
+    await waitFor(() => {
+      expect(pending.length).toBeGreaterThan(1);
+    });
+    expect(maxConcurrent).toBeGreaterThan(1);
+
+    // Let every outstanding request finish so the run can settle.
+    for (const resolve of pending) resolve(testResult());
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /取消测速/ })).not.toBeInTheDocument();
+    });
+  });
+
+  it("offers a way to stop a batch that is running", async () => {
+    // A batch used to be unstoppable: the button became a disabled "测速中" label and the only
+    // way out was to wait for every source, including the ones that hang.
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>(() => {}),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+
+    const cancel = await screen.findByRole("button", { name: /取消测速/ });
+    expect(cancel).toBeInTheDocument();
+
+    fireEvent.click(cancel);
+
+    // Cancelling ends the run and reports what was and was not covered.
+    await waitFor(() => {
+      expect(screen.getByText("测速已取消")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/其余未测试的源保持原状态/)).toBeInTheDocument();
+  });
+
+  it("marks the row being tested so it is clear which one is outstanding", async () => {
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>(() => {}),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+
+    await waitFor(() => {
+      const blurred = document.querySelectorAll("tr.opacity-60");
+      expect(blurred.length).toBeGreaterThan(0);
+    });
+  });
+
+  it("lets a single row's test be cancelled from the row itself", async () => {
+    // The row is where a user looks when they want it to stop, so the cancel control appears
+    // there on hover rather than only in the toolbar.
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>(() => {}),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+
+    const rowCancel = await screen.findByRole("button", { name: /测试中/ });
+    expect(rowCancel.textContent).toContain("取消");
   });
 });
