@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -42,16 +42,15 @@ import {
 } from "@/lib/live-adapter";
 import {
   isTauriRuntime,
-  probeStreamUrls,
   resolvePlayback,
   type PlaybackResolution,
-  type StreamProbe,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
 import { MediaPlayer, usesHlsPipeline } from "@/features/player/media-player";
 import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
+import { useStreamProbes } from "@/features/player/use-stream-probes";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
 const maxAutomaticStreamAttempts = 3;
@@ -91,13 +90,7 @@ export function LiveView() {
     useState<MediaDiagnosticSnapshot | null>(null);
   const [resolvedStream, setResolvedStream] =
     useState<PlaybackResolution | null>(null);
-  const [streamIndex, setStreamIndex] = useState(0);
   const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(false);
-  const [streamProbes, setStreamProbes] = useState<StreamProbe[] | null>(null);
-  const [isProbing, setIsProbing] = useState(false);
-  const streamIndexRef = useRef(0);
-  /** Set once the user picks a line by hand, so auto-probing stops overriding their choice. */
-  const pinnedStreamRef = useRef(false);
 
   useEffect(() => {
     if (!liveSources.some((source) => source.key === liveSourceKey)) {
@@ -197,6 +190,16 @@ export function LiveView() {
       ? selectedChannel.streamUrls
       : [selectedChannel.streamUrl]
     : [];
+  // Probing lives in a shared hook because the favourites page plays a saved channel through the
+  // same logic; a second copy would drift and the difference would surface as "this channel plays
+  // in 电视直播 but not in 我的收藏".
+  const {
+    probes: streamProbes,
+    isProbing,
+    streamIndex,
+    selectStream,
+    probeFor,
+  } = useStreamProbes(streamUrls, selectedChannel?.id ?? "");
   const selectedStreamUrl =
     streamUrls[streamIndex] ?? streamUrls[0] ?? selectedChannel?.streamUrl;
   const playerUrl =
@@ -207,76 +210,10 @@ export function LiveView() {
     ? "hls"
     : "native";
 
+  // A line change invalidates the resolved address, which belonged to the previous line.
   useEffect(() => {
-    streamIndexRef.current = 0;
-    pinnedStreamRef.current = false;
-    setStreamIndex(0);
-    setStreamProbes(null);
-  }, [selectedChannel?.id]);
-
-  // Probe every line at once and start on the one that actually answers fastest.
-  //
-  // The workspace used to try lines strictly in order: line 1 was handed to the player, the
-  // player spent its own timeout failing, and only then was line 2 attempted. That is a long
-  // serial wait and the working line is often not the first. Probing in parallel costs one
-  // small request per line and picks a usable one immediately.
-  //
-  // The user's manual choice always wins: once they click a line number, `pinnedStreamRef`
-  // suppresses the automatic override.
-  const streamUrlsKey = streamUrls.join("|");
-  useEffect(() => {
-    let cancelled = false;
-    if (pinnedStreamRef.current || !selectedChannel || streamUrls.length < 2) {
-      setStreamProbes(null);
-      setIsProbing(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-    setIsProbing(true);
-    // `probeStreamUrls` returns null outside the desktop runtime, where the command is not
-    // registered. Calling `.then` on that crashed the whole workspace — the channel list and the
-    // player both disappeared, so a preview build could not play anything with more than one
-    // line. Probing is an optimisation, so its absence must degrade to "no probe results".
-    void Promise.resolve(probeStreamUrls(streamUrls))
-      .then((probes) => {
-        if (cancelled) return;
-        setStreamProbes(probes);
-        if (!probes) return;
-        // Pick the quickest reachable line here rather than trusting the backend's ordering,
-        // so the choice stays correct even if the list arrives unsorted.
-        const fastest = probes
-          .filter((probe) => probe.ok)
-          .reduce<StreamProbe | null>(
-            (best, probe) =>
-              !best || probe.elapsedMs < best.elapsedMs ? probe : best,
-            null,
-          );
-        if (!fastest) return;
-        // Only move if the current line is not itself usable, so a working default is not
-        // disturbed.
-        const current = probes.find(
-          (probe) => probe.index === streamIndexRef.current,
-        );
-        if (!current?.ok) {
-          streamIndexRef.current = fastest.index;
-          setStreamIndex(fastest.index);
-          setResolvedStream(null);
-        }
-      })
-      .catch(() => {
-        // A failed probe is not a failure to play: the player still gets the selected line.
-        if (!cancelled) setStreamProbes(null);
-      })
-      .finally(() => {
-        if (!cancelled) setIsProbing(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-    // Keyed on the channel plus the resolved URL list: `streamUrls` is rebuilt on every render,
-    // so depending on the array itself would re-probe in a loop.
-  }, [selectedChannel?.id, streamUrlsKey]);
+    setResolvedStream(null);
+  }, [streamIndex, selectedChannel?.id]);
 
   const tryNextStream = () => {
     // Every line has already been tested concurrently, so walking them one at a time would
@@ -288,11 +225,8 @@ export function LiveView() {
     if (streamProbes) return false;
     const lastAttemptIndex =
       Math.min(streamUrls.length, maxAutomaticStreamAttempts) - 1;
-    if (streamIndexRef.current >= lastAttemptIndex) return false;
-    const nextIndex = streamIndexRef.current + 1;
-    streamIndexRef.current = nextIndex;
-    setStreamIndex(nextIndex);
-    setResolvedStream(null);
+    if (streamIndex >= lastAttemptIndex) return false;
+    selectStream(streamIndex + 1);
     return true;
   };
 
@@ -399,13 +333,11 @@ export function LiveView() {
   const groupFilterValue = isSearching ? ALL_GROUPS_ID : groupId;
 
   const isFavorite = selectedChannel
-    ? liveFavorites.includes(selectedChannel.id)
+    ? liveFavorites.some((favorite) => favorite.key === selectedChannel.id)
     : false;
 
   const selectChannel = (channel: LiveChannel) => {
     setSelectedChannelId(channel.id);
-    streamIndexRef.current = 0;
-    setStreamIndex(0);
     setResolvedStream(null);
     setDiagnostic(null);
   };
@@ -567,7 +499,7 @@ export function LiveView() {
               variant={isFavorite ? "secondary" : "outline"}
               size="sm"
               className="gap-1.5"
-              onClick={() => toggleLiveFavorite(selectedChannel)}
+              onClick={() => toggleLiveFavorite(selectedChannel, liveSource?.name)}
             >
               <Heart
                 className={cn("size-3.5", isFavorite && "fill-primary text-primary")}
@@ -628,7 +560,9 @@ export function LiveView() {
               {filteredChannels.length > 0 ? (
                 filteredChannels.map((channel) => {
                   const isCur = channel.id === selectedChannel?.id;
-                  const isFav = liveFavorites.includes(channel.id);
+                  const isFav = liveFavorites.some(
+                    (favorite) => favorite.key === channel.id,
+                  );
 
                   return (
                     <button
@@ -745,58 +679,53 @@ export function LiveView() {
             <div className="flex items-center gap-2 shrink-0">
               {streamUrls.length > 1 && (
                 <div className="flex items-center gap-1 text-xs text-muted-foreground">
-                  {/* The label states that every line was tested at once, and how many answered.
-                      It used to say only "线路：", which — combined with the old behaviour of
-                      walking lines 1, 2, 3 in sequence after a failure — made the workspace look
-                      like it was polling. It never was: the probe is concurrent. Saying so is
-                      what makes the numbers read as one simultaneous result rather than a queue
-                      being worked through. */}
-                  <span>
-                    {isProbing
-                      ? `并发测速 ${streamUrls.length} 条线路…`
-                      : streamProbes
-                        ? `线路（并发测速 ${
-                            streamProbes.filter((probe) => probe.ok).length
-                          }/${streamProbes.length} 可用）：`
-                        : "线路："}
-                  </span>
+                  {/* No caption. The buttons carry the state themselves — spinning while the
+                      concurrent probe runs, normal when the line answered, grey when it did not —
+                      so a sentence above them restating the same thing was noise. */}
                   {streamUrls.map((_, idx) => {
-                    const probe = streamProbes?.find((item) => item.index === idx);
+                    const probe = probeFor(idx);
+                    const isPending = isProbing && !probe;
+                    const isDead = Boolean(probe && !probe.ok);
                     return (
                       <button
                         key={idx}
                         type="button"
-                        onClick={() => {
-                          // A deliberate choice outranks the automatic probe result.
-                          pinnedStreamRef.current = true;
-                          streamIndexRef.current = idx;
-                          setStreamIndex(idx);
-                          setResolvedStream(null);
-                        }}
+                        onClick={() => selectStream(idx)}
                         title={
                           probe
                             ? probe.ok
                               ? `可用 · ${probe.elapsedMs} 毫秒`
                               : probe.message
-                            : undefined
+                            : isPending
+                              ? "正在测试"
+                              : undefined
                         }
                         aria-label={
-                          probe
-                            ? `线路 ${idx + 1}${probe.ok ? "（可用）" : "（不可用）"}`
-                            : `线路 ${idx + 1}`
+                          isPending
+                            ? `线路 ${idx + 1}（测试中）`
+                            : probe
+                              ? `线路 ${idx + 1}${probe.ok ? "（可用）" : "（不可用）"}`
+                              : `线路 ${idx + 1}`
                         }
                         className={cn(
-                          "size-6 rounded text-xs font-bold transition-colors",
+                          "relative size-6 rounded text-xs font-bold transition-colors",
                           streamIndex === idx
                             ? "bg-primary text-primary-foreground"
                             : "bg-muted/80 hover:bg-muted text-foreground",
-                          // A probed-dead line is dimmed so the working ones stand out, but it
-                          // stays clickable: the probe can be wrong about an operator-restricted
-                          // address, and the user may know better.
-                          probe && !probe.ok && streamIndex !== idx && "opacity-40",
+                          // A line that did not answer is greyed out, so the usable ones are
+                          // legible at a glance. It stays clickable: the probe can be wrong about
+                          // an operator-restricted address, and the user may know better.
+                          isDead && streamIndex !== idx && "text-muted-foreground/40",
                         )}
                       >
-                        {idx + 1}
+                        {isPending ? (
+                          <span
+                            className="mx-auto block size-3 animate-spin rounded-full border-2 border-current/25 border-t-current"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          idx + 1
+                        )}
                       </button>
                     );
                   })}

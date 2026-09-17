@@ -516,15 +516,55 @@ describe("LiveView concurrent line probing", () => {
     });
   });
 
-  it("says the lines were tested at once, so the numbers do not read as polling", async () => {
-    // The old label was just "线路：". Combined with walking lines 1, 2, 3 in sequence after a
-    // failure, the workspace looked like it was polling when the probe is concurrent.
+  it("shows each line's state on its own button, with no caption above them", async () => {
+    // The caption used to spell out "线路（并发测速 1/3 可用）：", restating what the buttons can
+    // show directly. Each button now carries its own state: spinning while the concurrent probe
+    // runs, normal when the line answered, grey when it did not.
     probeStreamUrls.mockResolvedValue([probe(0, false), probe(1, true), probe(2, false)]);
     render(<LiveView />);
 
     await waitFor(() => {
-      expect(screen.getByText(/并发测速 1\/3 可用/)).toBeInTheDocument();
+      expect(screen.getByLabelText("线路 2（可用）")).toBeInTheDocument();
     });
+
+    // No sentence restating the probe.
+    expect(screen.queryByText(/并发测速/)).toBeNull();
+    expect(screen.queryByText(/线路（/)).toBeNull();
+
+    // A dead line is greyed out; a live one keeps the normal foreground.
+    expect(screen.getByLabelText("线路 1（不可用）")).toHaveClass(
+      "text-muted-foreground/40",
+    );
+    expect(screen.getByLabelText("线路 2（可用）")).not.toHaveClass(
+      "text-muted-foreground/40",
+    );
+  });
+
+  it("spins each line button while its probe is still running", async () => {
+    // The probe resolves once for all lines, so before it lands every button is pending.
+    let resolveProbe: (value: unknown) => void = () => {};
+    probeStreamUrls.mockReturnValue(
+      new Promise((resolve) => {
+        resolveProbe = resolve;
+      }),
+    );
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("线路 1（测试中）")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("线路 2（测试中）")).toBeInTheDocument();
+    expect(screen.getByLabelText("线路 3（测试中）")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveProbe([probe(0, true), probe(1, false), probe(2, false)]);
+    });
+
+    // Once results arrive the buttons report their outcome instead of spinning.
+    await waitFor(() => {
+      expect(screen.getByLabelText("线路 1（可用）")).toBeInTheDocument();
+    });
+    expect(screen.queryByLabelText("线路 1（测试中）")).toBeNull();
   });
 
   it("does not walk the remaining lines once the probe has already compared them", async () => {

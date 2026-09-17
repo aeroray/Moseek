@@ -389,7 +389,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
 
 function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
   const isFavorite = useAppStore((state) =>
-    state.favorites.some((favorite) => favorite.id === item.id),
+    state.favorites.some((favorite) => favorite.item.id === item.id),
   );
 
   return (

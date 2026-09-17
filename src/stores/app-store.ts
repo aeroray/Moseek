@@ -8,16 +8,70 @@ import {
   type StoredConfigDocument,
 } from "@/lib/tauri";
 import type {
+  FavoriteProgress,
+  LiveFavorite,
   PlayHistoryRecord,
   SourceRecord,
   SourceTestResult,
   ThemeMode,
   ViewKey,
   LiveChannel,
+  VodFavorite,
   VodItem,
 } from "@/types/moseek";
 
 const sourceToggleQueues = new Map<string, Promise<void>>();
+
+/**
+ * Upgrades favourites saved before they carried a snapshot.
+ *
+ * The old shape was a bare `VodItem[]`, so a stored entry is identifiable by having no `key`.
+ * Rather than dropping them — which would silently empty a user's collection on upgrade — each
+ * is wrapped with the snapshot it already is. The progress is lost for those entries because the
+ * old shape never stored any; that is unavoidable, and it is better than discarding the list.
+ */
+export function migrateFavorites(persisted: unknown): VodFavorite[] {
+  if (!Array.isArray(persisted)) return [];
+  const favorites: VodFavorite[] = [];
+  for (const entry of persisted) {
+    if (!entry || typeof entry !== "object") continue;
+    const candidate = entry as Partial<VodFavorite> & Partial<VodItem>;
+    if (typeof candidate.key === "string" && candidate.item) {
+      favorites.push(candidate as VodFavorite);
+      continue;
+    }
+    if (typeof candidate.id === "string" && typeof candidate.name === "string") {
+      const item = candidate as VodItem;
+      favorites.push({
+        key: `${item.sourceKey}:${item.id}`,
+        item,
+        sourceKey: item.sourceKey,
+        sourceName: item.sourceName,
+        savedAt: new Date().toISOString(),
+        progress: null,
+      });
+    }
+  }
+  return favorites;
+}
+
+/**
+ * Upgrades live favourites saved as bare channel-id strings.
+ *
+ * There is nothing to recover from a string alone, so those entries are dropped rather than
+ * turned into a placeholder that would fail when opened. The channel list is one click away and
+ * re-favouriting is cheap; a broken entry that looks like a favourite is worse.
+ */
+export function migrateLiveFavorites(persisted: unknown): LiveFavorite[] {
+  if (!Array.isArray(persisted)) return [];
+  return persisted.filter(
+    (entry): entry is LiveFavorite =>
+      Boolean(entry) &&
+      typeof entry === "object" &&
+      typeof (entry as LiveFavorite).key === "string" &&
+      Boolean((entry as LiveFavorite).channel),
+  );
+}
 
 interface AppStore {
   activeView: ViewKey;
@@ -36,9 +90,9 @@ interface AppStore {
   normalizedConfig: string;
   lastImportedAt: string | null;
   history: PlayHistoryRecord[];
-  favorites: VodItem[];
+  favorites: VodFavorite[];
   playbackProgress: Record<string, number>;
-  liveFavorites: string[];
+  liveFavorites: LiveFavorite[];
   setActiveView: (view: ViewKey) => void;
   setTheme: (theme: ThemeMode) => void;
   setAutoEpgEnabled: (enabled: boolean) => void;
@@ -60,7 +114,11 @@ interface AppStore {
   clearFavorites: () => void;
   toggleFavorite: (item: VodItem) => void;
   setPlaybackProgress: (historyId: string, seconds: number) => void;
-  toggleLiveFavorite: (channel: LiveChannel) => void;
+  /** Records where the user left off in a favourite, so the page can resume it later. */
+  setFavoriteProgress: (itemId: string, progress: FavoriteProgress) => void;
+  toggleLiveFavorite: (channel: LiveChannel, sourceName?: string) => void;
+  /** Replaces a favourite's snapshot after its episodes were refreshed from a live source. */
+  refreshFavorite: (key: string, item: VodItem) => void;
 }
 
 export const useAppStore = create<AppStore>()(
@@ -274,17 +332,57 @@ export const useAppStore = create<AppStore>()(
       // are deliberately left alone.
       clearHistory: () => set({ history: [], playbackProgress: {} }),
       clearFavorites: () => set({ favorites: [] }),
+      /**
+       * Adds or removes a favourite, storing the item whole.
+       *
+       * The snapshot is deliberate: a favourite has to survive its source being renamed,
+       * reordered or deleted, and it has to be playable the instant it is opened. Keeping only a
+       * key would make the favourites page depend on a source that may no longer exist.
+       *
+       * Re-favouriting keeps the existing progress. Losing your place because you toggled the
+       * heart off and back on would be a surprising way to lose it.
+       */
       toggleFavorite: (item) =>
         set((state) => {
-          const isFavorite = state.favorites.some(
-            (favorite) => favorite.id === item.id,
+          const key = `${item.sourceKey}:${item.id}`;
+          const existing = state.favorites.find(
+            (favorite) => favorite.key === key,
           );
+          if (existing) {
+            return {
+              favorites: state.favorites.filter(
+                (favorite) => favorite.key !== key,
+              ),
+            };
+          }
           return {
-            favorites: isFavorite
-              ? state.favorites.filter((favorite) => favorite.id !== item.id)
-              : [item, ...state.favorites],
+            favorites: [
+              {
+                key,
+                item,
+                sourceKey: item.sourceKey,
+                sourceName: item.sourceName,
+                savedAt: new Date().toISOString(),
+                progress: null,
+              },
+              ...state.favorites,
+            ],
           };
         }),
+      setFavoriteProgress: (itemId, progress) =>
+        set((state) => ({
+          favorites: state.favorites.map((favorite) =>
+            favorite.item.id === itemId
+              ? { ...favorite, progress }
+              : favorite,
+          ),
+        })),
+      refreshFavorite: (key, item) =>
+        set((state) => ({
+          favorites: state.favorites.map((favorite) =>
+            favorite.key === key ? { ...favorite, item } : favorite,
+          ),
+        })),
       setPlaybackProgress: (historyId, seconds) =>
         set((state) => {
           const progress = Math.max(0, Math.floor(seconds));
@@ -298,12 +396,33 @@ export const useAppStore = create<AppStore>()(
             ),
           };
         }),
-      toggleLiveFavorite: (channel) =>
-        set((state) => ({
-          liveFavorites: state.liveFavorites.includes(channel.id)
-            ? state.liveFavorites.filter((id) => id !== channel.id)
-            : [channel.id, ...state.liveFavorites],
-        })),
+      toggleLiveFavorite: (channel, sourceName) =>
+        set((state) => {
+          const exists = state.liveFavorites.some(
+            (favorite) => favorite.key === channel.id,
+          );
+          if (exists) {
+            return {
+              liveFavorites: state.liveFavorites.filter(
+                (favorite) => favorite.key !== channel.id,
+              ),
+            };
+          }
+          // The channel is stored whole, with every stream URL it had. Its source may be
+          // deleted tomorrow; the channel still has to play.
+          return {
+            liveFavorites: [
+              {
+                key: channel.id,
+                channel,
+                sourceKey: channel.sourceKey,
+                sourceName: sourceName ?? channel.sourceKey,
+                savedAt: new Date().toISOString(),
+              },
+              ...state.liveFavorites,
+            ],
+          };
+        }),
     }),
     {
       name: "moseek-app-state",
@@ -330,12 +449,14 @@ export const useAppStore = create<AppStore>()(
               : (persisted?.activeView ?? currentState.activeView),
           sources: keepUserContent ? (persisted?.sources ?? []) : [],
           history: keepUserContent ? (persisted?.history ?? []) : [],
-          favorites: keepUserContent ? (persisted?.favorites ?? []) : [],
+          favorites: keepUserContent
+            ? migrateFavorites(persisted?.favorites)
+            : [],
           playbackProgress: keepUserContent
             ? (persisted?.playbackProgress ?? {})
             : {},
           liveFavorites: keepUserContent
-            ? (persisted?.liveFavorites ?? [])
+            ? migrateLiveFavorites(persisted?.liveFavorites)
             : [],
         };
       },

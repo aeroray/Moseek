@@ -12,8 +12,6 @@ import {
 
 import { CapabilityBadge } from "@/components/capability-badge";
 import { MediaPoster } from "@/components/media-poster";
-import { parseParseServices } from "@/features/config/config-parser";
-import { normalizeCatVodResult } from "@/features/script/catvod-normalizer";
 import { getVodDetail } from "@/features/browse/cms-adapter";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -47,10 +45,9 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAppStore } from "@/stores/app-store";
+import { inferMediaKind } from "@/lib/media-kind";
 import {
-  executeScriptArchive,
   isTauriRuntime,
-  resolvePlayback,
   type PlaybackResolution,
 } from "@/lib/tauri";
 import { cn } from "@/lib/utils";
@@ -63,6 +60,7 @@ import type {
 } from "@/types/moseek";
 import { MediaPlayer, type MediaStatus } from "@/features/player/media-player";
 import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
+import { resolveEpisodePlayback } from "@/features/player/episode-playback";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
 /**
@@ -89,6 +87,7 @@ export function PlayerView({
   const playbackProgress = useAppStore((state) => state.playbackProgress);
   const normalizedConfig = useAppStore((state) => state.normalizedConfig);
   const setPlaybackProgress = useAppStore((state) => state.setPlaybackProgress);
+  const setFavoriteProgress = useAppStore((state) => state.setFavoriteProgress);
 
   // The catalog row already carries play lines, so this starts from the item and is replaced
   // when the detail request returns a fuller record.
@@ -157,7 +156,9 @@ export function PlayerView({
   const mediaKind = activeEpisode
     ? inferMediaKind(activeEpisode.url)
     : ("unknown" as MediaKind);
-  const isFavorite = favorites.some((favorite) => favorite.id === item.id);
+  const isFavorite = favorites.some(
+    (favorite) => favorite.item.id === item.id,
+  );
   // The resolve effect keys off these primitives rather than the episode object. The detail
   // request replaces the play lines with fresh objects for the same episodes, so an object
   // dependency would re-run the effect on arrival, blank the player and resolve the same URL
@@ -187,39 +188,7 @@ export function PlayerView({
     }
     setResolvedPlayback(null);
     setStatus("loading");
-    const resolveEpisode = async () => {
-      let playbackUrl = episodeUrl;
-      let playbackHeaders: Record<string, string> = {};
-      if (
-        source.scriptArchiveId !== null &&
-        source.scriptArchiveId !== undefined &&
-        !/^https?:\/\//i.test(playbackUrl)
-      ) {
-        const scriptResult = await executeScriptArchive(
-          source.scriptArchiveId,
-          { url: playbackUrl, id: episodeId },
-          "parseIframe",
-        );
-        if (!scriptResult) throw new Error("脚本档案没有返回 parseIframe 结果");
-        const normalized = normalizeCatVodResult(
-          "parseIframe",
-          scriptResult.value,
-          { sourceKey: source.key, sourceName: source.name },
-        );
-        if (normalized.kind !== "playback" || !normalized.value) {
-          throw new Error("parseIframe 返回值无法转换为播放地址");
-        }
-        playbackUrl = normalized.value.url;
-        playbackHeaders = normalized.value.headers;
-      }
-      const resolution = await resolvePlayback(
-        playbackUrl,
-        parseParseServices(normalizedConfig),
-      );
-      if (!resolution) throw new Error("桌面运行时未返回播放解析结果");
-      return { ...resolution, headers: playbackHeaders };
-    };
-    void resolveEpisode()
+    void resolveEpisodePlayback(source, activeEpisode, normalizedConfig)
       .then((resolution) => {
         if (!cancelled) setResolvedPlayback(resolution);
       })
@@ -400,9 +369,23 @@ export function PlayerView({
                   poster={detail.poster}
                   resumeAt={resumeAt}
                   onPlayable={() => setIsPlayable(true)}
-                  onProgress={(seconds) =>
-                    setPlaybackProgress(historyId, seconds)
-                  }
+                  onProgress={(seconds) => {
+                    setPlaybackProgress(historyId, seconds);
+                    // Keep the favourite's own record in step. Watching from the library and
+                    // watching from 我的收藏 are the same activity, so leaving the library path
+                    // out would make a favourite resume from wherever it was last opened *from
+                    // the favourites page* — which is not what "where I left off" means.
+                    if (isFavorite) {
+                      setFavoriteProgress(detail.id, {
+                        lineId: activeLine?.id ?? "",
+                        episodeId: activeEpisode.id,
+                        episodeName: activeEpisode.name,
+                        seconds,
+                        episodeCount: activeLine?.episodes.length ?? 0,
+                        updatedAt: new Date().toISOString(),
+                      });
+                    }
+                  }}
                   onStatus={(nextStatus, message) => {
                     setStatus(nextStatus);
                     if (message) setDiagnostic(message);
@@ -695,11 +678,4 @@ export function descriptionOverflows(element: HTMLParagraphElement | null) {
   if (!element) return false;
   if (element.scrollHeight <= 0) return true;
   return element.scrollHeight > element.clientHeight + 1;
-}
-
-function inferMediaKind(url: string): MediaKind {
-  const normalizedUrl = url.toLowerCase();
-  if (normalizedUrl.includes(".m3u8")) return "hls";
-  if (normalizedUrl.includes(".mp4")) return "mp4";
-  return "unknown";
 }

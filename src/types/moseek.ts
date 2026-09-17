@@ -151,6 +151,57 @@ export interface LiveChannel {
   epgId?: string;
 }
 
+/**
+ * Where the user left off in a favourite.
+ *
+ * Stored with the favourite rather than looked up in `history`, because history is capped at 100
+ * entries and is cleared independently — a favourite must keep its own place, or the very thing
+ * that makes it worth favouriting is lost.
+ */
+export interface FavoriteProgress {
+  lineId: string;
+  episodeId: string;
+  episodeName: string;
+  /** Seconds into the episode. */
+  seconds: number;
+  /** Total episodes the work had when this was recorded, so an update is detectable. */
+  episodeCount: number;
+  updatedAt: string;
+}
+
+/**
+ * A favourited work, stored as a self-contained snapshot.
+ *
+ * The whole `VodItem` is kept, including its play lines and episode URLs, so opening a favourite
+ * does not depend on the source it came from: sources get renamed, reordered and deleted, and a
+ * favourite that only stored a key would break the moment that happened. This is also what makes
+ * the work's episodes available immediately, without a round trip before the player can start.
+ */
+export interface VodFavorite {
+  /** `${sourceKey}:${itemId}`. Item ids are only unique within a source. */
+  key: string;
+  item: VodItem;
+  /** The source it was saved from, for display and for relinking when it disappears. */
+  sourceKey: string;
+  sourceName: string;
+  savedAt: string;
+  progress: FavoriteProgress | null;
+}
+
+/**
+ * A favourited channel, also self-contained: name, logo and every stream URL are captured at the
+ * moment of favouriting, so the channel plays from the favourites page even if its source is
+ * later deleted or reordered.
+ */
+export interface LiveFavorite {
+  /** The channel id, which is already namespaced by source. */
+  key: string;
+  channel: LiveChannel;
+  sourceKey: string;
+  sourceName: string;
+  savedAt: string;
+}
+
 export interface LiveCatalog {
   channels: LiveChannel[];
   groups: LiveGroup[];
