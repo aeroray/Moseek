@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FavoritesView } from "@/features/browse/favorites-view";
@@ -28,10 +28,27 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
 });
 
 // The player needs a real media element; this suite is about the favourites page's own contract.
+// `onStatus` and `onProgress` are recorded on the global so the paths that could unmount or
+// re-render the player are actually reachable — an assertion that the player stayed mounted
+// passes either way if nothing can emit the event that would have removed it.
 vi.mock("@/features/player/media-player", () => ({
-  MediaPlayer: ({ title }: { title: string }) => (
-    <div data-testid="media-player">{title}</div>
-  ),
+  MediaPlayer: ({
+    title,
+    onStatus,
+    onProgress,
+  }: {
+    title: string;
+    onStatus?: (status: string, message?: string) => void;
+    onProgress?: (seconds: number) => void;
+  }) => {
+    const globals = globalThis as {
+      __favPlayerOnStatus?: typeof onStatus;
+      __favPlayerOnProgress?: typeof onProgress;
+    };
+    globals.__favPlayerOnStatus = onStatus;
+    globals.__favPlayerOnProgress = onProgress;
+    return <div data-testid="media-player">{title}</div>;
+  },
   usesHlsPipeline: () => true,
 }));
 
@@ -53,6 +70,23 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
     requestCount: 0,
     ...overrides,
   } as SourceRecord;
+}
+
+/**
+ * A detail response that is fresh each call, and that stops arriving after `limit` calls.
+ *
+ * Both properties matter. Returning the same object every time would keep `favorite.item`
+ * identical and hide a refresh loop entirely, because a real request produces a new object. And
+ * without the limit a loop spins React forever, so the suite hangs instead of failing — the
+ * bounded version turns that into a legible assertion failure.
+ */
+function boundedDetail(limit = 2) {
+  let calls = 0;
+  return async () => {
+    calls += 1;
+    if (calls > limit) return { data: null, mode: "empty" as const, error: null };
+    return { data: item(), mode: "remote" as const, error: null };
+  };
 }
 
 function item(overrides: Partial<VodItem> = {}): VodItem {
@@ -443,6 +477,104 @@ describe("FavoritesView", () => {
     fireEvent.click(trigger);
 
     expect(await screen.findByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("does not refetch the detail in a loop while the work is open", async () => {
+    // The refresh effect both read `favorite.item` and wrote it back through the store, so it
+    // re-triggered itself forever: each pass produced a new `item`, which handed the player a new
+    // `episode` object and reset it before it could start. That is what left the surface spinning
+    // on "正在准备播放" and made the picture flash and vanish.
+    useAppStore.setState({ favorites: [favorite()] });
+    // A fresh object per call, which is what a real request returns — a shared object would keep
+    // `favorite.item` identical and hide the loop entirely.
+    //
+    // After two calls the mock stops returning data, which is what makes a regression terminate
+    // instead of spinning React forever: with no data there is no store write, so the cycle has
+    // nothing to feed it and the test fails on the count rather than hanging the runner.
+    getVodDetail.mockImplementation(boundedDetail(2));
+
+    render(<FavoritesView onNavigate={() => {}} />);
+    fireEvent.click(screen.getByText("示例剧"));
+    await screen.findByTestId("media-player");
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    });
+
+    // One fetch per open. A third call means the refresh re-triggered itself.
+    expect(getVodDetail.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it("does not refetch the detail while progress is being reported", async () => {
+    // The refresh effect depends on `setItemWithProgress`, and that callback closed over
+    // `favorite.progress` — which the store replaces on every progress tick. A callback that gets
+    // a new identity every few seconds makes the effect re-run just as often, refetching the
+    // detail mid-playback on a timer.
+    useAppStore.setState({ favorites: [favorite()] });
+    getVodDetail.mockImplementation(boundedDetail(2));
+
+    render(<FavoritesView onNavigate={() => {}} />);
+    fireEvent.click(screen.getByText("示例剧"));
+    await screen.findByTestId("media-player");
+
+    const report = (
+      globalThis as { __favPlayerOnProgress?: (s: number) => void }
+    ).__favPlayerOnProgress;
+    expect(report).toBeTypeOf("function");
+
+    await act(async () => {
+      for (let seconds = 10; seconds <= 60; seconds += 10) {
+        report?.(seconds);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    });
+
+    // Progress ticks must not each trigger a detail fetch.
+    expect(getVodDetail.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+
+  it("does not restart the player when the episode list is refreshed", async () => {
+    // Refreshing replaces the episode objects, so an effect keyed on the object tears the player
+    // down and resolves the address again — the picture appears and then snaps back.
+    useAppStore.setState({ favorites: [favorite()] });
+    getVodDetail.mockImplementation(boundedDetail(2));
+
+    render(<FavoritesView onNavigate={() => {}} />);
+    fireEvent.click(screen.getByText("示例剧"));
+    await screen.findByTestId("media-player");
+
+    // Wait for the refresh to have replaced the episode list underneath the player.
+    await waitFor(() => {
+      expect(useAppStore.getState().favorites[0].item.name).toBe("示例剧");
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+
+    // The address was resolved once for this episode; a restart would resolve it again.
+    expect(resolvePlayback.mock.calls.length).toBe(1);
+    expect(screen.getByTestId("media-player")).toBeInTheDocument();
+  });
+
+  it("keeps the player mounted when it reports an ordinary status", async () => {
+    // The player's status messages were written to the same state as the resolve failure, so any
+    // message — including an ordinary "正在连接" — replaced the player with the failure screen.
+    useAppStore.setState({ favorites: [favorite()] });
+    render(<FavoritesView onNavigate={() => {}} />);
+    fireEvent.click(screen.getByText("示例剧"));
+
+    await screen.findByTestId("media-player");
+    const onStatus = (
+      globalThis as { __favPlayerOnStatus?: (s: string, m?: string) => void }
+    ).__favPlayerOnStatus;
+    expect(onStatus).toBeTypeOf("function");
+    act(() => {
+      onStatus?.("loading", "正在连接直播信号");
+    });
+
+    // Still a player, not the failure screen.
+    expect(screen.getByTestId("media-player")).toBeInTheDocument();
+    expect(screen.queryByText("无法播放当前内容")).toBeNull();
   });
 
   it("offers a way to the library when there is nothing favourited", () => {

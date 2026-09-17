@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Bookmark,
   ChevronLeft,
@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/empty";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { MediaPlayer } from "@/features/player/media-player";
+import { MediaPlayer, type MediaStatus } from "@/features/player/media-player";
 import { PlaybackDiagnostics } from "@/features/player/playback-diagnostics";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 import {
@@ -351,26 +351,47 @@ function FavoriteWatchView({
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
   const [recoveryNote, setRecoveryNote] = useState<string | null>(null);
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [status, setStatus] = useState<MediaStatus>("idle");
   const [mediaDiagnostic, setMediaDiagnostic] =
     useState<MediaDiagnosticSnapshot | null>(null);
 
   const source = sources.find((candidate) => candidate.key === item.sourceKey);
+  /**
+   * Read through a ref so this stays stable.
+   *
+   * `favorite` is rebuilt by the store on every progress tick, so a callback closing over
+   * `favorite.progress` would get a new identity every few seconds — and anything depending on it
+   * would re-run just as often. The refresh effect depends on this callback, so an unstable one
+   * would refetch the detail mid-playback on a timer.
+   */
+  const favoriteRef = useRef(favorite);
+  favoriteRef.current = favorite;
   const setItemWithProgress = useCallback(
     (next: VodItem, nextSourceName: string) => {
       setItem(next);
       // Keep the same episode where possible. A relinked series numbers its episodes
       // independently, so the name is what carries the user's place across.
-      const nextEntry = pickEntryEpisode(next, favorite.progress);
+      const nextEntry = pickEntryEpisode(next, favoriteRef.current.progress);
       setActiveEpisodeId(nextEntry.episodeId);
       setRecoveryNote(
-        `原源「${favorite.sourceName}」不可用，已自动切换到「${nextSourceName}」。`,
+        `原源「${favoriteRef.current.sourceName}」不可用，已自动切换到「${nextSourceName}」。`,
       );
     },
-    [favorite.progress, favorite.sourceName],
+    [],
   );
 
-  // Refresh the episode list in the background. A failure is not fatal: the snapshot still has
-  // everything needed to play, so this is a note rather than an error.
+  /**
+   * The refresh runs once per favourite, not on every store change.
+   *
+   * It used to depend on `favorite.item`, and to write back through `refreshFavorite` — which
+   * replaces `favorite.item` in the store. The effect therefore re-triggered itself forever:
+   * each pass fetched the detail again, produced a new `item`, and handed the player a new
+   * `episode` object, so the player reset before it could start. That is what made the surface
+   * spin on "正在准备播放" and made the picture flash and vanish. Keying on the identity of the
+   * favourite, and reading the snapshot through a ref, breaks the cycle.
+   */
+  const snapshotRef = useRef(favorite.item);
+  snapshotRef.current = favorite.item;
   useEffect(() => {
     let cancelled = false;
     // The saved source is gone, or it answered with nothing. Either way the snapshot's addresses
@@ -381,7 +402,7 @@ function FavoriteWatchView({
       if (cancelled) return;
       setRefreshNote(`${reason}正在查找其它可用源…`);
       const relinked = await relinkFavorite(
-        favorite.item,
+        snapshotRef.current,
         sources,
         favorite.sourceKey,
       ).catch(() => null);
@@ -403,7 +424,7 @@ function FavoriteWatchView({
         cancelled = true;
       };
     }
-    void getVodDetail(source, favorite.item).then((result) => {
+    void getVodDetail(source, snapshotRef.current).then((result) => {
       if (cancelled) return;
       if (result.data) {
         setItem(result.data);
@@ -421,7 +442,6 @@ function FavoriteWatchView({
       cancelled = true;
     };
   }, [
-    favorite.item,
     favorite.key,
     favorite.sourceKey,
     favorite.sourceName,
@@ -509,40 +529,43 @@ function FavoriteWatchView({
             上次看到 {favorite.progress.episodeName}
           </span>
         )}
+
+        {/* Line switching lives here, on the title row, rather than above the episode list.
+            Switching a line is a decision about the whole work, not about one episode, and the
+            title row is where the work's own controls belong — it also keeps the rail a single
+            uninterrupted list. */}
+        {item.playLines.length > 1 && (
+          <div className="ml-auto flex shrink-0 items-center gap-1">
+            <span className="text-xs text-muted-foreground">线路</span>
+            {item.playLines.map((line, index) => {
+              const isActive = line.id === activeLine?.id;
+              return (
+                <button
+                  key={line.id}
+                  type="button"
+                  onClick={() => selectLine(line)}
+                  aria-label={`线路 ${index + 1}：${line.name}`}
+                  aria-pressed={isActive}
+                  title={`${line.name}（${line.episodes.length} 集）`}
+                  className={cn(
+                    "rounded px-2 py-0.5 text-xs font-medium transition-colors",
+                    isActive
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted/70 text-foreground/80 hover:bg-muted hover:text-foreground",
+                  )}
+                >
+                  {line.name}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       <div className="flex min-h-0 flex-1">
         {/* Episode rail, left. It mirrors the live workspace's channel list so the two pages read
             the same way. */}
         <aside className="flex w-56 shrink-0 flex-col overflow-hidden border-r border-border/70 bg-card/20">
-          {/* Line selector. A work commonly carries several lines and they are not equivalent —
-              a relinked favourite may have arrived with a different set entirely — so the rail
-              has to say which one is playing and let the user change it. */}
-          {item.playLines.length > 1 && (
-            <div className="flex shrink-0 flex-wrap gap-1 border-b border-border/60 px-2 py-1.5">
-              {item.playLines.map((line, index) => {
-                const isActive = line.id === activeLine?.id;
-                return (
-                  <button
-                    key={line.id}
-                    type="button"
-                    onClick={() => selectLine(line)}
-                    aria-label={`线路 ${index + 1}：${line.name}`}
-                    aria-pressed={isActive}
-                    title={`${line.name}（${line.episodes.length} 集）`}
-                    className={cn(
-                      "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
-                      isActive
-                        ? "bg-primary text-primary-foreground"
-                        : "bg-muted/70 text-foreground/80 hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    {line.name}
-                  </button>
-                );
-              })}
-            </div>
-          )}
           <ScrollArea
             type="auto"
             className="min-h-0 flex-1"
@@ -611,6 +634,10 @@ function FavoriteWatchView({
                   setMediaDiagnostic(snapshot.status === "error" ? snapshot : null);
                   setDiagnostic(snapshot.message);
                 }}
+                onStatus={(nextStatus, message) => {
+                  setStatus(nextStatus);
+                  if (message) setDiagnostic(message);
+                }}
               />
             ) : (
               <div className="flex flex-col items-center gap-2 px-8 text-center">
@@ -621,26 +648,55 @@ function FavoriteWatchView({
                 </p>
               </div>
             )}
+          </div>
 
-            {/* The diagnosis sits in the player's own corner rather than in a row below it, so it
-                is present exactly when it is needed — which is when nothing is playing. Without
-                it a stuck player offered no way to find out why. */}
+          {/* Status strip, matching the live workspace's: the same bar in the same place on both
+              pages, so the two players read as one component. The diagnosis is an entry on this
+              bar rather than an icon floating over the picture, where it covered the video and
+              looked like part of the player's own controls. */}
+          <div className="flex h-11 shrink-0 items-center justify-between gap-3 border-t border-border/70 bg-card/60 px-4 select-none">
+            <div className="flex min-w-0 items-center gap-2 text-xs">
+              <span
+                className={cn(
+                  "size-1.5 shrink-0 rounded-full",
+                  status === "error"
+                    ? "bg-destructive"
+                    : status === "playing"
+                      ? "bg-emerald-500"
+                      : "bg-muted-foreground/60",
+                )}
+                aria-hidden="true"
+              />
+              <span className="shrink-0 text-muted-foreground">
+                {status === "error"
+                  ? "播放失败"
+                  : status === "playing"
+                    ? "正在播放"
+                    : status === "paused"
+                      ? "已暂停"
+                      : status === "ended"
+                        ? "已播完"
+                        : "正在准备播放"}
+              </span>
+              <span className="truncate text-foreground/80">
+                {activeEpisode?.name}
+              </span>
+              {(recoveryNote || refreshNote) && (
+                <>
+                  <span className="text-muted-foreground">|</span>
+                  <span className="truncate text-muted-foreground">
+                    {recoveryNote ?? refreshNote}
+                  </span>
+                </>
+              )}
+            </div>
             {activeEpisode && (
-              <div className="absolute right-3 bottom-3 z-30">
-                <PlaybackDiagnostics
-                  snapshot={mediaDiagnostic}
-                  note={recoveryNote ?? refreshNote ?? diagnostic}
-                  iconOnly
-                  triggerClassName="bg-black/60 text-white hover:bg-black/80 hover:text-white"
-                />
-              </div>
+              <PlaybackDiagnostics
+                snapshot={mediaDiagnostic}
+                note={diagnostic}
+              />
             )}
           </div>
-          {(refreshNote || recoveryNote) && (
-            <p className="shrink-0 border-t border-border/60 bg-card/40 px-4 py-2 text-xs text-muted-foreground">
-              {recoveryNote ?? refreshNote}
-            </p>
-          )}
         </main>
       </div>
     </div>
@@ -661,6 +717,7 @@ function ResolvedEpisodePlayer({
   resumeAt,
   onProgress,
   onDiagnostic,
+  onStatus,
 }: {
   source: SourceRecord | undefined;
   episode: VodEpisode;
@@ -669,40 +726,56 @@ function ResolvedEpisodePlayer({
   resumeAt: number;
   onProgress: (seconds: number) => void;
   onDiagnostic: (snapshot: MediaDiagnosticSnapshot) => void;
+  onStatus: (status: MediaStatus, message?: string) => void;
 }) {
   const [resolved, setResolved] = useState<{
     url: string;
     mediaKind: MediaKind;
     headers: Record<string, string>;
   } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  /**
+   * Only the address-resolution failure lives here.
+   *
+   * The player's own status messages used to be written to this same state, so any message —
+   * including an ordinary "正在连接" — replaced the player with the failure screen. That is what
+   * made playback flash: the player mounted, reported a status, was unmounted by that report, and
+   * came back only when the user pressed 重试.
+   */
+  const [resolveError, setResolveError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
+
+  // Keyed on the episode's identity and address rather than the object, so a refresh that
+  // rebuilds the same episode list does not tear the player down and start it over.
+  const episodeUrl = episode.url;
+  const episodeId = episode.id;
+  const episodeRef = useRef(episode);
+  episodeRef.current = episode;
 
   useEffect(() => {
     let cancelled = false;
-    setError(null);
+    setResolveError(null);
     setResolved(null);
-    void resolveEpisodePlayback(source, episode, normalizedConfig)
+    void resolveEpisodePlayback(source, episodeRef.current, normalizedConfig)
       .then((resolution) => {
         if (!cancelled) setResolved(resolution);
       })
       .catch((cause) => {
         if (cancelled) return;
-        setError(
+        setResolveError(
           cause instanceof Error ? cause.message : "播放地址未通过安全检查",
         );
       });
     return () => {
       cancelled = true;
     };
-  }, [attempt, episode, normalizedConfig, source]);
+  }, [attempt, episodeId, episodeUrl, normalizedConfig, source]);
 
-  if (error) {
+  if (resolveError) {
     return (
       <div className="flex flex-col items-center gap-3 px-8 text-center">
         <TriangleAlert className="size-7 text-white/70" aria-hidden="true" />
         <p className="text-sm font-medium text-white">无法播放当前内容</p>
-        <p className="max-w-md text-xs leading-5 text-white/70">{error}</p>
+        <p className="max-w-md text-xs leading-5 text-white/70">{resolveError}</p>
         <Button
           type="button"
           variant="secondary"
@@ -735,9 +808,7 @@ function ResolvedEpisodePlayer({
       resumeAt={resumeAt}
       onProgress={onProgress}
       onDiagnostic={onDiagnostic}
-      onStatus={(_status, message) => {
-        if (message) setError(message);
-      }}
+      onStatus={onStatus}
     />
   );
 }

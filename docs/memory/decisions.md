@@ -326,3 +326,15 @@
 - **变异验证 5 项，其中 1 项第一次存活**：`relinkWithoutDetail`。原因值得记：**收藏页的 effect 会在换源后再次请求详情，把缺陷掩盖掉了**——所以「页面级」测试抓不到它。补了 `favorite-relink.test.ts` **直接测 `relinkFavorite` 本身**才钉住。**当一个缺陷被上层逻辑自动修复时，必须在更低的层级测它。**
 - 真实浏览器实测（1440×900）：`hasContinueButton: false`、`tabsOnRight: true`（Tab 右边界 1408 / header 1424）、`backButton.iconOnly: true` 且文本为空、`episodeCount.rightOfTitle: true` 且 `sameRow: true`、`lineSwitcher` 两条线路都在且第 1 条为 `aria-pressed=true`、`diagnostics.inPlayerCorner: true` 且点击后 `dialogOpens: true`。
 - 本轮最终：前端 **269 项**（新增 favorites-view 12 项、favorite-relink 5 项）、Rust 98 项、`clippy` 零警告、`pnpm build` 零警告。
+- **收藏页播放的两个异常是同一个根因：effect 自我触发成环**。
+  - 刷新详情的 effect **既依赖 `favorite.item`，又通过 `refreshFavorite` 把新的 `item` 写回 store** → effect 重新触发 → 再请求详情 → 再写回……**无限循环**。
+  - 每一轮都产生**新的 `item`**，于是 `activeEpisode` 也是**新对象**；播放器解析地址的 effect 依赖 `episode` 对象 → **每次都被重置**，所以画面出现又消失、一直转圈。
+  - **修复**：刷新 effect 只依赖 `favorite.key`（收藏的身份），快照用 `useRef` 读取，**不把 `favorite.item` 放进依赖**；播放器解析 effect 依赖 **`episode.id` + `episode.url`** 而不是对象本身。
+  - 还修了一个**同类的隐藏定时炸弹**：`setItemWithProgress` 闭包捕获了 `favorite.progress`，而 store **每次进度上报都会重建 `favorite`**，回调身份随之变化 → 依赖它的 effect 会**每隔几秒重新请求一次详情**。改为用 `favoriteRef` 读取、依赖数组留空。
+- **另一个独立 bug**：播放器的 `onStatus` 消息被写进了**和「解析失败」同一个 state**，于是任何一条普通状态（包括「正在连接」）都会**把播放器替换成失败界面**——这就是「闪烁一下又变回去」。解析失败和运行状态是两件事，拆成 `resolveError` 与 `status` 两个 state。
+- **UI 调整**：播放器底部加**状态栏**（与电视直播同款，同一位置同一个条），`播放诊断` 从**浮在画面上的图标按钮**改为状态栏上的一项——**浮在画面上会挡住视频，而且看起来像播放器自带的控件**。线路切换移到**标题栏右侧**（与「影视/电视直播」切换上下呼应），剧集栏恢复成一条不间断的列表。
+- **测试教训（重要）**：`refreshLoop` 变异最初**让测试进程挂死**而不是失败。原因是 mock 每次返回**新对象**（真实请求就是这样）且**无限供数**，React 会一直转下去。改为 `boundedDetail(limit)`：**新鲜对象 + 超过上限后不再返回数据**，于是循环失去燃料，测试以 `expected 3 to be less than or equal to 2` **干净失败**。**「测试挂死」不是可用的回归信号——必须让缺陷以断言失败的形式结束。**
+- **另一个测试教训**：最初的 mock **复用同一个对象**，导致 `favorite.item` 身份不变，**循环根本不会发生**，变异存活。**mock 必须复现真实请求的返回特征（每次新对象），否则测试等于没测。**
+- 变异验证 4 项全部抓到：`refreshLoop`、`statusUnmountsPlayer`、`resolveOnObjectIdentity`、`unstableCallback`。
+- 真实浏览器实测（详情接口每次返回新对象）：`callsAtOpen: 2 / callsAfter4s: 2 / settled: true`（**无循环**）、`videoMounted: true` 且 `spinnerGone: true` 且 `stillMountedAfterWait: true`（**画面真的起来并且留住了**）、`statusBar.inFooter: true` 且 `overVideo: false`、`linePlacement.onTitleRow: true` 且 `inRail: false`、切换线路后 `addressChanged: true`。
+- 本轮最终：前端 **273 项**（favorites-view 16 项）、Rust 98 项、`clippy` 零警告、`pnpm build` 零警告。
