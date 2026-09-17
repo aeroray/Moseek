@@ -357,3 +357,18 @@
 - **测试踩坑**：toast 断言一开始全部失败，因为只包了 `ToastHost` **没包 Radix 的 `ToastProvider`**——**push 成功了但什么都不显示，看起来和功能坏掉一模一样**。两个都要包。
 - 真实浏览器实测（1440×900）：`favicon.href: "/favicon.svg"`、`logo.isSvg: true` 且 `wordmarkGone: true`、`favoriteButton.visibleWithoutHover: true`、`cardHover.usesSoftShadow: true` 且 `oldShadowGone: true`、`zoomButton.hiddenUntilHover: true`、`viewer.opened: true`、`download.calledWith.fileName: "测试影片"` 且提示里显示了保存路径。
 - 本轮最终：前端 **283 项**（新增 poster-lightbox 8 项、browse-view 2 项）、Rust **103 项**（新增 download 5 项）、`clippy` 零警告、`pnpm build` 零警告。
+- **导航栏去掉两个小黄点**：Logo 上的脉冲点和「我的收藏」上的常驻圆点。**一个不请求注意的图标上永远挂着一个标记，读起来像警报；而它背后没有任何可操作的东西**——收藏数量已经在 tooltip 里。
+- **Logo 不再是按钮**：标识不是目的地，**点一下就静默把用户带到别处是意外行为**。改为纯展示（保留 `title` 提示）。
+- **「播放历史」改名「足迹」**：更短，读起来是「走过的痕迹」而不是「一份日志」，也和页面现在呈现的东西一致。设置中心的「播放记录 / 清除播放记录」同步改名。
+- **足迹页面从来没有记录——这是一个真 bug，根因有两层**：
+  1. `addHistory` **只在 `selectEpisode` 里调用**，也就是**只有用户主动切集时才记录**。**点开一部电影从头看到尾，什么都不写**。这正是页面永远为空的原因。修复：加 effect，**进入即记录当前集**，用 episode id 做守卫避免详情请求返回后重复记录。
+  2. **电视直播完全没有记录**——`live-view` 里根本没有 `addHistory` 调用。修复：同样用 effect 记录当前频道。**测试还抓出了同一类 bug 的第二个实例**：进入直播页时**自动选中的第一个频道走的是 catalog effect 而不是 `selectChannel`**，所以「在 `selectChannel` 里记录」会**漏掉最常被看的那个频道**。**和 VOD 那层是同一个错误模式：把记录挂在「用户操作」上，而不是挂在「正在播放什么」上。**
+- **足迹改为纯展示的时间线**（用户要求）：竖排、带连接线、**最新在上**。**刻意不可点击**——早先每一行都是跳回影视库的按钮，**它承诺回到确切位置却做不到**（源可能已删、集号可能已变，点过去最多是「附近」）。**过去的记录不该假装是一扇门。**
+  - **用时间线而不是网格**：网格说的是「有这些东西」，带时间的竖列说的是「这是什么时候」——**而顺序本身就是历史的信息**。
+  - 时间显示**当天用「今天 HH:MM」、更早用「M 月 D 日 HH:MM」**，而不是相对时间（「3 小时前」）：**时间线是靠位置扫读的，相对时间会逼读者做减法**。
+  - 影视和直播**合成同一条时间线但带类型徽标**，类型上分成两个接口（`VodFootprint` / `LiveFootprint`）而不是硬塞进一个：**频道没有集数、没有线路、没有续播点，假装它有会让每个消费方都去分支判断一半记录里毫无意义的字段**。
+  - 迁移（`migrateHistory`）：旧记录是扁平的 `PlayHistoryRecord`（没有 `kind`），**包一层但保留原 id**——**`playbackProgress` 是按这个 id 索引的，改 id 会让所有已保存的进度悄悄变成孤儿**。
+- **变异验证 6 项**。其中 **`noRecordGuard` 第一次存活**，因为 store 按 id 去重，**重复写入不会增加行数**，所以「行数」看不见它。真正的后果是**每次进度上报都重写记录、刷新 `updatedAt`、并把整个 store 重新持久化一次**。改为断言**时间戳不变**才抓住。**当一个副作用被下游去重掩盖时，必须断言副作用的痕迹，而不是它的结果数量。**
+- 真实浏览器端到端实测：`dots.count: 0`、`logoIsButton: false`、`navLabel.hasTrail: true` 且 `hasOldName: false`、**打开影片后 `afterOpeningFilm: { count: 1, kind: "vod", name: "冬城猎凶", episode: "第01集" }`**、足迹页 `entryCount: 1` 且 `timelineButtons: 0`（**确实不可点击**）、看过直播后 `afterLive: { count: 2, kinds: ["live","vod"] }`、足迹页两条都在。
+- 几何实测：两条记录各 **89px 高、宽 768**、**2 个圆点、1 条连接线**（最后一条不画线，时间线在历史结束处收住）。
+- 本轮最终：前端 **301 项**（新增 history-view 7 项、app-store 足迹 4 项、player-view 2 项、live-view 2 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。

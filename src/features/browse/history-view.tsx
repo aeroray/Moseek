@@ -1,7 +1,7 @@
-import { Clock3, Play, Trash2 } from "lucide-react";
+import { Footprints, Radio, Trash2 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import { MediaPoster } from "@/components/media-poster";
+import { Button } from "@/components/ui/button";
 import {
   Empty,
   EmptyContent,
@@ -12,26 +12,35 @@ import {
 } from "@/components/ui/empty";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { useAppStore } from "@/stores/app-store";
-import type { ViewKey } from "@/types/moseek";
+import { cn } from "@/lib/utils";
+import type { FootprintRecord, ViewKey } from "@/types/moseek";
 
 interface HistoryViewProps {
   onNavigate: (view: ViewKey) => void;
 }
 
+/**
+ * 足迹 — where the user has been, newest first.
+ *
+ * Read-only on purpose. An earlier version made every row a button back into the library, which
+ * promised a return to the exact place and could not deliver it: the source may have been
+ * deleted, or the episode renumbered, and the click landed somewhere adjacent at best. A record
+ * of the past should not pretend to be a door.
+ *
+ * A timeline rather than a grid because the order is the information. A grid says "these are
+ * things"; a column with times says "this is when", which is what a history is actually for.
+ */
 export function HistoryView({ onNavigate }: HistoryViewProps) {
   const history = useAppStore((state) => state.history);
   const clearHistory = useAppStore((state) => state.clearHistory);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
-      {/* 48px Header */}
-      <header
-        className="flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/40 px-4 backdrop-blur-md select-none"
-      >
+      <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/40 px-4 backdrop-blur-md select-none">
         <div className="flex items-center gap-2">
-          <Clock3 className="size-4 text-primary" />
+          <Footprints className="size-4 text-primary" aria-hidden="true" />
           <h1 className="text-sm font-semibold tracking-tight text-foreground">
-            最近播放历史
+            足迹
           </h1>
           <span className="text-xs text-muted-foreground">
             ({history.length} 条记录)
@@ -42,73 +51,46 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
             type="button"
             variant="ghost"
             size="sm"
-            className="text-destructive hover:bg-destructive/10 hover:text-destructive gap-1.5"
+            className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
             onClick={clearHistory}
           >
-            <Trash2 className="size-3.5" />
-            清空历史
+            <Trash2 className="size-3.5" aria-hidden="true" />
+            清空足迹
           </Button>
         )}
       </header>
 
-      {/* Main Content */}
-      <ScrollArea className="flex-1 min-h-0">
+      <ScrollArea className="min-h-0 flex-1">
         <div className="p-4">
           {history.length === 0 ? (
             <div className="flex h-96 items-center justify-center">
               <Empty className="max-w-md border-border/40 bg-card/20 py-8">
                 <EmptyHeader>
                   <EmptyMedia variant="icon">
-                    <Clock3 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
+                    <Footprints className="size-4 text-primary" aria-hidden="true" />
                   </EmptyMedia>
-                  <EmptyTitle className="text-sm">暂无播放足迹</EmptyTitle>
+                  <EmptyTitle className="text-sm">还没有足迹</EmptyTitle>
                   <EmptyDescription className="text-xs">
-                    在影视库点播任何选集，系统会自动在此记忆播放节点与线路。
+                    在影视库点开任意影片，或在电视直播里选择频道，这里就会按时间记下你到过的地方。
                   </EmptyDescription>
                 </EmptyHeader>
                 <EmptyContent>
                   <Button type="button" size="sm" onClick={() => onNavigate("browse")}>
-                    去影库看看
+                    去影视库看看
                   </Button>
                 </EmptyContent>
               </Empty>
             </div>
           ) : (
-            <div className="flex flex-col gap-1.5 max-w-4xl mx-auto">
-              {history.map((record) => (
-                <div
+            <ol className="mx-auto flex max-w-3xl flex-col">
+              {history.map((record, index) => (
+                <TimelineEntry
                   key={record.id}
-                  className="group flex items-center gap-3 rounded-md border border-border/60 bg-card/40 p-2 transition-all duration-150 hover:border-primary/40 hover:bg-card/80 cursor-pointer"
-                  onClick={() => onNavigate("browse")}
-                >
-                  <MediaPoster
-                    src={record.item.poster}
-                    alt={`${record.item.name} 海报`}
-                    className="h-12 w-20 shrink-0 rounded overflow-hidden"
-                  />
-                  <div className="min-w-0 flex-1 flex flex-col gap-1">
-                    <div className="flex items-center gap-2">
-                      <p className="truncate text-sm font-semibold text-foreground group-hover:text-primary transition-colors">
-                        {record.item.name}
-                      </p>
-                      <span className="text-xs text-primary font-medium">
-                        [{record.episodeName}]
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>源：{record.item.sourceName}</span>
-                      <span>·</span>
-                      <span>进度：{formatSeconds(record.progress)}</span>
-                      <span>·</span>
-                      <span>{formatHistoryDate(record.updatedAt)}</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 text-muted-foreground group-hover:text-primary pr-2">
-                    <Play className="size-4 fill-current" />
-                  </div>
-                </div>
+                  record={record}
+                  isLast={index === history.length - 1}
+                />
               ))}
-            </div>
+            </ol>
           )}
         </div>
         <ScrollBar />
@@ -117,19 +99,130 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
   );
 }
 
-function formatSeconds(seconds: number) {
-  if (!seconds || seconds <= 0) return "刚开始看";
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return `${mins}:${secs.toString().padStart(2, "0")}`;
+/**
+ * One stop on the timeline.
+ *
+ * The rail is drawn with a border on a fixed-width column rather than with a list marker, so the
+ * line runs continuously through the dots and the spacing stays even whatever the row's height.
+ */
+function TimelineEntry({
+  record,
+  isLast,
+}: {
+  record: FootprintRecord;
+  isLast: boolean;
+}) {
+  const isVod = record.kind === "vod";
+  const title = isVod ? record.item.name : record.channel.name;
+
+  return (
+    <li className="flex gap-3">
+      {/* The rail. The last entry's line stops at its dot, so the timeline ends where the
+          history does rather than trailing into nothing. */}
+      <div className="relative flex w-4 shrink-0 justify-center">
+        {!isLast && (
+          <span
+            className="absolute top-6 bottom-0 w-px bg-border"
+            aria-hidden="true"
+          />
+        )}
+        <span
+          className={cn(
+            "relative z-10 mt-3.5 flex size-2.5 shrink-0 rounded-full ring-4 ring-background",
+            isVod ? "bg-primary" : "bg-sky-400",
+          )}
+          aria-hidden="true"
+        />
+      </div>
+
+      <div className="flex min-w-0 flex-1 items-start gap-3 border-b border-border/40 py-3">
+        {isVod ? (
+          <MediaPoster
+            src={record.item.poster}
+            alt={`${record.item.name} 海报`}
+            className="h-16 w-11 shrink-0 overflow-hidden rounded"
+          />
+        ) : (
+          <span className="flex h-16 w-11 shrink-0 items-center justify-center overflow-hidden rounded bg-muted/50">
+            {record.channel.logoUrl ? (
+              <img
+                src={record.channel.logoUrl}
+                alt=""
+                className="size-full object-contain"
+                loading="lazy"
+              />
+            ) : (
+              <Radio className="size-4 text-muted-foreground" aria-hidden="true" />
+            )}
+          </span>
+        )}
+
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <p className="truncate text-sm font-semibold text-foreground">{title}</p>
+            <span
+              className={cn(
+                "shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium",
+                isVod
+                  ? "bg-primary/15 text-primary"
+                  : "bg-sky-400/15 text-sky-400",
+              )}
+            >
+              {isVod ? "影视" : "直播"}
+            </span>
+          </div>
+
+          <p className="truncate text-xs text-muted-foreground">
+            {isVod ? (
+              <>
+                {record.episodeName}
+                {record.progress > 5 && ` · 看到 ${formatClock(record.progress)}`}
+                {" · "}
+                {record.item.sourceName}
+              </>
+            ) : (
+              <>
+                {record.channel.groupName || "未分组"}
+                {" · "}
+                {record.sourceName}
+              </>
+            )}
+          </p>
+
+          <p className="text-xs text-muted-foreground/70">
+            {formatFootprintTime(record.updatedAt)}
+          </p>
+        </div>
+      </div>
+    </li>
+  );
 }
 
-function formatHistoryDate(value: string) {
+/** `m:ss` — a position inside an episode, not a time of day. */
+function formatClock(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+}
+
+/**
+ * A date for anything older than today, a clock time for anything today.
+ *
+ * A relative string ("3 小时前") was tried and is worse here: a timeline is scanned by position,
+ * and "3 小时前" next to "2 小时前" makes the reader do subtraction that a timestamp does not.
+ * The day is still grouped, so the ordering is obvious without arithmetic.
+ */
+function formatFootprintTime(value: string) {
   const timestamp = new Date(value).getTime();
   if (Number.isNaN(timestamp)) return value;
-  const diff = Date.now() - timestamp;
-  if (diff < 60_000) return "刚刚";
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)} 小时前`;
-  return new Date(timestamp).toLocaleDateString();
+  const date = new Date(timestamp);
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  const time = `${String(date.getHours()).padStart(2, "0")}:${String(
+    date.getMinutes(),
+  ).padStart(2, "0")}`;
+  if (sameDay) return `今天 ${time}`;
+  return `${date.getMonth() + 1} 月 ${date.getDate()} 日 ${time}`;
 }

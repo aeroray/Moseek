@@ -32,7 +32,9 @@ const mainNavItems: NavItem[] = [
   { key: "browse", label: "影视库", icon: Library },
   { key: "live", label: "电视直播", icon: Radio },
   { key: "favorites", label: "我的收藏", icon: Clapperboard },
-  { key: "history", label: "播放历史", icon: History },
+  // "足迹" rather than "播放历史": it is shorter, reads as a trail rather than a log, and matches
+  // what the page now shows — where you have been, in order.
+  { key: "history", label: "足迹", icon: History },
 ];
 
 const systemNavItems: NavItem[] = [
@@ -53,18 +55,14 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
           data-tauri-drag-region
         >
           {/* Brand Mark. The wordmark is replaced by the product's own logo, so the rail shows
-              the same mark as the window and the installer rather than a stand-in glyph. */}
+              the same mark as the window and the installer rather than a stand-in glyph.
+              Not a button: the logo is an identity, not a destination, and making it navigate
+              meant a stray click on the rail's corner silently moved the user somewhere else. */}
           <div className="mb-4 flex flex-col items-center">
-            <button
-              type="button"
-              onClick={() => onNavigate("browse")}
-              className="group relative flex size-9 items-center justify-center rounded-lg transition-transform duration-200 hover:scale-105 active:scale-95"
+            <AppLogo
+              className="size-9 rounded-lg"
               title="拾影 · 万千影视，一拾即得"
-              aria-label="拾影 · 返回影视库"
-            >
-              <AppLogo className="size-9 rounded-lg" />
-              <span className="absolute -right-0.5 -bottom-0.5 size-1.5 rounded-full bg-primary animate-pulse" />
-            </button>
+            />
           </div>
 
           {/* Main Navigation Rail */}
@@ -72,7 +70,6 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
             {mainNavItems.map((item) => {
               const Icon = item.icon;
               const isActive = item.key === activeView;
-              const hasBadge = item.key === "favorites" && favoritesCount > 0;
 
               return (
                 <Tooltip key={item.key}>
@@ -89,14 +86,16 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
                       )}
                     >
                       <Icon className={cn("size-4 transition-transform duration-150", isActive && "scale-110")} />
-                      {hasBadge && (
-                        <span className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-primary" />
-                      )}
+                      {/* No favourites dot. A permanent mark on an icon that is not asking for
+                          attention reads as an alert, and there is nothing to act on — the count
+                          is already in the tooltip. */}
                     </button>
                   </TooltipTrigger>
                   <TooltipContent side="right" sideOffset={12} className="font-medium">
                     {item.label}
-                    {hasBadge && ` (${favoritesCount})`}
+                    {item.key === "favorites" &&
+                      favoritesCount > 0 &&
+                      ` (${favoritesCount})`}
                   </TooltipContent>
                 </Tooltip>
               );

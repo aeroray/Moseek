@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -50,6 +50,7 @@ const ALL_GROUPS_ID = "__all_groups__";
 
 export function LiveView() {
   const sources = useAppStore((state) => state.sources);
+  const addLiveFootprint = useAppStore((state) => state.addLiveFootprint);
   const liveFavorites = useAppStore((state) => state.liveFavorites);
   const toggleLiveFavorite = useAppStore((state) => state.toggleLiveFavorite);
   const autoEpgEnabled = useAppStore((state) => state.autoEpgEnabled);
@@ -331,6 +332,25 @@ export function LiveView() {
     setResolvedStream(null);
     setDiagnostic(null);
   };
+
+  /**
+   * Records a footprint whenever the channel being watched changes.
+   *
+   * An effect rather than a call inside `selectChannel`, because the channel that plays on entry
+   * is chosen by the catalog effect, not by the user — recording only in `selectChannel` missed
+   * the very first channel, which is the one most often watched. Keyed on the id so a catalog
+   * reload does not record the same channel again.
+   */
+  const recordedChannelRef = useRef("");
+  useEffect(() => {
+    if (!selectedChannel) return;
+    if (recordedChannelRef.current === selectedChannel.id) return;
+    recordedChannelRef.current = selectedChannel.id;
+    addLiveFootprint(
+      selectedChannel,
+      liveSource?.name ?? selectedChannel.sourceKey,
+    );
+  }, [addLiveFootprint, liveSource?.name, selectedChannel]);
 
   const stepChannel = (direction: -1 | 1) => {
     const next = channels[selectedIndex + direction];

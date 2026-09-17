@@ -9,14 +9,16 @@ import {
 } from "@/lib/tauri";
 import type {
   FavoriteProgress,
+  FootprintRecord,
+  LiveChannel,
   LiveFavorite,
-  PlayHistoryRecord,
+  LiveFootprint,
   SourceRecord,
   SourceTestResult,
   ThemeMode,
   ViewKey,
-  LiveChannel,
   VodFavorite,
+  VodFootprint,
   VodItem,
 } from "@/types/moseek";
 
@@ -56,6 +58,31 @@ export function migrateFavorites(persisted: unknown): VodFavorite[] {
 }
 
 /**
+ * Upgrades history saved before footprints carried a `kind`.
+ *
+ * The old shape was a flat `PlayHistoryRecord`, so an entry is identifiable by having no `kind`
+ * and by carrying an `item`. Those are wrapped as VOD footprints, keeping their existing id —
+ * `playbackProgress` is keyed by that id, so changing it would silently orphan every saved
+ * position.
+ */
+export function migrateHistory(persisted: unknown): FootprintRecord[] {
+  if (!Array.isArray(persisted)) return [];
+  const records: FootprintRecord[] = [];
+  for (const entry of persisted) {
+    if (!entry || typeof entry !== "object") continue;
+    const candidate = entry as Partial<VodFootprint> & { item?: VodItem };
+    if (candidate.kind === "vod" || candidate.kind === "live") {
+      records.push(candidate as FootprintRecord);
+      continue;
+    }
+    if (candidate.item) {
+      records.push({ ...(candidate as VodFootprint), kind: "vod" });
+    }
+  }
+  return records;
+}
+
+/**
  * Upgrades live favourites saved as bare channel-id strings.
  *
  * There is nothing to recover from a string alone, so those entries are dropped rather than
@@ -89,7 +116,7 @@ interface AppStore {
   rawConfig: string;
   normalizedConfig: string;
   lastImportedAt: string | null;
-  history: PlayHistoryRecord[];
+  history: FootprintRecord[];
   favorites: VodFavorite[];
   playbackProgress: Record<string, number>;
   liveFavorites: LiveFavorite[];
@@ -109,7 +136,10 @@ interface AppStore {
     normalizedConfig: string,
     importedAt: string,
   ) => void;
-  addHistory: (record: Omit<PlayHistoryRecord, "id" | "updatedAt">) => void;
+  /** Records a work that was opened. */
+  addVodFootprint: (record: Omit<VodFootprint, "kind" | "id" | "updatedAt">) => void;
+  /** Records a channel that was watched. */
+  addLiveFootprint: (channel: LiveChannel, sourceName: string) => void;
   clearHistory: () => void;
   clearFavorites: () => void;
   toggleFavorite: (item: VodItem) => void;
@@ -161,8 +191,10 @@ export const useAppStore = create<AppStore>()(
           favorites: current.favorites.filter(
             (favorite) => !removing.has(favorite.sourceKey),
           ),
-          history: current.history.filter(
-            (record) => !removing.has(record.item.sourceKey),
+          history: current.history.filter((record) =>
+            record.kind === "vod"
+              ? !removing.has(record.item.sourceKey)
+              : !removing.has(record.channel.sourceKey),
           ),
         }));
         get().setConfigDocument(document);
@@ -313,18 +345,48 @@ export const useAppStore = create<AppStore>()(
         set({ sources: sources.map((source) => ({ ...source })) }),
       setConfigSnapshot: (rawConfig, normalizedConfig, lastImportedAt) =>
         set({ rawConfig, normalizedConfig, lastImportedAt }),
-      addHistory: (record) =>
+      /**
+       * Records that a work was opened.
+       *
+       * Called on entry, not only when an episode is picked: the previous version recorded
+       * nothing until the user actively switched episodes, so simply opening a film and watching
+       * it left no trace at all — which is why the page was always empty.
+       *
+       * Re-opening the same episode moves it to the top rather than adding a duplicate, so the
+       * list reads as "where I have been", most recent first, not as an append-only log.
+       */
+      addVodFootprint: (record) =>
         set((state) => {
-          const historyRecord: PlayHistoryRecord = {
+          const footprint: VodFootprint = {
             ...record,
+            kind: "vod",
+            // Deliberately the same key `playbackProgress` uses. The progress map updates the
+            // matching history record by id, so prefixing this would leave every saved position
+            // pointing at a record that no longer exists.
             id: `${record.item.id}:${record.episodeId}`,
             updatedAt: new Date().toISOString(),
           };
           return {
             history: [
-              historyRecord,
-              ...state.history.filter((item) => item.id !== historyRecord.id),
-            ].slice(0, 100),
+              footprint,
+              ...state.history.filter((item) => item.id !== footprint.id),
+            ].slice(0, 200),
+          };
+        }),
+      addLiveFootprint: (channel, sourceName) =>
+        set((state) => {
+          const footprint: LiveFootprint = {
+            kind: "live",
+            id: `live:${channel.id}`,
+            channel,
+            sourceName,
+            updatedAt: new Date().toISOString(),
+          };
+          return {
+            history: [
+              footprint,
+              ...state.history.filter((item) => item.id !== footprint.id),
+            ].slice(0, 200),
           };
         }),
       // Playback progress is keyed by history id and has no meaning without the record it
@@ -392,7 +454,10 @@ export const useAppStore = create<AppStore>()(
               [historyId]: progress,
             },
             history: state.history.map((record) =>
-              record.id === historyId ? { ...record, progress } : record,
+              // Only a work has a position to update; a channel is live and has none.
+              record.id === historyId && record.kind === "vod"
+                ? { ...record, progress }
+                : record,
             ),
           };
         }),
@@ -448,7 +513,7 @@ export const useAppStore = create<AppStore>()(
               ? "browse"
               : (persisted?.activeView ?? currentState.activeView),
           sources: keepUserContent ? (persisted?.sources ?? []) : [],
-          history: keepUserContent ? (persisted?.history ?? []) : [],
+          history: keepUserContent ? migrateHistory(persisted?.history) : [],
           favorites: keepUserContent
             ? migrateFavorites(persisted?.favorites)
             : [],

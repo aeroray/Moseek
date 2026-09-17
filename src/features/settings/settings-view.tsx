@@ -638,7 +638,7 @@ export function SettingsView({
               </CardHeader>
               <CardContent className="flex flex-col gap-3">
                 <div className="grid grid-cols-3 gap-3">
-                  <StorageStat label="播放记录" value={historyCount} />
+                  <StorageStat label="足迹" value={historyCount} />
                   <StorageStat label="收藏" value={favoriteCount} />
                   <StorageStat label="观看进度" value={progressCount} />
                 </div>
@@ -649,14 +649,14 @@ export function SettingsView({
                     size="sm"
                     disabled={historyCount === 0}
                     onClick={() => {
-                      if (!window.confirm("清除全部播放记录与观看进度？收藏会保留。")) {
+                      if (!window.confirm("清除全部足迹与观看进度？收藏会保留。")) {
                         return;
                       }
                       onClearHistory();
-                      setStorageMessage("已清除播放记录与观看进度。");
+                      setStorageMessage("已清除足迹与观看进度。");
                     }}
                   >
-                    清除播放记录
+                    清除足迹
                   </Button>
                   <Button
                     type="button"

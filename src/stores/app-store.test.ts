@@ -1,10 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
 import {
   migrateFavorites,
+  migrateHistory,
   migrateLiveFavorites,
+  useAppStore,
 } from "@/stores/app-store";
-import type { VodItem } from "@/types/moseek";
+import type { LiveChannel, VodItem } from "@/types/moseek";
 
 function legacyItem(): VodItem {
   return {
@@ -97,5 +99,141 @@ describe("favourite storage migration", () => {
     const migrated = migrateLiveFavorites(saved);
     expect(migrated).toHaveLength(1);
     expect(migrated[0].channel.name).toBe("City News");
+  });
+});
+
+describe("history migration", () => {
+  it("tags records saved before footprints carried a kind", () => {
+    // The old shape was a flat record with an `item` and no `kind`.
+    const migrated = migrateHistory([
+      {
+        id: "vod-1:ep-1",
+        item: legacyItem(),
+        lineId: "line-1",
+        episodeId: "ep-1",
+        episodeName: "第01集",
+        progress: 120,
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      },
+    ]);
+
+    expect(migrated).toHaveLength(1);
+    expect(migrated[0].kind).toBe("vod");
+    // The id is kept exactly, because `playbackProgress` is keyed by it — rewriting it would
+    // orphan every saved position.
+    expect(migrated[0].id).toBe("vod-1:ep-1");
+  });
+
+  it("leaves already-migrated records untouched", () => {
+    const current = [
+      {
+        kind: "live" as const,
+        id: "live-main:News",
+        channel: {
+          id: "live-main:News",
+          name: "City News",
+          groupId: "news",
+          groupName: "新闻",
+          logoUrl: "",
+          streamUrl: "https://s/n.m3u8",
+          streamUrls: ["https://s/n.m3u8"],
+          mediaKind: "hls" as const,
+          sourceKey: "live-main",
+        },
+        sourceName: "直播源",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+      },
+    ];
+    expect(migrateHistory(current)).toHaveLength(1);
+    expect(migrateHistory(current)[0].kind).toBe("live");
+  });
+
+  it("survives a corrupt or missing value", () => {
+    expect(migrateHistory(undefined)).toEqual([]);
+    expect(migrateHistory(null)).toEqual([]);
+    expect(migrateHistory("nonsense")).toEqual([]);
+    expect(migrateHistory([null, 7, {}])).toEqual([]);
+  });
+});
+
+function liveChannel(name: string): LiveChannel {
+  return {
+    id: `live-main:${name}`,
+    name,
+    groupId: "news",
+    groupName: "新闻",
+    logoUrl: "",
+    streamUrl: "https://s/n.m3u8",
+    streamUrls: ["https://s/n.m3u8"],
+    mediaKind: "hls",
+    sourceKey: "live-main",
+  };
+}
+
+describe("footprints", () => {
+  beforeEach(() => {
+    useAppStore.setState({ history: [], playbackProgress: {} });
+  });
+
+  it("records a work under the key playback progress uses", () => {
+    // `setPlaybackProgress` finds the record to update by id. If the two schemes disagree the
+    // position is written to the map but never reaches the timeline, and the page silently shows
+    // "刚开始看" forever.
+    useAppStore.getState().addVodFootprint({
+      item: legacyItem(),
+      lineId: "line-1",
+      episodeId: "ep-1",
+      episodeName: "第01集",
+      progress: 0,
+    });
+
+    const record = useAppStore.getState().history[0];
+    expect(record.id).toBe("vod-1:ep-1");
+
+    useAppStore.getState().setPlaybackProgress(record.id, 620);
+    const updated = useAppStore.getState().history[0];
+    if (updated.kind !== "vod") throw new Error("expected a vod footprint");
+    expect(updated.progress).toBe(620);
+  });
+
+  it("keeps only the newest entry for the same episode", () => {
+    // Re-opening something should move it to the top, not add a second row for the same visit.
+    const footprint = {
+      item: legacyItem(),
+      lineId: "line-1",
+      episodeId: "ep-1",
+      episodeName: "第01集",
+      progress: 0,
+    };
+    useAppStore.getState().addVodFootprint(footprint);
+    useAppStore.getState().addVodFootprint({ ...footprint, episodeId: "ep-2" });
+    useAppStore.getState().addVodFootprint(footprint);
+
+    const history = useAppStore.getState().history;
+    expect(history).toHaveLength(2);
+    expect(history[0].id).toBe("vod-1:ep-1");
+  });
+
+  it("records a channel without a position", () => {
+    // A channel is live; giving it a resume point would be meaningless.
+    useAppStore.getState().addLiveFootprint(liveChannel("City News"), "直播源");
+
+    const record = useAppStore.getState().history[0];
+    expect(record.kind).toBe("live");
+    if (record.kind !== "live") throw new Error("expected a live footprint");
+    expect(record.channel.name).toBe("City News");
+    expect(record.sourceName).toBe("直播源");
+  });
+
+  it("does not corrupt a live record when progress is reported", () => {
+    // The live record has no `progress` field, so the update has to skip it rather than write one.
+    useAppStore.getState().addLiveFootprint(liveChannel("City News"), "直播源");
+    const id = useAppStore.getState().history[0].id;
+
+    useAppStore.getState().setPlaybackProgress(id, 30);
+
+    const record = useAppStore.getState().history[0];
+    expect(record.kind).toBe("live");
+    expect(record).not.toHaveProperty("progress");
   });
 });

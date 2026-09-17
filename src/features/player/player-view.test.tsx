@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -149,6 +150,43 @@ describe("PlayerView composition", () => {
     const player = await screen.findByTestId("media-player");
     const column = player.parentElement;
     expect(column?.textContent).not.toMatch(/（\d+ \/ \d+）/);
+  });
+
+  it("records a footprint as soon as the work is opened", async () => {
+    // This is the bug: the record was only written when the user actively switched episodes, so
+    // opening a film and watching it left no trace and the timeline stayed empty forever.
+    renderPlayer();
+    await screen.findByTestId("media-player");
+
+    await waitFor(() => {
+      const history = useAppStore.getState().history;
+      expect(history).toHaveLength(1);
+      expect(history[0].kind).toBe("vod");
+    });
+    const record = useAppStore.getState().history[0];
+    if (record.kind !== "vod") throw new Error("expected a vod footprint");
+    expect(record.item.name).toBe(SHOW);
+    expect(record.episodeName).toBe("第01集");
+  });
+
+  it("does not rewrite the footprint on every progress tick", async () => {
+    // `playbackProgress` is in the effect's dependencies, so without the guard every position
+    // update re-runs the effect and rewrites the record — bumping `updatedAt` continuously and
+    // persisting the whole store each time. The store dedupes by id, so the row count alone
+    // cannot see this; the timestamp can.
+    renderPlayer();
+    await screen.findByTestId("media-player");
+    await waitFor(() => expect(useAppStore.getState().history).toHaveLength(1));
+
+    const first = useAppStore.getState().history[0].updatedAt;
+    await act(async () => {
+      // Simulate the player reporting its position, as it does every few seconds.
+      useAppStore.getState().setPlaybackProgress("vod-1:ep-1", 120);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+
+    expect(useAppStore.getState().history).toHaveLength(1);
+    expect(useAppStore.getState().history[0].updatedAt).toBe(first);
   });
 
   it("clamps the synopsis so a long one cannot force a scrollbar", async () => {

@@ -243,6 +243,45 @@ describe("LiveView EPG rendering", () => {
     });
   });
 
+  it("records a footprint when a channel starts playing", async () => {
+    // Watching a channel is something the user did, so it belongs on the timeline. Without this
+    // the footprint page only ever knew about films and series.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+
+    const history = useAppStore.getState().history;
+    expect(history).toHaveLength(1);
+    expect(history[0].kind).toBe("live");
+    if (history[0].kind !== "live") throw new Error("expected a live footprint");
+    expect(history[0].channel.name).toBe("City News");
+  });
+
+  it("records a footprint when the user switches channels", async () => {
+    // Switching is the other way a channel gets watched, and it must not be missed.
+    loadLiveCatalog.mockResolvedValue({
+      data: twoGroupCatalog,
+      mode: "remote",
+      error: null,
+    });
+    render(<LiveView />);
+    await waitFor(() => {
+      expect(useAppStore.getState().history).toHaveLength(1);
+    });
+
+    useAppStore.setState({ history: [] });
+    fireEvent.click(screen.getByLabelText("下一个频道"));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().history.length).toBeGreaterThan(0);
+    });
+    const record = useAppStore.getState().history[0];
+    if (record.kind !== "live") throw new Error("expected a live footprint");
+    expect(record.channel.name).toBe("CCTV-2 财经");
+  });
+
   it("renders the program guide returned by the adapter", async () => {
     // The adapter resolves an EpgCatalog (`{ programs }`), not a bare array. Assigning the
     // whole object to the program list made `epgPrograms.filter` throw during render, which

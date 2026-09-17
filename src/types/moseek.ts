@@ -123,7 +123,15 @@ export interface CatalogPage {
   total: number;
 }
 
-export interface PlayHistoryRecord {
+/**
+ * One thing that was watched, as a self-contained snapshot.
+ *
+ * The work is stored whole rather than by reference so the timeline keeps working after a source
+ * is renamed or deleted — a footprint is a record of something that happened, and it must not
+ * disappear because the place it happened moved.
+ */
+export interface VodFootprint {
+  kind: "vod";
   id: string;
   item: VodItem;
   lineId: string;
@@ -132,6 +140,23 @@ export interface PlayHistoryRecord {
   progress: number;
   updatedAt: string;
 }
+
+/**
+ * A channel that was watched.
+ *
+ * Separate from the VOD shape rather than forced into it: a channel has no episodes, no line and
+ * no resume position, and pretending otherwise would mean every consumer branching on fields that
+ * are meaningless for half the records.
+ */
+export interface LiveFootprint {
+  kind: "live";
+  id: string;
+  channel: LiveChannel;
+  sourceName: string;
+  updatedAt: string;
+}
+
+export type FootprintRecord = VodFootprint | LiveFootprint;
 
 export interface LiveGroup {
   id: string;

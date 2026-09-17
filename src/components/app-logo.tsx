@@ -12,14 +12,22 @@ import { cn } from "@/lib/utils";
  * because a single reel at that size reads as an unidentifiable blob, while two register as a
  * camera even when the detail is gone.
  */
-export function AppLogo({ className }: { className?: string }) {
+export function AppLogo({
+  className,
+  title,
+}: {
+  className?: string;
+  /** Adds a native tooltip. Omitted where the mark is purely decorative. */
+  title?: string;
+}) {
   return (
     <svg
       viewBox="0 0 256 256"
       role="img"
-      aria-label="拾影"
+      aria-label={title ?? "拾影"}
       className={cn("size-5", className)}
     >
+      {title && <title>{title}</title>}
       <rect width="256" height="256" rx="56" fill="#0B0D12" />
       <g fill="#FFFFFF">
         <path d="M28 118a26 26 0 0 1 26-26h104a26 26 0 0 1 26 26v64a26 26 0 0 1-26 26H54a26 26 0 0 1-26-26v-64Z" />

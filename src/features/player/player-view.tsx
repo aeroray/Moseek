@@ -72,7 +72,7 @@ export function PlayerView({
   source: SourceRecord;
   onBack: () => void;
 }) {
-  const addHistory = useAppStore((state) => state.addHistory);
+  const addVodFootprint = useAppStore((state) => state.addVodFootprint);
   const favorites = useAppStore((state) => state.favorites);
   const toggleFavorite = useAppStore((state) => state.toggleFavorite);
   const playbackProgress = useAppStore((state) => state.playbackProgress);
@@ -197,7 +197,7 @@ export function PlayerView({
   const selectEpisode = (line: VodPlayLine, episode: VodEpisode) => {
     setActiveLineId(line.id);
     setActiveEpisodeId(episode.id);
-    addHistory({
+    addVodFootprint({
       item: detail,
       lineId: line.id,
       episodeId: episode.id,
@@ -212,6 +212,31 @@ export function PlayerView({
     const nextEpisode = activeLine.episodes[activeIndex + direction];
     if (nextEpisode) selectEpisode(activeLine, nextEpisode);
   };
+
+  /**
+   * Records the footprint on entry, not only when an episode is picked.
+   *
+   * This is the fix for the empty timeline: `selectEpisode` runs only when the user actively
+   * switches episodes, so opening a film and watching it through left no record at all. The entry
+   * episode is what is playing, so it is what gets recorded.
+   *
+   * Guarded on the episode id so the arrival of the detail request — which rebuilds the play
+   * lines with new objects for the same episodes — does not record the same thing twice.
+   */
+  const recordedRef = useRef("");
+  useEffect(() => {
+    if (!activeEpisode || !activeLine) return;
+    const key = `${detail.id}:${activeEpisode.id}`;
+    if (recordedRef.current === key) return;
+    recordedRef.current = key;
+    addVodFootprint({
+      item: detail,
+      lineId: activeLine.id,
+      episodeId: activeEpisode.id,
+      episodeName: activeEpisode.name,
+      progress: playbackProgress[key] ?? 0,
+    });
+  }, [activeEpisode, activeLine, addVodFootprint, detail, playbackProgress]);
 
   const canRenderPlayer =
     Boolean(activeEpisode) &&

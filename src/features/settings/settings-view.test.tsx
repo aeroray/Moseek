@@ -126,7 +126,7 @@ describe("settings page", () => {
     const props = renderSettings();
     openTab("存储");
 
-    fireEvent.click(screen.getByRole("button", { name: "清除播放记录" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除足迹" }));
 
     expect(props.onClearHistory).toHaveBeenCalledTimes(1);
   });
@@ -146,7 +146,7 @@ describe("settings page", () => {
     renderSettings({ historyCount: 0, favoriteCount: 0 });
     openTab("存储");
 
-    expect(screen.getByRole("button", { name: "清除播放记录" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "清除足迹" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "清除收藏" })).toBeDisabled();
   });
 
