@@ -1,4 +1,4 @@
-import { searchVod } from "@/features/browse/cms-adapter";
+import { getVodDetail, searchVod } from "@/features/browse/cms-adapter";
 import { isMovieLibrarySource } from "@/lib/adapters";
 import type { SourceRecord, VodItem } from "@/types/moseek";
 
@@ -44,7 +44,15 @@ export async function relinkFavorite(
     const match = result.data.items.find(
       (candidate) => normalizeTitle(candidate.name) === target,
     );
-    if (match) return { item: match, source };
+    if (!match) continue;
+
+    // The list API usually returns a single play line — often a preview — while the detail
+    // request returns every line. Relinking on the search row alone is why a relinked favourite
+    // showed only one line and offered nothing to switch to, even though the source had several.
+    const detail = await getVodDetail(source, match).catch(() => null);
+    const resolved =
+      detail?.data && detail.data.playLines.length > 0 ? detail.data : match;
+    return { item: resolved, source };
   }
 
   return null;

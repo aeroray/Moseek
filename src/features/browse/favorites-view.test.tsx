@@ -241,10 +241,39 @@ describe("FavoritesView", () => {
       mode: "empty",
       error: "源已失效",
     });
+    // The search row carries a single line; the detail request has the full set. Relinking on
+    // the search row alone is why a relinked favourite offered nothing to switch to.
+    const searchRow = item({
+      id: "vod-1",
+      sourceKey: "cms-backup",
+      playLines: [
+        {
+          id: "line-1",
+          name: "线路一",
+          episodes: [{ id: "ep-1", name: "第01集", url: "https://cdn/1.m3u8" }],
+        },
+      ],
+    });
+    const fullDetail = item({
+      id: "vod-1",
+      sourceKey: "cms-backup",
+      playLines: [
+        {
+          id: "line-1",
+          name: "线路一",
+          episodes: [{ id: "ep-1", name: "第01集", url: "https://cdn/1.m3u8" }],
+        },
+        {
+          id: "line-2",
+          name: "线路二",
+          episodes: [{ id: "ep-1b", name: "第01集", url: "https://cdn/b1.m3u8" }],
+        },
+      ],
+    });
     searchVod.mockResolvedValue({
       data: {
         sourceKey: "cms-backup",
-        items: [item({ id: "vod-1", sourceKey: "cms-backup" })],
+        items: [searchRow],
         categories: [],
         page: 1,
         pageCount: 1,
@@ -254,6 +283,10 @@ describe("FavoritesView", () => {
       mode: "remote",
       error: null,
     });
+    // The first call is for the original source (fails), the second for the relinked one.
+    getVodDetail
+      .mockResolvedValueOnce({ data: null, mode: "empty", error: "源已失效" })
+      .mockResolvedValue({ data: fullDetail, mode: "remote", error: null });
 
     render(<FavoritesView onNavigate={() => {}} />);
     fireEvent.click(screen.getByText("示例剧"));
@@ -261,6 +294,10 @@ describe("FavoritesView", () => {
     await waitFor(() => {
       expect(screen.getByText(/已自动切换到「备用影视源」/)).toBeInTheDocument();
     });
+    // Both of the new source's lines are offered, not just the one the search row carried.
+    expect(
+      await screen.findByRole("button", { name: /线路 2：线路二/ }),
+    ).toBeInTheDocument();
   });
 
   it("says so plainly when no other source has the work", async () => {
@@ -326,6 +363,86 @@ describe("FavoritesView", () => {
 
     // Watching happens here, without going back to the live page.
     expect(await screen.findByTestId("media-player")).toHaveTextContent("City News");
+  });
+
+  it("offers a line switcher when the work carries several lines", async () => {
+    // A relinked favourite arrives with whatever the new source has, and lines are not
+    // equivalent, so the rail has to say which one is playing and allow changing it.
+    const twoLine = item({
+      playLines: [
+        {
+          id: "line-1",
+          name: "线路一",
+          episodes: [
+            { id: "ep-1", name: "第01集", url: "https://cdn/a1.m3u8" },
+            { id: "ep-2", name: "第02集", url: "https://cdn/a2.m3u8" },
+          ],
+        },
+        {
+          id: "line-2",
+          name: "线路二",
+          episodes: [
+            { id: "ep-1b", name: "第01集", url: "https://cdn/b1.m3u8" },
+            { id: "ep-2b", name: "第02集", url: "https://cdn/b2.m3u8" },
+          ],
+        },
+      ],
+    });
+    useAppStore.setState({
+      favorites: [
+        favorite({
+          item: twoLine,
+          progress: {
+            lineId: "line-1",
+            episodeId: "ep-2",
+            episodeName: "第02集",
+            seconds: 60,
+            episodeCount: 2,
+            updatedAt: "2026-01-02T00:00:00.000Z",
+          },
+        }),
+      ],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+    fireEvent.click(screen.getByText("示例剧"));
+
+    const line2 = await screen.findByRole("button", { name: /线路 2：线路二/ });
+    fireEvent.click(line2);
+
+    // The place is kept by episode name, because the other line numbers its episodes
+    // independently.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /第02集/ })).toHaveAttribute(
+        "aria-current",
+        "true",
+      );
+    });
+    expect(resolvePlayback).toHaveBeenCalledWith(
+      "https://cdn/b2.m3u8",
+      expect.anything(),
+    );
+  });
+
+  it("hides the line switcher for a single-line work", async () => {
+    // One line is not a choice; a lone button would suggest otherwise.
+    useAppStore.setState({ favorites: [favorite()] });
+    render(<FavoritesView onNavigate={() => {}} />);
+    fireEvent.click(screen.getByText("示例剧"));
+
+    await screen.findByTestId("media-player");
+    expect(screen.queryByRole("button", { name: /线路 1：/ })).toBeNull();
+  });
+
+  it("offers 播放诊断 from the player itself", async () => {
+    // Without it a player stuck on "正在准备播放" gave no way to find out why.
+    useAppStore.setState({ favorites: [favorite()] });
+    render(<FavoritesView onNavigate={() => {}} />);
+    fireEvent.click(screen.getByText("示例剧"));
+
+    const trigger = await screen.findByRole("button", { name: "播放诊断" });
+    fireEvent.click(trigger);
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
   });
 
   it("offers a way to the library when there is nothing favourited", () => {

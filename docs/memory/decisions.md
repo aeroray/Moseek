@@ -316,3 +316,13 @@
 - **真实浏览器实测**：`tabLabels: ["影视(1)", "电视直播(1)"]`（两类已分离）、`showsProgress: true`（卡片上直接显示「第02集 · 10:20」）、点开后 `currentEpisode: "第02集"`（**精确续播**）、`railLeftOfPlayer: true` 且列出 3 集、**`activeViewAfterOpen: "favorites"`（播放发生在收藏页内，没有跳转）**。
 - **Radix Tabs 的一个坑**：测试里用 `fireEvent.click` 切 Tab **不生效**，必须用 `fireEvent.mouseDown`（Radix 在 pointer-down 时切换）。settings-view 的既有测试里已经有这个写法，**应当先 grep 现有测试的写法再动手**。
 - 本轮最终：前端 **261 项**（新增 favorites-view 9 项、episode-playback 10 项、app-store 迁移 5 项）、Rust 98 项、`clippy` 零警告、`pnpm build` 零警告。
+- **收藏页五处调整（用户逐条指定）**：
+  1. **删掉「继续探索」，把影视/直播切换组件移到右上角**。切换是整页的 scope 控件，**和标题挤在一起会跟标题争夺注意力**，放到另一端更合理。
+  2. **「返回收藏」改为纯图标**，与影视库观看页的返回按钮一致（`aria-label` + `title` 保留无障碍名称）。
+  3. **「共 N 集」从剧集栏顶栏移到标题右边**——它描述的是标题那个作品，就该和标题在一起。
+  4. **线路切换：这是真 bug，不是没做**。根因是 `relinkFavorite()` **用搜索结果当结果**：**列表 API 通常只返回一条线路（常常是预览线路），详情请求才返回全部线路**。所以换源后的收藏只剩一条线路，**没有可切换的东西**。改为匹配后**再请求一次详情**，拿不到详情时才退回搜索行（薄源仍可用）。这正是用户看到「只有一条线路」的原因。
+  5. **播放器右下角加「播放诊断」**。原来卡在「正在准备播放」时**完全没有途径知道原因**。
+- **顺手消除三处重复**：播放诊断对话框原本在**观看页、直播页、收藏页各写了一遍**——「同一个按钮在不同页面长得不一样」就是这么开始的。抽成 `PlaybackDiagnostics` 组件，三处共用；它支持 `iconOnly`，因为**覆盖在画面上时带文字的按钮会挡住画面**，而播放器下方的控制行有空间放文字。
+- **变异验证 5 项，其中 1 项第一次存活**：`relinkWithoutDetail`。原因值得记：**收藏页的 effect 会在换源后再次请求详情，把缺陷掩盖掉了**——所以「页面级」测试抓不到它。补了 `favorite-relink.test.ts` **直接测 `relinkFavorite` 本身**才钉住。**当一个缺陷被上层逻辑自动修复时，必须在更低的层级测它。**
+- 真实浏览器实测（1440×900）：`hasContinueButton: false`、`tabsOnRight: true`（Tab 右边界 1408 / header 1424）、`backButton.iconOnly: true` 且文本为空、`episodeCount.rightOfTitle: true` 且 `sameRow: true`、`lineSwitcher` 两条线路都在且第 1 条为 `aria-pressed=true`、`diagnostics.inPlayerCorner: true` 且点击后 `dialogOpens: true`。
+- 本轮最终：前端 **269 项**（新增 favorites-view 12 项、favorite-relink 5 项）、Rust 98 项、`clippy` 零警告、`pnpm build` 零警告。

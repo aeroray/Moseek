@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Bookmark,
+  ChevronLeft,
   Clapperboard,
   Heart,
   Play,
@@ -22,6 +23,8 @@ import {
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MediaPlayer } from "@/features/player/media-player";
+import { PlaybackDiagnostics } from "@/features/player/playback-diagnostics";
+import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 import {
   episodeMediaKind,
   pickEntryEpisode,
@@ -41,6 +44,7 @@ import type {
   VodEpisode,
   VodFavorite,
   VodItem,
+  VodPlayLine,
 } from "@/types/moseek";
 
 /**
@@ -98,35 +102,29 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
           <h1 className="text-sm font-semibold tracking-tight text-foreground">
             我的收藏
           </h1>
-          <Tabs
-            value={tab}
-            onValueChange={(value) => setTab(value as "vod" | "live")}
-            className="ml-1"
-          >
-            <TabsList>
-              <TabsTrigger value="vod" className="gap-1.5">
-                <Clapperboard className="size-3.5" aria-hidden="true" />
-                影视
-                <span className="text-muted-foreground">({favorites.length})</span>
-              </TabsTrigger>
-              <TabsTrigger value="live" className="gap-1.5">
-                <Radio className="size-3.5" aria-hidden="true" />
-                电视直播
-                <span className="text-muted-foreground">
-                  ({liveFavorites.length})
-                </span>
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => onNavigate(tab === "vod" ? "browse" : "live")}
+        {/* The switch sits on the right, where the "继续探索" button used to be. It is a scope
+            control for the whole page, so it belongs with the other end-of-bar control rather
+            than beside the title, where it competed with the heading. */}
+        <Tabs
+          value={tab}
+          onValueChange={(value) => setTab(value as "vod" | "live")}
         >
-          继续探索
-        </Button>
+          <TabsList>
+            <TabsTrigger value="vod" className="gap-1.5">
+              <Clapperboard className="size-3.5" aria-hidden="true" />
+              影视
+              <span className="text-muted-foreground">({favorites.length})</span>
+            </TabsTrigger>
+            <TabsTrigger value="live" className="gap-1.5">
+              <Radio className="size-3.5" aria-hidden="true" />
+              电视直播
+              <span className="text-muted-foreground">
+                ({liveFavorites.length})
+              </span>
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
       </header>
 
       <div className="min-h-0 flex-1">
@@ -348,10 +346,13 @@ function FavoriteWatchView({
   const [entry] = useState(() =>
     pickEntryEpisode(favorite.item, favorite.progress),
   );
-  const [activeLineId] = useState(entry.lineId);
+  const [activeLineId, setActiveLineId] = useState(entry.lineId);
   const [activeEpisodeId, setActiveEpisodeId] = useState(entry.episodeId);
   const [refreshNote, setRefreshNote] = useState<string | null>(null);
   const [recoveryNote, setRecoveryNote] = useState<string | null>(null);
+  const [diagnostic, setDiagnostic] = useState<string | null>(null);
+  const [mediaDiagnostic, setMediaDiagnostic] =
+    useState<MediaDiagnosticSnapshot | null>(null);
 
   const source = sources.find((candidate) => candidate.key === item.sourceKey);
   const setItemWithProgress = useCallback(
@@ -453,17 +454,58 @@ function FavoriteWatchView({
     [activeLine, item.id, setFavoriteProgress],
   );
 
+  /**
+   * Switches lines, keeping the user's place by episode name.
+   *
+   * Lines number their episodes independently, so carrying the id across would land on an
+   * unrelated episode — the name is what identifies "the one I was watching".
+   */
+  const selectLine = useCallback(
+    (line: VodPlayLine) => {
+      setActiveLineId(line.id);
+      const currentName = activeEpisode?.name;
+      const sameEpisode = currentName
+        ? line.episodes.find((episode) => episode.name === currentName)
+        : undefined;
+      const next = sameEpisode ?? line.episodes[0];
+      setActiveEpisodeId(next?.id ?? "");
+      setFavoriteProgress(item.id, {
+        lineId: line.id,
+        episodeId: next?.id ?? "",
+        episodeName: next?.name ?? "",
+        seconds: 0,
+        episodeCount: line.episodes.length,
+        updatedAt: new Date().toISOString(),
+      });
+    },
+    [activeEpisode?.name, item.id, setFavoriteProgress],
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-3 border-b border-border/70 px-4 py-2">
-        <Button type="button" variant="ghost" size="sm" onClick={onBack}>
-          返回收藏
+        {/* Icon-only, matching the watch page's back button: the arrow is unambiguous, and the
+            word took width from the title without adding meaning. */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="返回收藏"
+          title="返回收藏"
+          className="text-muted-foreground hover:text-foreground"
+          onClick={onBack}
+        >
+          <ChevronLeft className="size-4" aria-hidden="true" />
         </Button>
         <h2 className="truncate text-sm font-semibold text-foreground">
           {item.name}
         </h2>
+        {/* The count belongs with the title it describes, not in a header bar over the rail. */}
+        <span className="shrink-0 text-xs text-muted-foreground">
+          共 {activeLine?.episodes.length ?? 0} 集
+        </span>
         {favorite.progress && (
-          <span className="shrink-0 text-xs text-muted-foreground">
+          <span className="shrink-0 truncate text-xs text-muted-foreground">
             上次看到 {favorite.progress.episodeName}
           </span>
         )}
@@ -473,9 +515,34 @@ function FavoriteWatchView({
         {/* Episode rail, left. It mirrors the live workspace's channel list so the two pages read
             the same way. */}
         <aside className="flex w-56 shrink-0 flex-col overflow-hidden border-r border-border/70 bg-card/20">
-          <div className="shrink-0 border-b border-border/60 px-3 py-2 text-xs font-medium text-muted-foreground">
-            共 {activeLine?.episodes.length ?? 0} 集
-          </div>
+          {/* Line selector. A work commonly carries several lines and they are not equivalent —
+              a relinked favourite may have arrived with a different set entirely — so the rail
+              has to say which one is playing and let the user change it. */}
+          {item.playLines.length > 1 && (
+            <div className="flex shrink-0 flex-wrap gap-1 border-b border-border/60 px-2 py-1.5">
+              {item.playLines.map((line, index) => {
+                const isActive = line.id === activeLine?.id;
+                return (
+                  <button
+                    key={line.id}
+                    type="button"
+                    onClick={() => selectLine(line)}
+                    aria-label={`线路 ${index + 1}：${line.name}`}
+                    aria-pressed={isActive}
+                    title={`${line.name}（${line.episodes.length} 集）`}
+                    className={cn(
+                      "rounded px-1.5 py-0.5 text-[11px] font-medium transition-colors",
+                      isActive
+                        ? "bg-primary text-primary-foreground"
+                        : "bg-muted/70 text-foreground/80 hover:bg-muted hover:text-foreground",
+                    )}
+                  >
+                    {line.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <ScrollArea
             type="auto"
             className="min-h-0 flex-1"
@@ -538,6 +605,12 @@ function FavoriteWatchView({
                     updatedAt: new Date().toISOString(),
                   })
                 }
+                onDiagnostic={(snapshot) => {
+                  // Diagnostics only exist to explain a failure, so a healthy session keeps no
+                  // snapshot; the events leading up to a failure are the evidence.
+                  setMediaDiagnostic(snapshot.status === "error" ? snapshot : null);
+                  setDiagnostic(snapshot.message);
+                }}
               />
             ) : (
               <div className="flex flex-col items-center gap-2 px-8 text-center">
@@ -546,6 +619,20 @@ function FavoriteWatchView({
                 <p className="max-w-md text-xs leading-5 text-white/60">
                   收藏时保存的剧集信息里没有可用的播放地址。可以在影视库中重新找到这部作品。
                 </p>
+              </div>
+            )}
+
+            {/* The diagnosis sits in the player's own corner rather than in a row below it, so it
+                is present exactly when it is needed — which is when nothing is playing. Without
+                it a stuck player offered no way to find out why. */}
+            {activeEpisode && (
+              <div className="absolute right-3 bottom-3 z-30">
+                <PlaybackDiagnostics
+                  snapshot={mediaDiagnostic}
+                  note={recoveryNote ?? refreshNote ?? diagnostic}
+                  iconOnly
+                  triggerClassName="bg-black/60 text-white hover:bg-black/80 hover:text-white"
+                />
               </div>
             )}
           </div>
@@ -573,6 +660,7 @@ function ResolvedEpisodePlayer({
   title,
   resumeAt,
   onProgress,
+  onDiagnostic,
 }: {
   source: SourceRecord | undefined;
   episode: VodEpisode;
@@ -580,6 +668,7 @@ function ResolvedEpisodePlayer({
   title: string;
   resumeAt: number;
   onProgress: (seconds: number) => void;
+  onDiagnostic: (snapshot: MediaDiagnosticSnapshot) => void;
 }) {
   const [resolved, setResolved] = useState<{
     url: string;
@@ -645,6 +734,10 @@ function ResolvedEpisodePlayer({
       fill
       resumeAt={resumeAt}
       onProgress={onProgress}
+      onDiagnostic={onDiagnostic}
+      onStatus={(_status, message) => {
+        if (message) setError(message);
+      }}
     />
   );
 }

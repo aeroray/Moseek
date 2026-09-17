@@ -3,7 +3,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Heart,
-  ScrollText,
   Search,
   TriangleAlert,
   Tv,
@@ -13,14 +12,6 @@ import {
 import { TruncatedText } from "@/components/truncated-text";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import {
@@ -49,7 +40,7 @@ import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
 import { MediaPlayer, usesHlsPipeline } from "@/features/player/media-player";
-import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
+import { PlaybackDiagnostics } from "@/features/player/playback-diagnostics";
 import { useStreamProbes } from "@/features/player/use-stream-probes";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
@@ -90,7 +81,6 @@ export function LiveView() {
     useState<MediaDiagnosticSnapshot | null>(null);
   const [resolvedStream, setResolvedStream] =
     useState<PlaybackResolution | null>(null);
-  const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(false);
 
   useEffect(() => {
     if (!liveSources.some((source) => source.key === liveSourceKey)) {
@@ -732,42 +722,10 @@ export function LiveView() {
                 </div>
               )}
 
-              <Dialog open={isDiagnosticOpen} onOpenChange={setIsDiagnosticOpen}>
-                <DialogTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="text-muted-foreground"
-                  >
-                    <ScrollText
-                      className="size-3.5"
-                      data-icon="inline-start"
-                      aria-hidden="true"
-                    />
-                    播放诊断
-                  </Button>
-                </DialogTrigger>
-                <DialogContent className="flex max-h-[calc(100vh-2rem)] max-w-2xl flex-col overflow-hidden sm:max-w-2xl">
-                  {/* The panel carries the visible heading and the copy action, so the dialog's
-                      own title exists only to name the dialog for assistive technology. This is
-                      the same dialog the movie library opens — one presentation of one thing,
-                      rather than a drawer here and a dialog there. */}
-                  <DialogHeader className="sr-only">
-                    <DialogTitle>播放诊断</DialogTitle>
-                    <DialogDescription>
-                      播放失败时复制这段内容，可直接定位到具体环节
-                    </DialogDescription>
-                  </DialogHeader>
-                  <div className="min-h-0 flex-1 overflow-y-auto">
-                    <MediaDiagnosticPanel
-                      className="border-0 bg-transparent backdrop-blur-none"
-                      snapshot={mediaDiagnostic}
-                      note={allLinesUnreachableNote ?? diagnostic}
-                    />
-                  </div>
-                </DialogContent>
-              </Dialog>
+              <PlaybackDiagnostics
+                snapshot={mediaDiagnostic}
+                note={allLinesUnreachableNote ?? diagnostic}
+              />
             </div>
           </div>
         </main>

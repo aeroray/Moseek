@@ -6,7 +6,6 @@ import {
   ListVideo,
   Loader2,
   Play,
-  ScrollText,
   TriangleAlert,
 } from "lucide-react";
 
@@ -21,14 +20,6 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
-} from "@/components/ui/dialog";
 import {
   Empty,
   EmptyDescription,
@@ -59,7 +50,7 @@ import type {
   VodPlayLine,
 } from "@/types/moseek";
 import { MediaPlayer, type MediaStatus } from "@/features/player/media-player";
-import { MediaDiagnosticPanel } from "@/features/player/media-diagnostic-panel";
+import { PlaybackDiagnostics } from "@/features/player/playback-diagnostics";
 import { resolveEpisodePlayback } from "@/features/player/episode-playback";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
 
@@ -103,7 +94,6 @@ export function PlayerView({
   const [diagnostic, setDiagnostic] = useState<string | null>(null);
   const [mediaDiagnostic, setMediaDiagnostic] =
     useState<MediaDiagnosticSnapshot | null>(null);
-  const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(false);
   const [resolvedPlayback, setResolvedPlayback] =
     useState<PlaybackResolution | null>(null);
   /**
@@ -437,37 +427,10 @@ export function PlayerView({
                 </div>
 
                 {status === "error" && (
-                  <Dialog
-                    open={isDiagnosticOpen}
-                    onOpenChange={setIsDiagnosticOpen}
-                  >
-                    <DialogTrigger asChild>
-                      <Button type="button" variant="outline" size="sm">
-                        <ScrollText className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                        播放诊断
-                      </Button>
-                    </DialogTrigger>
-                    <DialogContent className="flex max-h-[calc(100vh-2rem)] max-w-2xl flex-col overflow-hidden sm:max-w-2xl">
-                      {/* The panel carries the visible heading and the copy action, so the
-                          dialog's own title exists only to name the dialog for assistive
-                          technology rather than duplicating the heading on screen. */}
-                      <DialogHeader className="sr-only">
-                        <DialogTitle>播放诊断</DialogTitle>
-                        <DialogDescription>
-                          播放失败时复制这段内容，可直接定位到具体环节
-                        </DialogDescription>
-                      </DialogHeader>
-                      <div className="min-h-0 flex-1 overflow-y-auto">
-                        <MediaDiagnosticPanel
-                          // The dialog already supplies the surface, so the panel drops its own
-                          // card chrome instead of drawing a border inside a border.
-                          className="border-0 bg-transparent backdrop-blur-none"
-                          snapshot={mediaDiagnostic}
-                          note={diagnostic}
-                        />
-                      </div>
-                    </DialogContent>
-                  </Dialog>
+                  <PlaybackDiagnostics
+                    snapshot={mediaDiagnostic}
+                    note={diagnostic}
+                  />
                 )}
               </div>
             )}
