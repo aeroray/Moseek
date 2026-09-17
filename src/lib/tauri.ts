@@ -375,6 +375,23 @@ export async function executeScriptArchive(
   });
 }
 
+export interface SavedImage {
+  path: string;
+  bytes: number;
+}
+
+/**
+ * Saves an image to a location the user picks.
+ *
+ * Resolves to `null` when the dialog was dismissed, which is an ordinary outcome rather than a
+ * failure — the caller should stay quiet rather than reporting an error. Outside the desktop
+ * runtime there is no native picker, so this also resolves to `null` instead of pretending to
+ * have saved something.
+ */
+export async function downloadImage(url: string, fileName: string) {
+  return invokeCommand<SavedImage | null>("download_image", { url, fileName });
+}
+
 async function invokeCommand<T>(
   command: string,
   args?: Record<string, unknown>,

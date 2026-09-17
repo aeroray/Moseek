@@ -9,6 +9,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
+import { AppLogo } from "@/components/app-logo";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
@@ -51,16 +52,18 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
           className="relative z-40 flex w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar/95 py-3 select-none backdrop-blur-md"
           data-tauri-drag-region
         >
-          {/* Brand Mark */}
+          {/* Brand Mark. The wordmark is replaced by the product's own logo, so the rail shows
+              the same mark as the window and the installer rather than a stand-in glyph. */}
           <div className="mb-4 flex flex-col items-center">
             <button
               type="button"
               onClick={() => onNavigate("browse")}
-              className="group relative flex size-9 items-center justify-center rounded-lg border border-primary/30 bg-primary/10 text-primary transition-all duration-200 hover:scale-105 hover:border-primary hover:bg-primary/20 hover:shadow-[0_0_12px_rgba(229,169,60,0.3)] active:scale-95"
+              className="group relative flex size-9 items-center justify-center rounded-lg transition-transform duration-200 hover:scale-105 active:scale-95"
               title="拾影 · 万千影视，一拾即得"
+              aria-label="拾影 · 返回影视库"
             >
-              <span className="font-display text-sm font-bold tracking-tight">拾</span>
-              <span className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-primary animate-pulse" />
+              <AppLogo className="size-9 rounded-lg" />
+              <span className="absolute -right-0.5 -bottom-0.5 size-1.5 rounded-full bg-primary animate-pulse" />
             </button>
           </div>
 

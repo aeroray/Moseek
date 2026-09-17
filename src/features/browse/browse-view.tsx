@@ -5,13 +5,14 @@ import {
   CircleAlert,
   Film,
   Grid2X2,
+  Heart,
   List,
   Play,
   Search,
-  Star,
 } from "lucide-react";
 
 import { MediaPoster } from "@/components/media-poster";
+import { PosterZoomButton } from "@/components/poster-lightbox";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,8 +38,12 @@ import { useAppStore } from "@/stores/app-store";
 import type { CatalogViewMode, ViewKey, VodItem } from "@/types/moseek";
 import { searchVod } from "@/features/browse/cms-adapter";
 import { isMovieLibrarySource } from "@/lib/adapters";
-import { PlayerView } from "@/features/player/player-view";
+import {
+  catalogCardClassName,
+  catalogCardOverlayClassName,
+} from "@/lib/card-styles";
 import { cn } from "@/lib/utils";
+import { PlayerView } from "@/features/player/player-view";
 
 interface BrowseViewProps {
   onNavigate: (view: ViewKey) => void;
@@ -391,12 +396,10 @@ function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
   const isFavorite = useAppStore((state) =>
     state.favorites.some((favorite) => favorite.item.id === item.id),
   );
+  const toggleFavorite = useAppStore((state) => state.toggleFavorite);
 
   return (
-    <div
-      onClick={onOpen}
-      className="group relative flex flex-col overflow-hidden rounded-md border border-border/60 bg-card/60 transition-all duration-200 hover:-translate-y-1 hover:border-primary/50 hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] cursor-pointer"
-    >
+    <div onClick={onOpen} className={catalogCardClassName}>
       {/* 2:3 Cinematic Poster ratio */}
       <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted/40">
         <MediaPoster
@@ -406,27 +409,31 @@ function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
           imageClassName="transition-transform duration-300 group-hover:scale-105"
         />
 
-        {/* Top Badges */}
-        <div className="absolute top-1.5 left-1.5 right-1.5 flex items-center justify-between pointer-events-none">
-          {item.year ? (
+        {/* Year badge. The favourite mark is gone from here: a state the user can change belongs
+            on a control, not as a decoration in the corner of the artwork. */}
+        {item.year && (
+          <div className="pointer-events-none absolute top-1.5 left-1.5">
             <span className="rounded bg-black/60 px-1.5 py-0.5 text-xs font-semibold text-white/90 backdrop-blur-xs">
               {item.year}
             </span>
-          ) : <span />}
-          {isFavorite && (
-            <Star
-              className="size-4 fill-primary text-primary filter drop-shadow"
-              data-icon="inline-end"
-              aria-hidden="true"
-            />
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Hover Action Overlay */}
-        <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 backdrop-blur-2xs transition-opacity duration-200 group-hover:opacity-100">
+        <div className={catalogCardOverlayClassName}>
           <div className="flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform duration-200 group-hover:scale-110">
             <Play className="size-4 ml-0.5 fill-current" />
           </div>
+        </div>
+
+        {/* Poster actions, top-right. Reachable without opening the work, which is the point:
+            favouriting should not cost a navigation. */}
+        <div className="absolute top-1.5 right-1.5 z-10 flex flex-col gap-1">
+          <PosterZoomButton
+            name={item.name}
+            poster={item.poster}
+            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          />
         </div>
 
         {/* Category badge at bottom corner */}
@@ -440,16 +447,41 @@ function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
       </div>
 
       {/* Info Block */}
-      <div className="p-2.5 flex flex-col gap-1">
-        <p className="truncate text-xs font-semibold text-foreground group-hover:text-primary transition-colors">
-          {item.name}
-        </p>
-        <p className="truncate text-xs text-muted-foreground">
-          {/* The area is often absent (the list API returns no `vod_area`), and a literal
-              "未知地区" reads as a broken field rather than as missing metadata. Show only
-              what is actually known. */}
-          {[item.area, item.sourceName].filter(Boolean).join(" · ")}
-        </p>
+      <div className="flex items-start gap-2 p-2.5">
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <p className="truncate text-xs font-semibold text-foreground group-hover:text-primary transition-colors">
+            {item.name}
+          </p>
+          <p className="truncate text-xs text-muted-foreground">
+            {/* The area is often absent (the list API returns no `vod_area`), and a literal
+                "未知地区" reads as a broken field rather than as missing metadata. Show only
+                what is actually known. */}
+            {[item.area, item.sourceName].filter(Boolean).join(" · ")}
+          </p>
+        </div>
+        {/* Always visible rather than hover-only: a favourite state the user cannot see is a
+            state they cannot act on, and on a touch or keyboard path there is no hover at all. */}
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            toggleFavorite(item);
+          }}
+          aria-pressed={isFavorite}
+          aria-label={isFavorite ? `取消收藏 ${item.name}` : `收藏 ${item.name}`}
+          title={isFavorite ? "取消收藏" : "收藏"}
+          className={cn(
+            "shrink-0 rounded-full p-1 transition-colors",
+            isFavorite
+              ? "text-primary hover:bg-primary/15"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground",
+          )}
+        >
+          <Heart
+            className={cn("size-4", isFavorite && "fill-current")}
+            aria-hidden="true"
+          />
+        </button>
       </div>
     </div>
   );

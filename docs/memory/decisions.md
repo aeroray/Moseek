@@ -338,3 +338,22 @@
 - 变异验证 4 项全部抓到：`refreshLoop`、`statusUnmountsPlayer`、`resolveOnObjectIdentity`、`unstableCallback`。
 - 真实浏览器实测（详情接口每次返回新对象）：`callsAtOpen: 2 / callsAfter4s: 2 / settled: true`（**无循环**）、`videoMounted: true` 且 `spinnerGone: true` 且 `stillMountedAfterWait: true`（**画面真的起来并且留住了**）、`statusBar.inFooter: true` 且 `overVideo: false`、`linePlacement.onTitleRow: true` 且 `inRail: false`、切换线路后 `addressChanged: true`。
 - 本轮最终：前端 **273 项**（favorites-view 16 项）、Rust 98 项、`clippy` 零警告、`pnpm build` 零警告。
+- **产品 Logo 定稿**：**圆角黑底（`#0B0D12`，rx=56/256）+ 白色摄影机**（两个胶片盘 + 机身 + 镜头）。SVG 源在 `src-tauri/icons/icon.svg`，用 `pnpm exec tauri icon` 生成全部 51 个平台图标。
+  - **不是凭感觉选的**：先画了三版，用无头 Chrome **按 16/24/32/48px 栅格化并统计像素**。第一版（单盘）在 16px 下白色占比只有 **0.179**、平均亮度 **70**，缩到任务栏就是一团糊；定稿版是 **0.373 / 111**，**16px 下仍能看出是摄影机**。**小尺寸下的可辨识度必须量，不能靠看大图决定。**
+  - 应用到：应用外壳导航栏（替换原来的「拾」字）、海报占位图（替换通用 Film 图标）、`public/favicon.svg` + `index.html` 的 `<link rel="icon">`、以及全部 Tauri 平台图标。
+  - 内联 SVG 组件 `AppLogo` 而非图片文件：**不会在解析时闪一下**，且能继承尺寸。
+- **卡片悬停阴影重做**（用户反馈「太重、看起来脏」）：原来是 `-translate-y-1` + `0 4px 16px rgba(0,0,0,0.4)`。**在近黑背景上黑色阴影无处可落，不读作「浮起」而读作「脏」**。改为 `-translate-y-0.5` + **负扩散**的 `0 10px 28px -16px`，并降低遮罩不透明度（0.40 → 0.25）。抽成 `src/lib/card-styles.ts` 的 `catalogCardClassName` / `catalogCardOverlayClassName`，**影视库和收藏页共用一份，避免两处漂移**。
+- **影视库卡片加快速收藏按钮**：右下角常驻（不是 hover 才出现）——**用户看不到的收藏状态就无法操作，而且触屏和键盘路径根本没有 hover**。原来的「已收藏」星标装饰从海报角上删掉：**用户能改的状态应该长在控件上，而不是画在封面上**。`event.stopPropagation()` 保证点收藏不会顺带打开作品。
+- **海报大图 + 下载**：卡片 hover 时右上角出现放大按钮 → 打开大图对话框 → 可下载到用户选择的位置。
+  - **整条链路放在 Rust 侧**（取图 → 弹原生保存框 → 写文件），而不是「JS 下载 + 另开一个文件系统写」：**一个能力面而不是两个，字节也不必为了写盘再走一遍 IPC**。
+  - 地址走**同一套 `validate_remote_url` 策略**，**这里比别处更重要：URL 来自用户导入的源，不是应用自己产生的**。
+  - 新增 `tauri-plugin-dialog`（`download.rs`，`download_image` 命令）。**对话框从 Rust 调用，所以不需要给 webview 开 dialog 权限**。
+  - **文件名清洗**：标题是用户/源提供的，Windows 会拒绝 `: ? / *` 等字符，而**全角冒号 `：` 看起来无害但同样要处理**；非法字符**替换成 `_` 而不是删掉**（否则两个不同标题会塌缩成同一个文件名并互相覆盖）；截断到 120 字符（Windows 单段路径上限）；去掉结尾的点（Windows 会静默丢弃，扩展名就没了）。
+  - **扩展名优先信 Content-Type，其次信地址**：CDN 常从没有扩展名的路径提供真图；Content-Type 也可能缺失或无用（`application/octet-stream`），此时不能让地址输给它。
+  - **用户取消保存对话框 → 返回 `Ok(None)`，界面保持沉默**：取消是正常结果，不是错误。浏览器预览下没有原生选择器，明确提示「请在桌面应用中使用下载功能」，**否则按钮看起来就是坏的**。
+- **`useOptionalToast()`**：海报查看器从任意卡片都能打开，**缺少 ToastHost 应当是「保持沉默」，而不是让页面崩掉**。会抛错的 `useToast` 保留给「本身就是通知」的组件——对它们来说缺 host 意味着通知会消失。
+- **收藏页标题栏去掉「线路」二字**：按钮本身就是这一行唯一像选项的东西，tooltip 也已经报出名称。
+- 变异验证 5 项全部抓到：`favoriteOpensWork`、`cancelReportedAsFailure`、`emptyPosterOffersViewer`、`brokenImageSilent`、`favoriteStateNotShown`。
+- **测试踩坑**：toast 断言一开始全部失败，因为只包了 `ToastHost` **没包 Radix 的 `ToastProvider`**——**push 成功了但什么都不显示，看起来和功能坏掉一模一样**。两个都要包。
+- 真实浏览器实测（1440×900）：`favicon.href: "/favicon.svg"`、`logo.isSvg: true` 且 `wordmarkGone: true`、`favoriteButton.visibleWithoutHover: true`、`cardHover.usesSoftShadow: true` 且 `oldShadowGone: true`、`zoomButton.hiddenUntilHover: true`、`viewer.opened: true`、`download.calledWith.fileName: "测试影片"` 且提示里显示了保存路径。
+- 本轮最终：前端 **283 项**（新增 poster-lightbox 8 项、browse-view 2 项）、Rust **103 项**（新增 download 5 项）、`clippy` 零警告、`pnpm build` 零警告。

@@ -2,6 +2,7 @@ mod adapters;
 mod cms;
 mod config;
 mod db;
+mod download;
 mod html;
 mod live;
 mod models;
@@ -25,6 +26,7 @@ fn healthcheck() -> &'static str {
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
@@ -59,6 +61,7 @@ pub fn run() {
             resolver::resolve_playback,
             resolver::probe_stream_urls,
             resolver::sniff_with_companion,
+            download::download_image,
             script_runtime::archive::test_script_source,
             script_runtime::archive::list_script_archives,
             script_runtime::archive::list_script_execution_logs,

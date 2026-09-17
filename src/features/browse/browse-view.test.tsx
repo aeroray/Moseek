@@ -114,6 +114,42 @@ describe("BrowseView catalog metadata", () => {
     expect(screen.getByText("中国大陆 · 主用影视源")).toBeInTheDocument();
   });
 
+  it("favourites a work from the card without opening it", async () => {
+    // The point of the button: favouriting must not cost a navigation. It also has to work
+    // without a hover, which is why it is not revealed on hover like the poster action.
+    searchVod.mockResolvedValue(page([vodItem()]));
+    render(<BrowseView onNavigate={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("测试影片")).toBeInTheDocument();
+    });
+
+    const button = screen.getByRole("button", { name: "收藏 测试影片" });
+    fireEvent.click(button);
+
+    expect(
+      useAppStore.getState().favorites.some((f) => f.item.id === "vod-1"),
+    ).toBe(true);
+    // The label flips, so the control reports its own state.
+    expect(
+      screen.getByRole("button", { name: "取消收藏 测试影片" }),
+    ).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("does not open the work when the favourite button is used", async () => {
+    // The card itself means "play this", so the nested button must not also trigger it.
+    searchVod.mockResolvedValue(page([vodItem()]));
+    render(<BrowseView onNavigate={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("测试影片")).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "收藏 测试影片" }));
+
+    // Opening the work would have mounted the player view.
+    expect(screen.queryByText("正在准备播放…")).toBeNull();
+  });
+
   it("renders the poster the catalog provides", async () => {
     searchVod.mockResolvedValue(
       page([vodItem({ poster: "https://img.example/poster.jpg" })]),

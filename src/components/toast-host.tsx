@@ -72,3 +72,17 @@ export function useToast() {
   }
   return push;
 }
+
+/**
+ * The toast channel if one is mounted, otherwise a no-op.
+ *
+ * Components that merely *report* an outcome should not require a host to render: the poster
+ * viewer is reachable from any card, and a missing toast host is a reason to stay silent, not a
+ * reason to fail. Components that are themselves a notification still use `useToast` and still
+ * throw, because for them a missing host means the notification would vanish.
+ */
+export function useOptionalToast() {
+  return React.useContext(ToastContext) ?? noopToast;
+}
+
+const noopToast = () => {};

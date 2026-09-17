@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import { MediaPoster } from "@/components/media-poster";
+import { PosterZoomButton } from "@/components/poster-lightbox";
 import { Button } from "@/components/ui/button";
 import {
   Empty,
@@ -35,6 +36,10 @@ import { useStreamProbes } from "@/features/player/use-stream-probes";
 import { getVodDetail } from "@/features/browse/cms-adapter";
 import { relinkFavorite } from "@/features/browse/favorite-relink";
 import { useAppStore } from "@/stores/app-store";
+import {
+  catalogCardClassName,
+  catalogCardOverlayClassName,
+} from "@/lib/card-styles";
 import { cn } from "@/lib/utils";
 import type { ViewKey } from "@/types/moseek";
 import type {
@@ -191,7 +196,7 @@ function VodFavoritesGrid({
         {favorites.map((favorite) => (
           <div
             key={favorite.key}
-            className="group relative flex flex-col overflow-hidden rounded-md border border-border/60 bg-card/60 transition-all duration-200 hover:-translate-y-1 hover:border-primary/50 hover:shadow-[0_4px_16px_rgba(0,0,0,0.4)] cursor-pointer"
+            className={catalogCardClassName}
             onClick={() => onOpen(favorite.key)}
           >
             <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted/40">
@@ -201,22 +206,30 @@ function VodFavoritesGrid({
                 className="size-full"
                 imageClassName="transition-transform duration-300 group-hover:scale-105"
               />
-              <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-                <span className="flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground">
+              <div className={catalogCardOverlayClassName}>
+                <span className="flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground transition-transform duration-200 group-hover:scale-110">
                   <Play className="size-4 fill-current" aria-hidden="true" />
                 </span>
               </div>
-              <div className="absolute top-1.5 right-1.5 z-10">
+              {/* Same actions as a library card, in the same corner: an image to inspect and a
+                  favourite to remove. */}
+              <div className="absolute top-1.5 right-1.5 z-10 flex flex-col gap-1">
+                <PosterZoomButton
+                  name={favorite.item.name}
+                  poster={favorite.item.poster}
+                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                />
                 <button
                   type="button"
                   onClick={(event) => {
                     event.stopPropagation();
                     toggleFavorite(favorite.item);
                   }}
-                  className="rounded-full bg-black/60 p-1 text-primary backdrop-blur-xs transition-transform hover:scale-110 active:scale-95"
+                  aria-label={`取消收藏 ${favorite.item.name}`}
+                  className="flex size-7 items-center justify-center rounded-full bg-black/65 text-primary backdrop-blur-xs transition-all duration-200 hover:scale-110 hover:bg-black/80 active:scale-95"
                   title="取消收藏"
                 >
-                  <Heart className="size-3 fill-current" />
+                  <Heart className="size-3.5 fill-current" />
                 </button>
               </div>
             </div>
@@ -536,7 +549,8 @@ function FavoriteWatchView({
             uninterrupted list. */}
         {item.playLines.length > 1 && (
           <div className="ml-auto flex shrink-0 items-center gap-1">
-            <span className="text-xs text-muted-foreground">线路</span>
+            {/* No "线路" caption: the buttons are the only things on this row that read as a
+                choice, and each one's tooltip already names it. */}
             {item.playLines.map((line, index) => {
               const isActive = line.id === activeLine?.id;
               return (

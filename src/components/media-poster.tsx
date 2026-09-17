@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Film } from "lucide-react";
 
+import { AppLogo } from "@/components/app-logo";
 import { cn } from "@/lib/utils";
 
 type MediaPosterProps = {
@@ -36,10 +36,14 @@ export function MediaPoster({
         <div
           role="img"
           aria-label={`${alt}，暂无可用图片`}
-          className="flex size-full flex-col items-center justify-center gap-1.5 bg-gradient-to-b from-card/80 to-muted/80 text-muted-foreground/60 select-none"
+          className="flex size-full flex-col items-center justify-center gap-1.5 bg-gradient-to-b from-card/80 to-muted/80 select-none"
         >
-          <Film data-icon="inline-start" aria-hidden="true" className="size-5 opacity-40" />
-          <span className="text-xs font-medium tracking-tight">拾影</span>
+          {/* The product mark rather than a generic film glyph: this is the app's own surface, and
+              the mark is what identifies it. Dimmed so it cannot be mistaken for loaded artwork. */}
+          <AppLogo className="size-6 rounded opacity-45" />
+          <span className="text-xs font-medium tracking-tight text-muted-foreground/60">
+            暂无海报
+          </span>
         </div>
       )}
     </div>
