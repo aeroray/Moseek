@@ -10,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 
+import { TruncatedText } from "@/components/truncated-text";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -600,7 +601,15 @@ export function LiveView() {
               scroll, and the aside's `overflow-hidden` silently clips the list.
               `type="auto"` keeps the scrollbar mounted while the list overflows, so the
               list advertises itself instead of only revealing a bar on hover. */}
-          <ScrollArea type="auto" className="flex-1 min-h-0">
+          {/* `[&>div]:!block` defeats the `display: table` wrapper Radix puts around the
+              viewport's children. A table sizes to its content, so without this a long channel
+              name widened the whole row past the 240px list and `truncate` never applied — the
+              text simply ran out of the aside. */}
+          <ScrollArea
+            type="auto"
+            className="flex-1 min-h-0"
+            viewportClassName="[&>div]:!block"
+          >
             <div className="p-1.5 flex flex-col gap-0.5">
               {filteredChannels.length > 0 ? (
                 filteredChannels.map((channel) => {
@@ -619,7 +628,7 @@ export function LiveView() {
                           : "text-foreground/80 hover:bg-muted/60 hover:text-foreground",
                       )}
                     >
-                      <span className="truncate pr-2">{channel.name}</span>
+                      <TruncatedText className="pr-2">{channel.name}</TruncatedText>
                       <div className="flex items-center gap-1 shrink-0 text-muted-foreground">
                         {isFav && (
                           <Heart className="size-2.5 fill-primary text-primary" />

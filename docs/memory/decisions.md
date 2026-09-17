@@ -278,3 +278,13 @@
   - **`isCandidateMovieSource` 与 `isMovieLibrarySource` 已经完全相同**。当初一个是「测试通过的源」、另一个是「没通过的兜底」，等门槛变成只看 `enabled` 之后两者一模一样，**于是影视库里那个两步兜底是死代码：它会用同一个过滤器跑两遍**。合并为一个函数。
 - **变异验证 2 项，全部被抓到**：`categoryResetOnSourceChange`（删掉重置逻辑）、`groupDefaultsToAll`（改回 `setGroupId("")`）。**分组默认值这项尤其值得测**：它是一行状态初始化，没有测试的话很容易被改回去而无人察觉。
 - 本轮最终：前端 **225 项**（browse-view 7 项、live-view 27 项）、Rust 96 项、`clippy` 零警告、`pnpm build` 零警告。
+- **频道名溢出：真正的成因不是缺 `truncate`，而是 Radix ScrollArea 的 `display: table` 包装层**。代码里本来就有 `truncate`，但它没生效。**真实浏览器量宽度链**才找到原因：Radix 给 viewport 的子节点套了一个内联样式 `display: table; min-width: 100%` 的 div——**表格会按内容撑开**，于是「宽 440px 的行」塞在「宽 239px 的列表」里，`truncate` 永远等不到需要省略的时刻，文字直接冲出侧栏。
+  - 修法是给 `ScrollArea` 加一个 `viewportClassName`，直播列表传 `[&>div]:!block` 覆盖掉表格显示。**必须用 `!important`，因为要覆盖的是内联样式**；也**不能全局改掉 `display: table`**，它是横向滚动条正常工作所依赖的。
+  - **实测（真实浏览器）**：那个 span 从 **440px（溢出列表右边界 512 > 296）变成 187px（259 < 296，`overflowsList: false`）**。短名字 `CCTV-1` 的 `clientWidth === scrollWidth === 47`，**没有被判为截断，因此没有 tooltip**——正是想要的行为。
+  - 新增 `TruncatedText` 组件：**只在真的被裁掉时才挂 tooltip**（用 `ResizeObserver` 量 `scrollWidth > clientWidth`）。给每行都挂 tooltip 是噪音——大多数名字放得下，悬停弹出一段和屏幕上完全相同的文字等于什么都没说。留了 1px 容差，避免亚像素舍入让刚好放下的名字误判为截断。
+- **那个「一直 loading」的频道：不是我们的 bug，是上游在返回空分片**。用 curl 直接验证：清单里 `#EXT-X-BeginIndex:2588`、`#EXT-X-CreateTime:11:18:4`、`INTCreateTime` 解出来是 **2025-08-30（383 天前）**，**且 4 秒后再取一次序号完全没变——直播窗口是冻结的**；每个分片请求返回 `HTTP 200` + `Content-Length: 0`。所以诊断里满屏的 `fragParsingError · Failed to find demuxer by probing fragment data` **是 hls.js 在为「零字节」报一个听起来像编码问题的错**。
+  - **我们的 bug 有两个，都是「让它永远转圈」而不是「让它报错」**：
+    1. **`BUFFER_APPENDED` 被当成「已经缓冲成功」**。这个事件**在追加什么都没贡献时也会触发**，于是它每轮都把 `liveRecoveryAttempts` 清零——**日志里每一轮都写「尝试刷新直播窗口 第 1 次」就是这个原因**，计数永远到不了上限，恢复循环变成死循环，播放器永远不会报告失败。改为只监听 `FRAG_BUFFERED`（它才意味着分片真的被解封装并进入缓冲区）。
+    2. **加载器把「0 字节的成功响应」当成功交给 hls.js**。新增 `isEmptyFragmentResponse()`：媒体分片（`responseType === "arraybuffer"`）拿到 0 字节时按 `onError` 上报，错误信息直接说「上游对分片请求返回了空响应（0 字节），该地址可能已失效」——**把 hls.js 那句误导性的「找不到解封装器」换成真正的原因**。**只对分片生效**，清单为空由既有的 `isHlsPlaylist` 检查负责，那个消息更准确。
+- **变异验证 4 项**，其中 **1 项第一次存活**：`bufferAppendedResetsAgain`（把 `BUFFER_APPENDED` 加回去）**没有任何测试覆盖事件订阅**。补了 `media-player-events.test.tsx`：用记录型 hls.js mock 断言订阅了 `FRAG_BUFFERED` 且**没有**订阅 `BUFFER_APPENDED`。**这个 bug 在渲染输出里完全看不见**——所以只能靠断言事件接线来钉住。
+- 本轮最终：前端 **232 项**（新增 `truncated-text.test.tsx` 3 项、`media-player-events.test.tsx` 1 项、空分片 3 项）、Rust 96 项、`clippy` 零警告、`pnpm build` 零警告。

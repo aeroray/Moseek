@@ -15,7 +15,7 @@ import "plyr/dist/plyr.css";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { fetchMediaResource, isTauriRuntime } from "@/lib/tauri";
-import { getByteRangeHeader } from "@/features/player/media-range";
+import { getByteRangeHeader, isEmptyFragmentResponse } from "@/features/player/media-range";
 import {
   createDiagnosticRecorder,
   describeHlsError,
@@ -170,6 +170,18 @@ class TauriMediaLoader implements Loader<LoaderContext> {
         }
         let data: string | ArrayBuffer;
         if (context.responseType === "arraybuffer") {
+          if (isEmptyFragmentResponse(context.responseType, bytes.byteLength)) {
+            callbacks.onError(
+              {
+                code: 204,
+                text: "上游对分片请求返回了空响应（0 字节），该地址可能已失效。",
+              },
+              context,
+              null,
+              this.stats,
+            );
+            return;
+          }
           data = toArrayBuffer(bytes);
         } else {
           data = normalizeText(new TextDecoder().decode(bytes));
@@ -803,8 +815,15 @@ export function MediaPlayer({
             `readyState=${attachedMediaSource?.readyState ?? "未创建"}`,
           );
         });
+        // Only a fragment that actually produced buffered media counts as progress.
+        //
+        // `BUFFER_APPENDED` was wired here too, but it fires even when the append contributed
+        // nothing — including the empty-fragment case above — and it reset the recovery counter
+        // every time. That made the live recovery loop endless: each cycle reported "尝试刷新
+        // 直播窗口 第 1 次" and the counter never reached its limit, so the player stayed on the
+        // loading spinner forever instead of ever reporting a failure. `FRAG_BUFFERED` means the
+        // fragment was demuxed and buffered, which is the only signal worth treating as success.
         instance.on(Hls.Events.FRAG_BUFFERED, markMediaBuffered);
-        instance.on(Hls.Events.BUFFER_APPENDED, markMediaBuffered);
         instance.on(Hls.Events.ERROR, handleHlsError);
         if (!playerCreated) {
           createPlayer();

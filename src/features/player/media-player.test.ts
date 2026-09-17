@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { getByteRangeHeader } from "@/features/player/media-range";
+import {
+  getByteRangeHeader,
+  isEmptyFragmentResponse,
+} from "@/features/player/media-range";
 import { usesHlsPipeline } from "@/features/player/media-player";
 
 describe("HLS byte-range requests", () => {
@@ -11,6 +14,27 @@ describe("HLS byte-range requests", () => {
 
   it("converts the exclusive end offset to an HTTP range", () => {
     expect(getByteRangeHeader(1024, 2048)).toBe("bytes=1024-2047");
+  });
+});
+
+describe("empty fragment responses", () => {
+  it("treats a zero-byte media fragment as a failure", () => {
+    // Observed from a real IPTV endpoint: `200 OK` with `Content-Length: 0` for every fragment
+    // once the stream behind it went stale. Passing that to hls.js produced the misleading
+    // "Failed to find demuxer by probing fragment data", blaming the content for what was
+    // really a missing response body.
+    expect(isEmptyFragmentResponse("arraybuffer", 0)).toBe(true);
+  });
+
+  it("accepts a fragment that carries data", () => {
+    expect(isEmptyFragmentResponse("arraybuffer", 188)).toBe(false);
+  });
+
+  it("does not apply to playlist responses", () => {
+    // An empty playlist is caught by the manifest check, which reports the more precise
+    // "not a valid HLS playlist"; this check must not shadow it.
+    expect(isEmptyFragmentResponse(undefined, 0)).toBe(false);
+    expect(isEmptyFragmentResponse("text", 0)).toBe(false);
   });
 });
 
