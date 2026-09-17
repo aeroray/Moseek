@@ -139,12 +139,12 @@ import type {
 } from "@/types/moseek";
 
 /**
- * The list groups sources by the only distinction a user acts on: whether it can run.
+ * The list groups sources by whether an adapter exists for them.
  *
- * The five-way split the parser produces (supported / partial / needs-adapter / blocked /
- * invalid) is accurate but not actionable — "部分可用" and "待适配" both mean "not usable right
- * now", and asking a user to pick between them is asking them to learn the taxonomy. 全部 exists
- * so the unusable ones can be found and pruned.
+ * The words are 已适配 / 未适配 rather than 可用 / 不可用 because the list cannot promise a
+ * source works: a source with an adapter may still fail its test, and "可用" claimed otherwise.
+ * Whether a particular source actually works is what the 状态 column reports, and what the test
+ * run is for. 全部 exists so the unadapted ones can be found and pruned.
  */
 type SourceFilter = "available" | "unusable" | "all";
 type AdapterFilter = "all" | AdapterExecution;
@@ -272,14 +272,17 @@ export function ConfigCenter() {
     [sources],
   );
   /**
-   * The sources worth offering to delete: those with no usable adapter, and those a test found to
-   * return nothing. A source that passed, or that has simply not been tested yet, is left alone —
-   * "untested" is not evidence of being useless.
+   * The sources that cannot currently work: no adapter exists for them, or a test found them
+   * broken or empty. A source that passed, or that has simply not been tested yet, is left alone
+   * — "untested" is not evidence of being useless, and the user may still want to try it.
    */
   const removableSources = useMemo(
     () =>
       sources.filter(
-        (source) => !isTestableSource(source) || source.testStatus === "empty",
+        (source) =>
+          !isTestableSource(source) ||
+          source.testStatus === "failed" ||
+          source.testStatus === "empty",
       ),
     [sources],
   );
@@ -414,6 +417,12 @@ export function ConfigCenter() {
       return matchesFilter && matchesQuery;
     });
   }, [query, sourceFilter, sources]);
+
+  /** The removable sources among the rows currently listed, which is what bulk pruning acts on. */
+  const bulkRemovableSources = useMemo(
+    () => filteredSources.filter((source) => removableKeys.has(source.key)),
+    [filteredSources, removableKeys],
+  );
 
   const openImportDialog = () => {
     setConfigName(`配置 ${configDocuments.length + 1}`);
@@ -1262,34 +1271,33 @@ export function ConfigCenter() {
                       />
                       导入配置
                     </Button>
-                    {/* Pruning the whole configuration at once: the sources that cannot run are
-                        usually the majority, and removing them one at a time is the tedious
-                        part of ending up with a configuration that works. Shown only on the
-                        scopes where unusable sources are actually on screen — offering it while
-                        the list is filtered to 可用 would act on rows the user cannot see. */}
-                    {removableSources.length > 0 &&
-                      sourceFilter !== "available" && (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5 text-muted-foreground hover:text-destructive"
-                          onClick={() =>
-                            void handleRemoveSources(
-                              removableSources.map((source) => source.key),
-                              "全部不可用的源",
-                              { needsConfirmation: true },
-                            )
-                          }
-                        >
-                          <Trash2
-                            className="size-3.5"
-                            data-icon="inline-start"
-                            aria-hidden="true"
-                          />
-                          清理不可用 ({removableSources.length})
-                        </Button>
-                      )}
+                    {/* Pruning in bulk: the sources that cannot work are usually the majority,
+                        and removing them one at a time is the tedious part of ending up with a
+                        configuration that works. It acts only on the rows currently listed, so
+                        it can never delete something the user cannot see — and it is hidden
+                        under 已适配, where none of those rows are on screen. */}
+                    {bulkRemovableSources.length > 0 && sourceFilter !== "available" && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5 text-muted-foreground hover:text-destructive"
+                        onClick={() =>
+                          void handleRemoveSources(
+                            bulkRemovableSources.map((source) => source.key),
+                            "这些无法工作的源",
+                            { needsConfirmation: true },
+                          )
+                        }
+                      >
+                        <Trash2
+                          className="size-3.5"
+                          data-icon="inline-start"
+                          aria-hidden="true"
+                        />
+                        清理不可用 ({bulkRemovableSources.length})
+                      </Button>
+                    )}
                   </div>
                 </div>
                 <div className="mt-4 flex items-center gap-2">
@@ -1320,10 +1328,10 @@ export function ConfigCenter() {
                     <SelectContent>
                       <SelectGroup>
                         {/* 全部 first because it is the widest scope and the natural place to
-                            start reading, even though 可用 is what is selected by default. */}
+                            start reading, even though 已适配 is what is selected by default. */}
                         <SelectItem value="all">全部</SelectItem>
-                        <SelectItem value="available">可用</SelectItem>
-                        <SelectItem value="unusable">不可用</SelectItem>
+                        <SelectItem value="available">已适配</SelectItem>
+                        <SelectItem value="unusable">未适配</SelectItem>
                       </SelectGroup>
                     </SelectContent>
                   </Select>
@@ -1540,12 +1548,12 @@ export function ConfigCenter() {
                         </EmptyMedia>
                         <EmptyTitle>
                           {sourceFilter === "available" && !query.trim()
-                            ? "当前配置没有可用的源"
+                            ? "当前配置没有已适配的源"
                             : "没有匹配的源"}
                         </EmptyTitle>
                         <EmptyDescription>
                           {sourceFilter === "available" && !query.trim()
-                            ? "这些源都缺少可用的适配器。切换到「不可用」可以查看并清理它们。"
+                            ? "这些源都没有可用的适配器。切换到「未适配」可以查看并清理它们。"
                             : "调整关键词或筛选条件后重试。"}
                         </EmptyDescription>
                       </EmptyHeader>

@@ -194,8 +194,8 @@ describe("config center", () => {
     fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
     fireEvent.click(trigger);
 
-    expect(screen.getByRole("option", { name: "可用" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "不可用" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "已适配" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "未适配" })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "全部" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "部分可用" })).not.toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "待适配" })).not.toBeInTheDocument();
@@ -205,7 +205,7 @@ describe("config center", () => {
   it("filters to the unusable sources when asked", () => {
     renderCenter();
 
-    chooseFilter("不可用");
+    chooseFilter("未适配");
 
     expect(screen.getByText("不可用的源")).toBeInTheDocument();
     expect(screen.getByText("待适配的源")).toBeInTheDocument();
@@ -217,7 +217,7 @@ describe("config center", () => {
     // badge in front answers "is this handled at all?" first, which is the question that matters
     // before the adapter's name.
     renderCenter();
-    chooseFilter("不可用");
+    chooseFilter("未适配");
 
     const blockedRow = screen
       .getAllByRole("row")
@@ -231,7 +231,7 @@ describe("config center", () => {
       within(blockedRow as HTMLElement).queryByText("未适配"),
     ).not.toBeInTheDocument();
 
-    chooseFilter("可用");
+    chooseFilter("已适配");
     const okRow = screen
       .getAllByRole("row")
       .find((row) => row.textContent?.includes("可用的源"));
@@ -304,7 +304,7 @@ describe("config center", () => {
 
     expect(screen.getByRole("switch", { name: "启用 可用的源" })).toBeInTheDocument();
 
-    chooseFilter("不可用");
+    chooseFilter("未适配");
     expect(
       screen.queryByRole("switch", { name: "启用 不可用的源" }),
     ).not.toBeInTheDocument();
@@ -327,7 +327,7 @@ describe("config center", () => {
     // nothing, so a stray control could hide in whichever branch the default filter shows.
     renderCenter();
 
-    for (const filter of ["可用", "不可用"] as const) {
+    for (const filter of ["已适配", "未适配"] as const) {
       chooseFilter(filter);
       expect(
         screen.queryByRole("button", { name: /详情/ }),
@@ -428,8 +428,8 @@ describe("config center", () => {
     });
     renderPage(<ConfigCenter />);
 
-    expect(screen.getByText("当前配置没有可用的源")).toBeInTheDocument();
-    expect(screen.getByText(/切换到「不可用」/)).toBeInTheDocument();
+    expect(screen.getByText("当前配置没有已适配的源")).toBeInTheDocument();
+    expect(screen.getByText(/切换到「未适配」/)).toBeInTheDocument();
   });
 
   it("insets the empty state from the card edge", () => {
@@ -456,7 +456,7 @@ describe("config center", () => {
       screen.getByRole("button", { name: "删除 可用的源" }),
     ).toBeInTheDocument();
 
-    chooseFilter("不可用");
+    chooseFilter("未适配");
     expect(
       screen.getByRole("button", { name: "删除 不可用的源" }),
     ).toBeInTheDocument();
@@ -467,7 +467,7 @@ describe("config center", () => {
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
     renderCenter();
-    chooseFilter("不可用");
+    chooseFilter("未适配");
 
     fireEvent.click(screen.getByRole("button", { name: "删除 不可用的源" }));
 
@@ -509,7 +509,7 @@ describe("config center", () => {
     const removeSources = vi.fn(async () => undefined);
     useAppStore.setState({ removeSources });
     renderCenter();
-    chooseFilter("不可用");
+    chooseFilter("未适配");
 
     const bulk = screen.getByRole("button", { name: /清理不可用/ });
     // Two of the three fixture sources cannot run.
@@ -518,13 +518,38 @@ describe("config center", () => {
     fireEvent.click(bulk);
 
     expect(removeSources).not.toHaveBeenCalled();
-    expect(screen.getByText(/全部不可用的源/)).toBeInTheDocument();
+    expect(screen.getByText(/这些无法工作的源/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
     await waitFor(() => {
       expect(removeSources).toHaveBeenCalledWith(["no", "wait"]);
     });
+  });
+
+  it("clears only the rows the current search is showing", async () => {
+    // A bulk action that reaches rows outside the current view deletes things the user cannot
+    // see. The search narrows the list, so the cleanup must narrow with it.
+    const removeSources = vi.fn(async () => undefined);
+    useAppStore.setState({ removeSources });
+    renderCenter();
+    chooseFilter("未适配");
+    // "待适配的源" is the needs-adapter fixture; "不可用的源" is the blocked one.
+    fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
+      target: { value: "待适配" },
+    });
+
+    const bulk = screen.getByRole("button", { name: /清理不可用/ });
+    expect(bulk.textContent).toContain("1");
+
+    fireEvent.click(bulk);
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => {
+      expect(removeSources).toHaveBeenCalledWith(["wait"]);
+    });
+    // The blocked source was not on screen, so it must not have been touched.
+    expect(removeSources).not.toHaveBeenCalledWith(["no"]);
   });
 
   it("shows the bulk cleanup only where unusable sources are on screen", () => {
@@ -535,7 +560,7 @@ describe("config center", () => {
       screen.queryByRole("button", { name: /清理不可用/ }),
     ).not.toBeInTheDocument();
 
-    chooseFilter("不可用");
+    chooseFilter("未适配");
     expect(
       screen.getByRole("button", { name: /清理不可用/ }),
     ).toBeInTheDocument();

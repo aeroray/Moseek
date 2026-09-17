@@ -33,8 +33,12 @@ vi.mock("@/features/player/media-player", () => ({
   usesHlsPipeline: () => true,
 }));
 
+// The panel is replaced by a stub that still renders its note, so tests can assert what the
+// diagnosis says without pulling in the whole diagnostic report builder.
 vi.mock("@/features/player/media-diagnostic-panel", () => ({
-  MediaDiagnosticPanel: () => <div data-testid="diagnostic-panel" />,
+  MediaDiagnosticPanel: ({ note }: { note?: string | null }) => (
+    <div data-testid="diagnostic-panel">{note}</div>
+  ),
 }));
 
 const probeStreamUrls = vi.fn();
@@ -249,6 +253,9 @@ describe("LiveView EPG rendering", () => {
   });
 
   it("surfaces a live catalog request failure instead of showing an empty list", async () => {
+    // Without channels there is nothing to watch, so the reason has to be visible. The raw error
+    // text is not shown: a reqwest chain naming DNS and deadlines is not actionable. What the
+    // user can act on is stated instead.
     loadLiveCatalog.mockResolvedValue({
       data: { channels: [], groups: [] },
       error: "直播源请求失败",
@@ -256,8 +263,10 @@ describe("LiveView EPG rendering", () => {
 
     render(<LiveView />);
 
-    expect(await screen.findByText("直播数据请求失败")).toBeInTheDocument();
-    expect(screen.getByText("直播源请求失败")).toBeInTheDocument();
+    expect(await screen.findByText("直播源请求失败")).toBeInTheDocument();
+    expect(screen.getByText(/无法读取这个直播源的频道列表/)).toBeInTheDocument();
+    // The provider's raw message is not surfaced as the user-facing explanation.
+    expect(screen.queryByText("直播源请求失败", { selector: "p" })).toBeNull();
   });
 
   it("lets the channel list scroll instead of growing past its pane", async () => {
@@ -488,9 +497,11 @@ describe("LiveView concurrent line probing", () => {
     expect(screen.getByLabelText("线路 3（不可用）")).toBeEnabled();
   });
 
-  it("explains an operator-restricted channel instead of inviting a pointless retry", async () => {
+  it("explains an operator-restricted channel in the diagnosis instead of over the player", async () => {
     // China Mobile IPTV addresses only answer on China Mobile's own network; when every line
     // fails the cause is upstream, so the UI must say so rather than imply retrying helps.
+    // It says it in 播放诊断: the player already reports that playback failed, and a second
+    // banner on top of it only competed for attention.
     probeStreamUrls.mockResolvedValue([
       probe(0, false),
       probe(1, false),
@@ -498,13 +509,102 @@ describe("LiveView concurrent line probing", () => {
     ]);
     render(<LiveView />);
 
-    // The banner appears from the probe result alone, without waiting for the player to time
-    // out through every line.
-    expect(
-      await screen.findByText("该频道所有线路均无法连接"),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/3 条线路/)).toBeInTheDocument();
+    // No banner is raised over the player, even once the probe knows every line is dead.
+    await waitFor(() => {
+      expect(probeStreamUrls).toHaveBeenCalled();
+    });
+    // The probe result has to be applied before the dialog is opened, since the note is derived
+    // from it.
+    await waitFor(() => {
+      expect(screen.getByLabelText("线路 1（不可用）")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("该频道所有线路均无法连接")).toBeNull();
+    expect(screen.queryByText("播放受阻")).toBeNull();
+
+    // The explanation is available where a user who wants it will look.
+    fireEvent.click(screen.getByRole("button", { name: /播放诊断/ }));
+    expect(await screen.findByText(/3 条线路/)).toBeInTheDocument();
     expect(screen.getByText(/运营商网络/)).toBeInTheDocument();
+  });
+
+  it("names the diagnosis control 播放诊断 and opens it as a dialog", async () => {
+    // The button used to say 流诊断 while the player's own copy said 播放诊断, and it opened a
+    // drawer instead of the dialog the movie library uses. One thing, one name, one presentation.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+
+    expect(screen.queryByText("流诊断")).toBeNull();
+    expect(screen.queryByText("收起诊断")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /播放诊断/ }));
+
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("diagnostic-panel")).toBeInTheDocument();
+  });
+
+  it("does not put a second failure banner over the player", async () => {
+    // The player already reports that playback failed and offers a retry. A banner on top of it
+    // repeated the same message, and the specific cause is what 播放诊断 is for.
+    probeStreamUrls.mockResolvedValue([probe(0, false), probe(1, false), probe(2, false)]);
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("线路 1（不可用）")).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText("播放受阻")).toBeNull();
+    expect(screen.queryByText("该频道所有线路均无法连接")).toBeNull();
+  });
+
+  it("does not raise a banner for a guide failure while the channel still plays", async () => {
+    // A missing programme guide does not stop playback, so a destructive banner over a working
+    // player would report a problem the user does not have. The strip below the player says it.
+    loadEpg.mockResolvedValue({
+      data: { programs: [] },
+      mode: "remote",
+      origin: "auto",
+      error: "EPG 响应请求失败：tcp connect error",
+    });
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+    await waitFor(() => {
+      expect(loadEpg).toHaveBeenCalled();
+    });
+
+    expect(screen.queryByText("直播源请求失败")).toBeNull();
+    expect(screen.queryByText(/tcp connect error/)).toBeNull();
+    // The strip still reports the guide's state.
+    expect(screen.getByText("节目单获取失败")).toBeInTheDocument();
+  });
+
+  it("still renders when line probing is unavailable", async () => {
+    // `probeStreamUrls` returns null outside the desktop runtime, where the command is not
+    // registered. The view called `.then` on that, which crashed the whole workspace — the
+    // channel list and the player both vanished. Probing is an optimisation, so its absence has
+    // to degrade to "no probe results" rather than take the page down.
+    probeStreamUrls.mockResolvedValue(undefined);
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+    // The workspace as a whole survived: the channel list and its controls are still there.
+    expect(screen.getByLabelText("频道分组")).toBeInTheDocument();
+  });
+
+  it("still renders when line probing rejects", async () => {
+    probeStreamUrls.mockRejectedValue(new Error("probe failed"));
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
   });
 
   it("does not claim every line failed while one is still usable", async () => {

@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Heart,
+  ScrollText,
   Search,
   TriangleAlert,
   Tv,
@@ -11,6 +12,14 @@ import {
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import {
@@ -82,7 +91,7 @@ export function LiveView() {
   const [resolvedStream, setResolvedStream] =
     useState<PlaybackResolution | null>(null);
   const [streamIndex, setStreamIndex] = useState(0);
-  const [showDiagnosticPanel, setShowDiagnosticPanel] = useState(false);
+  const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(false);
   const [streamProbes, setStreamProbes] = useState<StreamProbe[] | null>(null);
   const [isProbing, setIsProbing] = useState(false);
   const streamIndexRef = useRef(0);
@@ -216,7 +225,11 @@ export function LiveView() {
       };
     }
     setIsProbing(true);
-    void probeStreamUrls(streamUrls)
+    // `probeStreamUrls` returns null outside the desktop runtime, where the command is not
+    // registered. Calling `.then` on that crashed the whole workspace — the channel list and the
+    // player both disappeared, so a preview build could not play anything with more than one
+    // line. Probing is an optimisation, so its absence must degrade to "no probe results".
+    void Promise.resolve(probeStreamUrls(streamUrls))
       .then((probes) => {
         if (cancelled) return;
         setStreamProbes(probes);
@@ -242,6 +255,10 @@ export function LiveView() {
           setResolvedStream(null);
         }
       })
+      .catch(() => {
+        // A failed probe is not a failure to play: the player still gets the selected line.
+        if (!cancelled) setStreamProbes(null);
+      })
       .finally(() => {
         if (!cancelled) setIsProbing(false);
       });
@@ -265,14 +282,19 @@ export function LiveView() {
 
   /**
    * True once every line has been probed and none served a manifest. In that case the failure
-   * is upstream — the addresses are unreachable from this machine — and cycling through them
-   * again cannot help, so the UI should say that instead of implying a retry might work.
+   * is upstream — the addresses are unreachable from this machine — so the explanation is worth
+   * stating. It used to be a banner over the player; it now leads the diagnosis instead, because
+   * the player already reports that playback failed and the *reason* is what 播放诊断 is for.
    */
   const allLinesUnreachable = Boolean(
     streamProbes &&
       streamProbes.length > 0 &&
       streamProbes.every((probe) => !probe.ok),
   );
+
+  const allLinesUnreachableNote = allLinesUnreachable
+    ? `已并发测试 ${streamProbes?.length ?? 0} 条线路，全部未能取到直播清单。这类地址通常只对特定运营商网络开放（例如中国移动 IPTV 源需要移动宽带），换用其它频道或其它直播源即可正常观看。`
+    : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -535,9 +557,13 @@ export function LiveView() {
         </div>
       </header>
 
-      {/* Live catalog / EPG request failure. Kept explicit so an unreachable source is
-          never silently rendered as "no channels". */}
-      {(loadError || epgError) && (
+      {/* Only a *catalog* failure is shown here: without channels there is nothing to watch, so
+          the reason has to be visible. A guide failure is different — the channel still plays,
+          and the strip below the player already says the guide is unavailable, so a banner on
+          top of a working player would report a problem the user does not have. The raw error
+          text (a reqwest chain naming DNS and deadlines) is not actionable either way; the
+          specific reason belongs in 播放诊断, where it can be read in full. */}
+      {loadError && (
         <div className="shrink-0 px-3 pt-2">
           <Alert variant="destructive" className="py-2">
             <TriangleAlert
@@ -546,10 +572,11 @@ export function LiveView() {
               aria-hidden="true"
             />
             <AlertTitle className="text-xs font-semibold">
-              直播数据请求失败
+              直播源请求失败
             </AlertTitle>
             <AlertDescription className="text-xs text-destructive/90">
-              {loadError ?? epgError}
+              无法读取这个直播源的频道列表，因此没有可播放的频道。
+              请检查该源的地址是否有效，或在配置中心重新测试它。
             </AlertDescription>
           </Alert>
         </div>
@@ -641,32 +668,10 @@ export function LiveView() {
               </div>
             )}
 
-            {/* Error overlay. `variant="destructive"` already colours the text red, so the
-                previous `bg-destructive/90` override painted red text onto a red surface and
-                the message was unreadable. Keep the dark surface and let the destructive
-                variant supply the red foreground, and lead with an icon so the state reads at
-                a glance instead of relying on colour alone.
-                `allLinesUnreachable` raises this banner on its own: the probe already knows
-                every line is dead, so there is no reason to make the user wait while the
-                player times out through each one in turn. */}
-            {(diagnostic || allLinesUnreachable) && (
-              <div className="absolute top-3 left-3 right-3 z-30">
-                <Alert
-                  variant="destructive"
-                  className="py-2 backdrop-blur-md bg-destructive/10 border-destructive/40"
-                >
-                  <TriangleAlert className="size-4" data-icon="inline-start" aria-hidden="true" />
-                  <AlertTitle className="text-xs font-semibold">
-                    {allLinesUnreachable ? "该频道所有线路均无法连接" : "播放受阻"}
-                  </AlertTitle>
-                  <AlertDescription className="text-xs text-destructive/90">
-                    {allLinesUnreachable
-                      ? `已并发测试 ${streamProbes?.length ?? 0} 条线路，全部未能取到直播清单。这类地址通常只对特定运营商网络开放（例如中国移动 IPTV 源需要移动宽带），换用其它频道或其它直播源即可正常观看。`
-                      : diagnostic}
-                  </AlertDescription>
-                </Alert>
-              </div>
-            )}
+            {/* No in-player alert here. The player already shows "无法播放当前内容" with a retry
+                action, and a second banner saying the same thing on top of it only competed for
+                attention. The specific cause is available in 播放诊断, which is where a user who
+                wants it will look. */}
           </div>
 
           {/* Bottom Live Control & EPG Strip (44px) */}
@@ -753,27 +758,44 @@ export function LiveView() {
                 </div>
               )}
 
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="text-muted-foreground"
-                onClick={() => setShowDiagnosticPanel((prev) => !prev)}
-              >
-                {showDiagnosticPanel ? "收起诊断" : "流诊断"}
-              </Button>
+              <Dialog open={isDiagnosticOpen} onOpenChange={setIsDiagnosticOpen}>
+                <DialogTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="text-muted-foreground"
+                  >
+                    <ScrollText
+                      className="size-3.5"
+                      data-icon="inline-start"
+                      aria-hidden="true"
+                    />
+                    播放诊断
+                  </Button>
+                </DialogTrigger>
+                <DialogContent className="flex max-h-[calc(100vh-2rem)] max-w-2xl flex-col overflow-hidden sm:max-w-2xl">
+                  {/* The panel carries the visible heading and the copy action, so the dialog's
+                      own title exists only to name the dialog for assistive technology. This is
+                      the same dialog the movie library opens — one presentation of one thing,
+                      rather than a drawer here and a dialog there. */}
+                  <DialogHeader className="sr-only">
+                    <DialogTitle>播放诊断</DialogTitle>
+                    <DialogDescription>
+                      播放失败时复制这段内容，可直接定位到具体环节
+                    </DialogDescription>
+                  </DialogHeader>
+                  <div className="min-h-0 flex-1 overflow-y-auto">
+                    <MediaDiagnosticPanel
+                      className="border-0 bg-transparent backdrop-blur-none"
+                      snapshot={mediaDiagnostic}
+                      note={allLinesUnreachableNote ?? diagnostic}
+                    />
+                  </div>
+                </DialogContent>
+              </Dialog>
             </div>
           </div>
-
-          {/* Diagnostic Panel Collapsible Drawer */}
-          {showDiagnosticPanel && (
-            <div className="border-t border-border/80 bg-card p-3 max-h-60 overflow-y-auto">
-              <MediaDiagnosticPanel
-                snapshot={mediaDiagnostic}
-                note={diagnostic}
-              />
-            </div>
-          )}
         </main>
       </div>
     </div>
