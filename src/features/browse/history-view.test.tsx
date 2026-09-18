@@ -146,6 +146,49 @@ describe("HistoryView", () => {
     expect(names).toEqual(["更新的", "更早的"]);
   });
 
+  it("groups entries under the day they happened", () => {
+    // The day is what makes this a timeline rather than a list with dots: it answers "when"
+    // before the reader parses a timestamp, and it lets each row show only a clock time.
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 86_400_000);
+    useAppStore.setState({
+      history: [
+        vodFootprint({ id: "a", item: item("今天看的"), updatedAt: now.toISOString() }),
+        vodFootprint({
+          id: "b",
+          item: item("昨天看的"),
+          updatedAt: yesterday.toISOString(),
+        }),
+      ],
+    });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const column = screen.getByRole("region", { name: "影视足迹" });
+    expect(column).toHaveTextContent("今天");
+    expect(column).toHaveTextContent("昨天");
+    // The clock time is shown, not the full date, because the group already states the day.
+    const time = `${String(now.getHours()).padStart(2, "0")}:${String(
+      now.getMinutes(),
+    ).padStart(2, "0")}`;
+    expect(column).toHaveTextContent(time);
+  });
+
+  it("does not merge a record with an unreadable timestamp into another day", () => {
+    // Silently folding it into the group above would misreport when it happened.
+    useAppStore.setState({
+      history: [
+        vodFootprint({ id: "a", item: item("正常的"), updatedAt: new Date().toISOString() }),
+        vodFootprint({ id: "b", item: item("坏的"), updatedAt: "not-a-date" }),
+      ],
+    });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const column = screen.getByRole("region", { name: "影视足迹" });
+    expect(column).toHaveTextContent("正常的");
+    expect(column).toHaveTextContent("坏的");
+    expect(column).toHaveTextContent("not-a-date");
+  });
+
   it("states the episode, the line it played on, and the position", () => {
     useAppStore.setState({ history: [vodFootprint()] });
     const { container } = render(<HistoryView onNavigate={() => {}} />);

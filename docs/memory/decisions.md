@@ -409,3 +409,15 @@
 - 变异验证 8 项全部抓到：`heartByIdOnly`、`keyWithoutSource`、`columnsUnfiltered`、`columnsSwapped`、`emptyColumnHidden`、`emptyColumnNoAction`、`neverOverallEmpty`、`columnCountWrong`。
 - 真实浏览器实测：tooltip 文本**恰好是 `["我的收藏"]`**、`hasNumber: false`；两列 `sideBySide: true` 且**各自只含自己那一类**（`vodHasChannel: false`、`liveHasFilm: false`）、`rowBadgeCount: 0`；只有影视时 `liveText: "电视0 条还没有电视足迹…去电视直播看看"` 且 `livePresent: true`，只有直播时镜像成立；几何实测两列**等宽 624**（left 100 / 756、gap 32、窗口 1424）。
 - 本轮最终：前端 **329 项**（新增 favorite-key 3 项、history-view 4 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。
+- **足迹卡片重新设计**（用户反馈红框那行「摆着有点丑」，并要求用前端技能美化）。用了 `impeccable` 技能；它判定这是**对既有界面的窄幅精修**（`SCOPED_EXISTING_ALLOWED`），因此**以现有代码为设计权威**，不新建 PRODUCT.md、不换视觉世界。
+- **红框的根因是「元数据糊成一团」**：`第01集 · 线路 dyttm3u8 · 电影天堂` 用同样的灰色、同样的字重、点号连接成**一整句话**，但这三段回答的是**三个不同的问题**（看的是哪一集 / 哪条线路提供的 / 来自哪个源），**平铺的一串让眼睛没有落点**。
+  - 改为**三层不同权重**：**集数**和**线路**是离散的具名事物 → 做成 chip；**线路用主色**，因为播放出问题时用户回来查的就是它；**源是出处** → 最安静，且推到**行的最右端**。
+  - **时间从标题下方移到标题行右端并对齐**：每行右侧承载同一类信息，**眼睛才能顺着这一列往下扫**。
+  - **节点改成「光晕 + 实心核」两层**：单个扁平的圆点读起来像项目符号，**加了光晕才读作「一条线上的一个点」**；连接线改为画在节点后面而不是行上的边框，**行高不同也不会错位**。
+  - **按天分组**（今天 / 昨天 / M 月 D 日，跨年才带年份）：**这才是让它成为时间线而不是「带圆点的列表」的东西**——它先回答「什么时候」，于是每行只需要显示时刻。**时间戳解析失败时单独成组，不并入上一天**（并入等于谎报时间）。
+- **对比度是算出来的，不是看出来的**：按技能的 craft floor 要求正文 ≥4.5:1，实算后 `text-muted-foreground/60` 只有 **2.98:1**、空状态提示 `/70` 只有 **3.63:1**，**两个都不达标**，改为 `/90` 与满值后为 **5.26:1 / 6.24:1**；chip 配色实测 **6.2–8.9:1** 全部通过。
+- 技能要求的机械检测器 `impeccable detect --json` 返回 `[]`（零发现）。
+- **harness 踩坑**：`btoa()` **遇到 CJK 会抛异常**，我的种子脚本因此整段挂掉、localStorage 为空，页面显示「暂无可用影视源」——**排查时先看 `rawStored` 是否为 none 就能定位是种子没跑，而不是应用有问题**。另外种子脚本**必须在应用 bundle 之前执行**，否则 store 已经 hydrate 完了。
+- 变异验证 8 项全部抓到（`columnsUnfiltered`、`columnsSwapped`、`emptyColumnHidden`、`emptyColumnNoAction`、`neverOverallEmpty`、`columnCountWrong` 等）。
+- 真实浏览器实测：`dayLabels: ["今天","昨天"]`、chips 正确（`["HD中字","线路 dyttm3u8", …]`，**源不在 chip 里**）、`nodeHasHalo: true`、两列**等宽 620**（gap 40）、**无溢出**；高 DPI 截图逐张确认过层级与对齐。
+- 本轮最终：前端 **331 项**（新增 history-view 2 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。
