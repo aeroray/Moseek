@@ -133,6 +133,38 @@ function openAdaptersTab() {
   fireEvent.click(tab);
 }
 
+/** Opens the 原始配置 tab. Radix switches tabs on pointer-down, not click. */
+function openRawTab() {
+  const tab = screen.getByRole("tab", { name: "原始配置" });
+  fireEvent.mouseDown(tab, { button: 0 });
+  fireEvent.click(tab);
+}
+
+/** Opens the 解析报告 tab. Radix switches tabs on pointer-down, not click. */
+function openReportTab() {
+  const tab = screen.getByRole("tab", { name: "解析报告" });
+  fireEvent.mouseDown(tab, { button: 0 });
+  fireEvent.click(tab);
+}
+
+/**
+ * The adapter card. The tab and the card title are both 适配器, so matching the text alone is
+ * ambiguous; scope to the card that holds the adapter table or its empty state.
+ */
+function adapterCard() {
+  const card = screen
+    .getAllByText("适配器")
+    .map((node) => node.closest("[data-slot='card']"))
+    .find(Boolean);
+  if (!card) throw new Error("adapter card not found");
+  // Guard against matching a different card: the adapter card always holds the table or its
+  // empty state, so a stray match would make the assertions below pass vacuously.
+  if (!card.querySelector("[data-slot='table'], [data-slot='empty']")) {
+    throw new Error("matched a card that is not the adapter card");
+  }
+  return card as HTMLElement;
+}
+
 describe("config center", () => {
   afterEach(cleanup);
 
@@ -173,10 +205,11 @@ describe("config center", () => {
 
   it("calls the list a source list and its column a resource name", () => {
     // "资源源" was a typo-like duplication, and "能力" named the mechanism rather than the
-    // outcome a user cares about.
+    // outcome a user cares about. "清单" was the other awkward one: a list is just a list.
     renderCenter();
 
-    expect(screen.getByRole("tab", { name: /源清单/ })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: /源列表/ })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /源清单/ })).not.toBeInTheDocument();
     expect(screen.getByText("资源名称")).toBeInTheDocument();
     expect(screen.queryByText("资源源")).not.toBeInTheDocument();
     expect(screen.queryByText("能力")).not.toBeInTheDocument();
@@ -366,44 +399,129 @@ describe("config center", () => {
     renderCenter();
     openAdaptersTab();
 
-    // The tab is also labelled 适配器, so scope to the card rather than matching the text alone.
-    const card = screen
-      .getAllByText("适配器")
-      .map((node) => node.closest("[data-slot='card']"))
-      .find(Boolean);
-    const scroller = card?.querySelector("[data-slot='scroll-area']");
+    const card = adapterCard();
+    const scroller = card.querySelector("[data-slot='scroll-area']");
     expect(scroller).not.toBeNull();
     expect(scroller?.className).toContain("min-h-0");
   });
 
-  it("summarises the adapter counts in a compact strip, not four cards", () => {
-    // The four cards took a third of the viewport to state four numbers, and the per-adapter
-    // detail below is what a reader actually came for.
+  it("sizes the raw editor from the space left, not a fixed height", () => {
+    // A fixed 680px editor made the card 938px tall in an 805px window. The page is
+    // overflow-hidden, so the bottom of the editor and the last lines of the configuration were
+    // unreachable. jsdom cannot measure this, so the contract that makes it fit is what is pinned.
     renderCenter();
-    openAdaptersTab();
+    openRawTab();
 
-    const summary = screen.getByRole("button", { name: /可执行/ });
-    // The count is stated on the strip itself.
-    expect(summary).toHaveTextContent(/\d+/);
-    expect(summary).toHaveTextContent("个源");
-    // No oversized figure: the old cards used a 2xl display number.
-    expect(summary.querySelector(".text-2xl")).toBeNull();
+    const card = screen
+      .getAllByText("原始配置文本")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean);
+    expect(card?.className).toContain("min-h-0");
+    expect(card?.className).toContain("flex-1");
+
+    const editor = card?.querySelector("[data-slot='scroll-area']");
+    expect(editor?.className).toContain("min-h-0");
+    expect(editor?.className).toContain("flex-1");
+    // No viewport-derived height: that is what overflowed the window.
+    expect(editor?.className).not.toMatch(/h-\[min\(/);
+    expect(editor?.className).not.toContain("min-h-[520px]");
   });
 
-  it("filters the adapter list from the summary, and toggles back off", () => {
-    // Clicking a count is the shortest path from "how many are blocked" to "which ones".
+  it("gives the adapter list the same toolbar as the source list", () => {
+    // Both lists are read the same way — search, then filter, then a count — so a reader who has
+    // used one already knows how to use the other. The adapter tab used to have no search at all,
+    // and its counts sat on a separate line as a second set of controls doing the filter's job.
     renderCenter();
     openAdaptersTab();
 
-    const blocked = screen.getByRole("button", { name: /已阻止/ });
-    fireEvent.click(blocked);
-    expect(blocked).toHaveAttribute("aria-pressed", "true");
-
-    // Clicking the same one again returns to the full list rather than leaving a stuck filter.
-    fireEvent.click(screen.getByRole("button", { name: /已阻止/ }));
+    const card = adapterCard();
     expect(
-      screen.getByRole("button", { name: /已阻止/ }),
-    ).toHaveAttribute("aria-pressed", "false");
+      within(card).getByPlaceholderText("搜索适配器名称或说明"),
+    ).toBeInTheDocument();
+    expect(within(card).getByLabelText("筛选适配器")).toBeInTheDocument();
+    // The count reads the same as the source list's.
+    expect(within(card).getByText(/^共 \d+ 类$/)).toBeInTheDocument();
+  });
+
+  it("narrows the adapter list by search", () => {
+    renderCenter();
+    openAdaptersTab();
+
+    const card = adapterCard();
+    const bodyRows = () =>
+      within(card)
+        .getAllByRole("row")
+        .filter((row) => row.closest("tbody"));
+    const rowsBefore = bodyRows().length;
+
+    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
+      target: { value: "脚本" },
+    });
+
+    const rows = bodyRows();
+    expect(rows.length).toBeLessThan(rowsBefore);
+    // Everything left matches the keyword, so the search is not just hiding rows arbitrarily.
+    for (const row of rows) {
+      expect(row.textContent).toMatch(/脚本/);
+    }
+  });
+
+  it("counts adapters in the filter, not sources", () => {
+    // The number beside a filter option has to answer "how many rows will I get". It counted
+    // sources instead, so it read "可执行 26 个源" next to a choice that revealed 9 rows.
+    renderCenter();
+    openAdaptersTab();
+
+    const trigger = screen.getByLabelText("筛选适配器");
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+
+    const enabled = screen.getByRole("option", { name: /可执行/ });
+    const claimed = Number(enabled.textContent?.replace(/\D/g, "") ?? "0");
+    expect(claimed).toBeGreaterThan(0);
+
+    // Choosing it must yield exactly that many adapter rows.
+    fireEvent.click(enabled);
+    const card = adapterCard();
+    const bodyRows = within(card)
+      .getAllByRole("row")
+      .filter((row) => row.closest("tbody"));
+    expect(bodyRows.length).toBe(claimed);
+  });
+
+  it("updates the count as the search narrows the list", () => {
+    // The count is the feedback that the search did something; a stale count beside a filtered
+    // list is worse than no count.
+    renderCenter();
+    openAdaptersTab();
+
+    const card = adapterCard();
+    const countBefore = within(card).getByText(/^共 \d+ 类$/).textContent;
+
+    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
+      target: { value: "脚本" },
+    });
+
+    const countAfter = within(card).getByText(/^共 \d+ 类$/).textContent;
+    expect(countAfter).not.toBe(countBefore);
+    const claimed = Number(countAfter?.replace(/\D/g, "") ?? "0");
+    const bodyRows = within(card)
+      .getAllByRole("row")
+      .filter((row) => row.closest("tbody"));
+    expect(bodyRows.length).toBe(claimed);
+  });
+
+  it("explains an empty search result in terms of the search", () => {
+    // "切换筛选条件" was the only hint, but a keyword that matches nothing is not a filter problem.
+    renderCenter();
+    openAdaptersTab();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
+      target: { value: "不存在的适配器名字" },
+    });
+
+    expect(screen.getByText("没有匹配的适配器")).toBeInTheDocument();
+    expect(screen.getByText(/换个关键词/)).toBeInTheDocument();
   });
 
   it("offers a shorter adapter filter without the state nothing maps to", () => {
@@ -416,12 +534,12 @@ describe("config center", () => {
     fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
     fireEvent.click(trigger);
 
-    expect(screen.getByRole("option", { name: "全部适配器" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "可执行" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "待适配" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "已阻止" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /全部适配器/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /可执行/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /待适配/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /已阻止/ })).toBeInTheDocument();
     expect(
-      screen.queryByRole("option", { name: "部分支持" }),
+      screen.queryByRole("option", { name: /部分支持/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -448,16 +566,14 @@ describe("config center", () => {
     renderCenter();
     openAdaptersTab();
 
-    fireEvent.click(screen.getByRole("button", { name: /可执行/ }));
+    const trigger = screen.getByLabelText("筛选适配器");
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("option", { name: /可执行/ }));
 
-    const card = screen
-      .getAllByText("适配器")
-      .map((node) => node.closest("[data-slot='card']"))
-      .find(Boolean);
-    expect(within(card as HTMLElement).getAllByText("可执行").length).toBeGreaterThan(
-      0,
-    );
-    expect(within(card as HTMLElement).queryByText("已启用")).not.toBeInTheDocument();
+    const card = adapterCard();
+    expect(within(card).getAllByText("可执行").length).toBeGreaterThan(0);
+    expect(within(card).queryByText("已启用")).not.toBeInTheDocument();
   });
 
   it("labels the test button for assistive technology instead of showing text", () => {
@@ -917,5 +1033,38 @@ describe("config center", () => {
     await waitFor(() => {
       expect(screen.getByText(/已自动关闭该源的启用开关/)).toBeInTheDocument();
     });
+  });
+
+  it("leads the report with a verdict instead of eight equal cards", () => {
+    // Every finding was its own bordered card, so a fatal parse failure and a zero-count security
+    // note looked identical and the reader had to read all eight to find the one that mattered.
+    renderCenter();
+    openReportTab();
+
+    expect(screen.getByText(/配置解析成功，已识别 \d+ 个源/)).toBeInTheDocument();
+    // The verdict is a single statement, not a card per field.
+    expect(screen.queryByText("结构解析")).not.toBeInTheDocument();
+  });
+
+  it("groups the report into content and execution boundaries", () => {
+    renderCenter();
+    openReportTab();
+
+    expect(screen.getByText("内容")).toBeInTheDocument();
+    expect(screen.getByText("执行边界")).toBeInTheDocument();
+    expect(screen.getByText("可搜索的源")).toBeInTheDocument();
+    expect(screen.getByText("HTTP 解析服务")).toBeInTheDocument();
+  });
+
+  it("collapses a boundary that fired on nothing into one honest line", () => {
+    // Three rows each saying "0 个已阻止" is noise; the reader needs to know nothing was blocked,
+    // and that is one sentence. The fixture config has no JAR, no private protocol and nothing
+    // blocked, so the collapsed form is what should render.
+    renderCenter();
+    openReportTab();
+
+    expect(screen.getByText("没有需要阻止的内容")).toBeInTheDocument();
+    expect(screen.queryByText("远程依赖")).not.toBeInTheDocument();
+    expect(screen.queryByText("危险执行路径")).not.toBeInTheDocument();
   });
 });

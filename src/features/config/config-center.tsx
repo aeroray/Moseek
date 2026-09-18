@@ -22,7 +22,7 @@ import {
   Globe2,
   Info,
   Layers3,
-  ListFilter,
+  List,
   LoaderCircle,
   Search,
   ShieldAlert,
@@ -195,6 +195,7 @@ export function ConfigCenter() {
    */
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>("available");
   const [adapterFilter, setAdapterFilter] = useState<AdapterFilter>("all");
+  const [adapterQuery, setAdapterQuery] = useState("");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
     null,
   );
@@ -300,27 +301,38 @@ export function ConfigCenter() {
       })),
     [sources],
   );
-  const adapterCounts = useMemo(() => {
+  /**
+   * Counts of adapters, not of sources. The table lists adapters and the filter selects among
+   * them, so the number beside a filter option has to answer "how many rows will I get". Counting
+   * sources there said "可执行 26 个源" next to a choice that revealed 9 rows.
+   */
+  const adapterStateCounts = useMemo(() => {
     const counts: Record<AdapterExecution, number> = {
       enabled: 0,
       partial: 0,
       "needs-adapter": 0,
       blocked: 0,
     };
-    for (const { adapter, sources: matchedSources } of adapterRows) {
-      counts[adapter.execution] += matchedSources.length;
-    }
+    for (const { adapter } of adapterRows) counts[adapter.execution] += 1;
     return counts;
   }, [adapterRows]);
-  const visibleAdapterRows = useMemo(
-    () =>
+  const visibleAdapterRows = useMemo(() => {
+    const byState =
       adapterFilter === "all"
         ? adapterRows
         : adapterRows.filter(
             ({ adapter }) => adapter.execution === adapterFilter,
-          ),
-    [adapterFilter, adapterRows],
-  );
+          );
+    const keyword = adapterQuery.trim().toLowerCase();
+    if (!keyword) return byState;
+    // The same fields the row shows, so anything a reader can see is something they can search.
+    return byState.filter(({ adapter }) =>
+      [adapter.label, adapter.id, adapter.reason]
+        .join(" ")
+        .toLowerCase()
+        .includes(keyword),
+    );
+  }, [adapterFilter, adapterQuery, adapterRows]);
 
   useEffect(() => {
     const sourceBaseUrl = activeDocument?.sourceBaseUrl ?? undefined;
@@ -1154,8 +1166,8 @@ export function ConfigCenter() {
           <div className="flex shrink-0 items-center justify-between gap-4">
             <TabsList>
               <TabsTrigger value="sources" className="gap-1.5">
-                <ListFilter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                源清单
+                <List className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                源列表
               </TabsTrigger>
               <TabsTrigger value="adapters" className="gap-1.5">
                 <Blocks className="size-3.5" data-icon="inline-start" aria-hidden="true" />
@@ -1186,7 +1198,7 @@ export function ConfigCenter() {
               <CardHeader className="shrink-0 border-b pb-4 pt-5">
                 <div className="flex items-center justify-between gap-4">
                   <div>
-                    <CardTitle className="text-base">源清单</CardTitle>
+                    <CardTitle className="text-base">源列表</CardTitle>
                     <CardDescription>
                       启用后即可在影视库或直播中使用；测试失败或无内容的源会自动关闭。
                     </CardDescription>
@@ -1574,6 +1586,28 @@ export function ConfigCenter() {
                       适配器决定一个源能不能被读取；能运行不代表源一定可用，测试通过后才能确认内容能取到。
                     </CardDescription>
                   </div>
+                </div>
+
+                {/* The toolbar is the same one 源列表 uses — search, then filter, then a count —
+                    so the two lists are read the same way. The counts used to sit on their own
+                    line as clickable buttons, which was a second set of controls doing what the
+                    filter already did; they now ride inside the filter options, where the number
+                    answers "how many rows will this give me" at the moment of choosing. */}
+                <div className="mt-4 flex items-center gap-2">
+                  <div className="relative min-w-0 flex-1">
+                    <Search
+                      className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
+                      data-icon="inline-start"
+                      aria-hidden="true"
+                    />
+                    <Input
+                      size="sm"
+                      value={adapterQuery}
+                      onChange={(event) => setAdapterQuery(event.target.value)}
+                      placeholder="搜索适配器名称或说明"
+                      className="pl-8"
+                    />
+                  </div>
                   <Select
                     value={adapterFilter}
                     onValueChange={(value) =>
@@ -1595,93 +1629,36 @@ export function ConfigCenter() {
                     <SelectContent>
                       <SelectGroup>
                         <SelectItem value="all">全部适配器</SelectItem>
-                        <SelectItem value="enabled">可执行</SelectItem>
-                        <SelectItem value="needs-adapter">待适配</SelectItem>
-                        <SelectItem value="blocked">已阻止</SelectItem>
+                        <SelectItem value="enabled">
+                          可执行
+                          <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
+                            {adapterStateCounts.enabled}
+                          </span>
+                        </SelectItem>
+                        <SelectItem value="needs-adapter">
+                          待适配
+                          <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
+                            {adapterStateCounts["needs-adapter"]}
+                          </span>
+                        </SelectItem>
+                        <SelectItem value="blocked">
+                          已阻止
+                          <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
+                            {adapterStateCounts.blocked}
+                          </span>
+                        </SelectItem>
                       </SelectGroup>
                     </SelectContent>
                   </Select>
-                </div>
-
-                {/* The counts as one compact strip rather than four large cards. They summarise
-                    the table below; they are not a dashboard. The cards took a third of the
-                    viewport to state four numbers, and the per-adapter detail is what a reader
-                    actually came for.
-
-                    Each count is also the filter for it, so the shortest path from "how many are
-                    blocked" to "which ones" is one click. */}
-                <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-2">
-                  {(
-                    [
-                      ["enabled", "可执行", adapterCounts.enabled],
-                      [
-                        "needs-adapter",
-                        "待适配",
-                        adapterCounts["needs-adapter"],
-                      ],
-                      ["blocked", "已阻止", adapterCounts.blocked],
-                    ] as const
-                  ).map(([execution, label, count]) => (
-                    <button
-                      key={execution}
-                      type="button"
-                      onClick={() =>
-                        setAdapterFilter(
-                          adapterFilter === execution ? "all" : execution,
-                        )
-                      }
-                      aria-pressed={adapterFilter === execution}
-                      className={cn(
-                        "flex items-center gap-2 rounded-md border border-transparent px-2.5 py-1 text-xs transition-colors",
-                        adapterFilter === execution
-                          ? "border-border bg-muted text-foreground"
-                          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "size-2 shrink-0 rounded-full",
-                          execution === "enabled" &&
-                            "bg-[color:var(--status-supported)]",
-                          execution === "needs-adapter" &&
-                            "bg-[color:var(--status-adapter)]",
-                          execution === "blocked" &&
-                            "bg-[color:var(--status-blocked)]",
-                        )}
-                        aria-hidden="true"
-                      />
-                      {label}
-                      <span className="font-semibold tabular-nums text-foreground">
-                        {count}
-                      </span>
-                      <span className="text-muted-foreground">个源</span>
-                    </button>
-                  ))}
-                  {/* The partial state is not offered as a filter because nothing in the current
-                      registry maps to it; its count still belongs in the summary so the numbers
-                      add up to the configured total. */}
-                  {adapterCounts.partial > 0 && (
-                    <span className="flex items-center gap-2 px-2.5 py-1 text-xs text-muted-foreground">
-                      <span
-                        className="size-2 shrink-0 rounded-full bg-[color:var(--status-partial)]"
-                        aria-hidden="true"
-                      />
-                      部分支持
-                      <span className="font-semibold tabular-nums text-foreground">
-                        {adapterCounts.partial}
-                      </span>
-                      <span className="text-muted-foreground">个源</span>
-                    </span>
-                  )}
-                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
-                    共 {adapterRows.length} 类适配器
+                  <span className="shrink-0 text-xs text-muted-foreground">
+                    共 {visibleAdapterRows.length} 类
                   </span>
                 </div>
               </CardHeader>
 
               <CardContent className="flex min-h-0 flex-1 flex-col p-0">
                 {visibleAdapterRows.length > 0 ? (
-                  /* The list is the only scrolling region, matching 源清单: it takes whatever
+                  /* The list is the only scrolling region, matching 源列表: it takes whatever
                      height is left after the fixed header, so the page never scrolls and the
                      controls stay put. Without this the table ran past the bottom of the card. */
                   <ScrollArea className="min-h-0 flex-1">
@@ -1757,7 +1734,9 @@ export function ConfigCenter() {
                         </EmptyMedia>
                         <EmptyTitle>没有匹配的适配器</EmptyTitle>
                         <EmptyDescription>
-                          切换筛选条件即可查看全部适配器。
+                          {adapterQuery.trim()
+                            ? "换个关键词，或把筛选切回「全部适配器」。"
+                            : "切换筛选条件即可查看全部适配器。"}
                         </EmptyDescription>
                       </EmptyHeader>
                     </Empty>
@@ -1767,9 +1746,12 @@ export function ConfigCenter() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="raw">
-            <Card>
-              <CardHeader>
+          <TabsContent
+            value="raw"
+            className="flex min-h-0 flex-1 flex-col gap-4"
+          >
+            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
+              <CardHeader className="shrink-0 border-b pb-4 pt-5">
                 <CardTitle className="flex items-center gap-2 text-base">
                   <Code2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   原始配置文本
@@ -1778,7 +1760,11 @@ export function ConfigCenter() {
                   可直接编辑原始配置；确认后使用导入流程解析并保存。
                 </CardDescription>
               </CardHeader>
-              <CardContent>
+              {/* The editor takes the remaining height instead of a fixed 680px. A fixed height
+                  made the card 938px tall in an 805px window, and since the page itself is
+                  overflow-hidden the bottom of the editor — and the last lines of the
+                  configuration — could not be reached at all. */}
+              <CardContent className="flex min-h-0 flex-1 flex-col p-3 pt-4">
                 <JsonEditor
                   value={editorText}
                   onChange={(value) => {
@@ -1786,15 +1772,18 @@ export function ConfigCenter() {
                     setImportText(value);
                   }}
                   aria-label="原始配置文本"
-                  className="h-[min(680px,calc(100vh-12rem))] min-h-[520px] w-full"
+                  className="min-h-0 flex-1"
                 />
               </CardContent>
             </Card>
           </TabsContent>
 
-          <TabsContent value="report">
-            <Card>
-              <CardHeader>
+          <TabsContent
+            value="report"
+            className="flex min-h-0 flex-1 flex-col gap-4"
+          >
+            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
+              <CardHeader className="shrink-0 border-b pb-4 pt-5">
                 <CardTitle className="flex items-center gap-2 text-base">
                   <FileJson className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                   解析报告
@@ -1803,94 +1792,129 @@ export function ConfigCenter() {
                   按字段和执行边界整理的导入结果。
                 </CardDescription>
               </CardHeader>
-              <CardContent className={report ? "grid grid-cols-2 gap-4" : ""}>
+              <CardContent className="min-h-0 flex-1 overflow-y-auto p-5">
                 {report ? (
-                  <>
-                    <ReportLine
-                      title="结构解析"
-                      detail={
-                        report.ok
-                          ? "JSON5 兼容，允许注释和尾逗号"
-                          : (report.issues[0]?.message ?? "配置结构无法解析")
-                      }
-                      status={report.ok ? "通过" : "失败"}
-                      danger={!report.ok}
-                    />
-                    <ReportLine
-                      title="普通 CMS"
-                      detail={`${reportCounts.supported} 个源可以直接进入搜索与详情流程`}
-                      status="通过"
-                    />
-                    <ReportLine
-                      title="配置方言"
-                      detail={`识别为 ${report.configDialect}，已统一转换为 Moseek 标准源模型`}
-                      status="已归一化"
-                    />
-                    <ReportLine
-                      title="HTTP 解析服务"
-                      detail={`${report.parseServices.filter((service) => service.capability === "supported").length} 个 GET/POST 服务可在播放时尝试，其他方法仅记录`}
-                      status={
-                        report.parseServices.some(
-                          (service) => service.capability === "supported",
-                        )
-                          ? "可用"
-                          : "未配置"
-                      }
-                      warning={
-                        report.parseServices.length > 0 &&
-                        !report.parseServices.some(
-                          (service) => service.capability === "supported",
-                        )
+                  /* One verdict, then two groups of labelled rows.
+                     The previous layout was eight equal-weight bordered cards, each an icon plus a
+                     heading plus a sentence, so a fatal parse failure and a zero-count security
+                     note looked identical and the reader had to read all eight to find the one that
+                     mattered. A verdict block answers "did it work" first, and the groups answer
+                     "what came in" and "what is being refused" — the two questions the report
+                     actually exists for. */
+                  <div className="flex flex-col gap-5">
+                    <ReportVerdict
+                      ok={report.ok}
+                      sourceCount={report.sources.length}
+                      dialect={report.configDialect}
+                      failureMessage={
+                        report.issues[0]?.message ?? "配置结构无法解析"
                       }
                     />
-                    <ReportLine
-                      title="远程依赖"
-                      detail={`${report.sources.filter((source) => Boolean(source.jar)).length} 个源含 JAR 字段，已阻止下载和执行`}
-                      status="已隔离"
-                      warning
-                    />
-                    <ReportLine
-                      title="私有协议"
-                      detail={`${reportCounts["needs-adapter"]} 个源需要 adapter，当前不执行`}
-                      status="待适配"
-                      warning
-                    />
-                    <ReportLine
-                      title="危险执行路径"
-                      detail={`${reportCounts.blocked} 个远程脚本或扩展被默认阻止`}
-                      status="已阻止"
-                      danger
-                    />
-                    <ReportLine
-                      title="字段校验"
-                      detail={`${report.issues.length} 个字段或能力问题已记录，可在源详情中查看原因`}
-                      status={report.issues.length > 0 ? "需关注" : "通过"}
-                      warning={report.issues.length > 0}
-                    />
+
+                    {report.ok && (
+                      <>
+                        <ReportGroup title="内容">
+                          <ReportRow
+                            label="可搜索的源"
+                            value={`${reportCounts.supported} 个`}
+                          />
+                          <ReportRow
+                            label="直播源"
+                            value={
+                              report.liveCount > 0
+                                ? `${report.liveCount} 个`
+                                : "无"
+                            }
+                          />
+                          <ReportRow
+                            label="HTTP 解析服务"
+                            value={(() => {
+                              const usable = report.parseServices.filter(
+                                (service) => service.capability === "supported",
+                              ).length;
+                              if (report.parseServices.length === 0)
+                                return "未配置";
+                              return usable > 0
+                                ? `${usable} 个可用`
+                                : `${report.parseServices.length} 个均不可用`;
+                            })()}
+                          />
+                        </ReportGroup>
+
+                        <ReportGroup title="执行边界">
+                          {/* A boundary with a count of zero is good news and does not deserve a
+                              row of its own; saying "没有阻止任何内容" once is the honest summary,
+                              and it keeps the eye on the boundaries that did fire. */}
+                          {reportCounts.blocked === 0 &&
+                          reportCounts["needs-adapter"] === 0 &&
+                          !report.sources.some((source) => Boolean(source.jar)) ? (
+                            <ReportRow
+                              label="阻止与限制"
+                              value="没有需要阻止的内容"
+                              tone="supported"
+                            />
+                          ) : (
+                            <>
+                              <ReportRow
+                                label="远程依赖"
+                                value={`${report.sources.filter((source) => Boolean(source.jar)).length} 个已阻止`}
+                                tone="blocked"
+                              />
+                              <ReportRow
+                                label="私有协议"
+                                value={`${reportCounts["needs-adapter"]} 个待适配`}
+                                tone="partial"
+                              />
+                              <ReportRow
+                                label="危险执行路径"
+                                value={`${reportCounts.blocked} 个已阻止`}
+                                tone="blocked"
+                              />
+                            </>
+                          )}
+                        </ReportGroup>
+                      </>
+                    )}
+
                     {report.issues.length > 0 && (
-                      <div className="col-span-2 rounded-md border bg-muted/20 p-4">
-                        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-                          诊断明细
-                        </p>
-                        <div className="mt-3 flex flex-col gap-2">
+                      <section className="flex flex-col gap-2">
+                        {/* No eyebrow: the heading carries its own weight, and the count in it is
+                            the part that tells the reader whether to keep going. */}
+                        <h3 className="flex items-center gap-2 text-sm font-medium">
+                          <AlertTriangle
+                            className="size-3.5 text-[color:var(--status-partial)]"
+                            aria-hidden="true"
+                          />
+                          {report.issues.length} 处需要留意
+                        </h3>
+                        <div className="divide-y divide-border/60 rounded-lg border border-border/60">
                           {report.issues.slice(0, 5).map((issue) => (
-                            <p
+                            <div
                               key={`${issue.path}-${issue.message}`}
-                              className="text-sm text-muted-foreground"
+                              className="flex items-baseline gap-3 px-4 py-2.5"
                             >
-                              <span className="font-mono text-xs text-foreground">
+                              <span className="shrink-0 font-mono text-xs text-foreground">
                                 {issue.path}
                               </span>
-                              {issue.line
-                                ? ` · 第 ${issue.line} 行，第 ${issue.column ?? 0} 列`
-                                : ""}
-                              {` · ${issue.message}`}
-                            </p>
+                              <span className="min-w-0 text-sm text-muted-foreground">
+                                {issue.message}
+                              </span>
+                              {issue.line && (
+                                <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
+                                  第 {issue.line} 行
+                                </span>
+                              )}
+                            </div>
                           ))}
+                          {report.issues.length > 5 && (
+                            <p className="px-4 py-2.5 text-xs text-muted-foreground">
+                              其余 {report.issues.length - 5} 处可在源详情中查看。
+                            </p>
+                          )}
                         </div>
-                      </div>
+                      </section>
                     )}
-                  </>
+                  </div>
                 ) : (
                   <Empty className="min-h-64 border border-dashed bg-card/40">
                     <EmptyHeader>
@@ -2840,54 +2864,105 @@ function DetailRow({
   );
 }
 
-function ReportLine({
-  title,
-  detail,
-  status,
-  warning = false,
-  danger = false,
+/**
+ * The one-line answer to "did the import work", stated before any detail.
+ *
+ * The old report had no verdict at all: 结构解析 was one card among eight, so a failed parse looked
+ * like the other seven until the reader got to it.
+ */
+function ReportVerdict({
+  ok,
+  sourceCount,
+  dialect,
+  failureMessage,
 }: {
-  title: string;
-  detail: string;
-  status: string;
-  warning?: boolean;
-  danger?: boolean;
+  ok: boolean;
+  sourceCount: number;
+  dialect: string;
+  failureMessage: string;
 }) {
   return (
-    <div className="flex items-start gap-3 rounded-md border p-4">
-      <div
+    <div
+      className={cn(
+        "flex items-start gap-3 rounded-lg border p-4",
+        ok
+          ? "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)]"
+          : "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)]",
+      )}
+    >
+      {ok ? (
+        <CircleCheck
+          className="mt-0.5 size-4 shrink-0 text-[color:var(--status-supported)]"
+          aria-hidden="true"
+        />
+      ) : (
+        <CircleX
+          className="mt-0.5 size-4 shrink-0 text-[color:var(--status-blocked)]"
+          aria-hidden="true"
+        />
+      )}
+      <div className="min-w-0">
+        <p
+          className={cn(
+            "font-medium",
+            ok
+              ? "text-[color:var(--status-supported)]"
+              : "text-[color:var(--status-blocked)]",
+          )}
+        >
+          {ok ? `配置解析成功，已识别 ${sourceCount} 个源` : "配置无法解析"}
+        </p>
+        <p className="mt-1 text-sm leading-5 text-muted-foreground">
+          {ok
+            ? `识别为 ${dialect} 格式，已统一转换为 Moseek 标准源模型。`
+            : failureMessage}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/** A named group of report rows. Groups exist so "what came in" and "what is refused" read apart. */
+function ReportGroup({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="flex flex-col gap-2">
+      <h3 className="text-sm font-medium">{title}</h3>
+      <div className="divide-y divide-border/60 rounded-lg border border-border/60">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function ReportRow({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "supported" | "partial" | "blocked";
+}) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 px-4 py-2.5">
+      <span className="text-sm text-muted-foreground">{label}</span>
+      <span
         className={cn(
-          "mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-full",
-          danger
-            ? "bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]"
-            : warning
-              ? "bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]"
-              : "bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
+          "text-sm font-medium tabular-nums",
+          tone === "supported" && "text-[color:var(--status-supported)]",
+          tone === "partial" && "text-[color:var(--status-partial)]",
+          tone === "blocked" && "text-[color:var(--status-blocked)]",
+          !tone && "text-foreground",
         )}
       >
-        {danger ? (
-          <ShieldAlert className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-        ) : warning ? (
-          <Info className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-        ) : (
-          <Check className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-        )}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-3">
-          <p className="font-medium">{title}</p>
-          <Badge
-            variant="outline"
-            className={cn(
-              danger && "text-[color:var(--status-blocked)]",
-              warning && "text-[color:var(--status-partial)]",
-            )}
-          >
-            {status}
-          </Badge>
-        </div>
-        <p className="mt-1 text-sm leading-5 text-muted-foreground">{detail}</p>
-      </div>
+        {value}
+      </span>
     </div>
   );
 }

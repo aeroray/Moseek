@@ -116,6 +116,11 @@ function SelectItem({
       data-slot="select-item"
       className={cn(
         "relative flex w-full cursor-pointer items-center gap-2 rounded py-1 pr-7 pl-2 text-xs outline-hidden select-none focus:bg-primary/15 focus:text-primary data-[disabled]:pointer-events-none data-[disabled]:opacity-40 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-muted-foreground *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        // An item may right-align a trailing value against its label (a count, a state). That has
+        // to be done from here, not on ItemText: Radix drops `className` and `style` from
+        // ItemText because it measures that node to line the trigger's value up with the menu.
+        // The item text is the direct span child that is not the indicator.
+        "[&>span:not([data-slot])]:flex [&>span:not([data-slot])]:flex-1 [&>span:not([data-slot])]:items-center",
         className
       )}
       {...props}
