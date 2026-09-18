@@ -163,15 +163,39 @@ describe("FavoritesView", () => {
     });
   });
 
-  it("separates 影视 from 电视直播 instead of mixing them in one grid", async () => {
+  it("separates 影视 from 电视直播 into their own columns", async () => {
     // They are different things with different affordances: one resumes an episode, the other
     // just starts a stream. A single grid made half the cards behave unlike the other half.
     useAppStore.setState({ favorites: [favorite()], liveFavorites: [] });
     render(<FavoritesView onNavigate={() => {}} />);
 
-    expect(screen.getByRole("tab", { name: /影视/ })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /电视直播/ })).toBeInTheDocument();
-    expect(screen.getByText("示例剧")).toBeInTheDocument();
+    // Both columns are present at once, rather than one hiding behind a tab.
+    const vodColumn = screen.getByRole("region", { name: "影视收藏" });
+    const liveColumn = screen.getByRole("region", { name: "电视直播收藏" });
+    expect(vodColumn).toHaveTextContent("示例剧");
+    expect(liveColumn).not.toHaveTextContent("示例剧");
+    // The empty side still explains itself.
+    expect(liveColumn).toHaveTextContent("还没有收藏频道");
+  });
+
+  it("keeps an empty column visible and offers the way in", () => {
+    // Collapsing it would leave the page looking half-built, and the reader could not tell
+    // whether the app had lost their collection or simply had none.
+    useAppStore.setState({ favorites: [favorite()], liveFavorites: [] });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    expect(
+      screen.getByRole("button", { name: "前往电视直播" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a work from its own row without a tab switch", async () => {
+    useAppStore.setState({ favorites: [favorite()], liveFavorites: [] });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    fireEvent.click(screen.getByText("示例剧"));
+
+    expect(await screen.findByTestId("media-player")).toHaveTextContent("示例剧");
   });
 
   it("shows where the user left off, not just the source name", async () => {
@@ -388,10 +412,7 @@ describe("FavoritesView", () => {
     });
     render(<FavoritesView onNavigate={() => {}} />);
 
-    // Radix switches tabs on pointer-down, not click.
-    fireEvent.mouseDown(screen.getByRole("tab", { name: /电视直播/ }), {
-      button: 0,
-    });
+    // Both columns are on screen, so the channel is reachable without switching anything.
     const card = await screen.findByText("City News");
     fireEvent.click(card);
 

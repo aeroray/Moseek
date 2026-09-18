@@ -91,7 +91,7 @@ describe("HistoryView", () => {
     render(<HistoryView onNavigate={() => {}} />);
 
     const vodColumn = screen.getByRole("region", { name: "影视足迹" });
-    const liveColumn = screen.getByRole("region", { name: "电视足迹" });
+    const liveColumn = screen.getByRole("region", { name: "电视直播足迹" });
 
     // Each entry is in its own column, not merely somewhere on the page.
     expect(vodColumn).toHaveTextContent("冬城猎凶");
@@ -114,7 +114,7 @@ describe("HistoryView", () => {
       screen.getByRole("region", { name: "影视足迹" }),
     ).toHaveTextContent("2 条");
     expect(
-      screen.getByRole("region", { name: "电视足迹" }),
+      screen.getByRole("region", { name: "电视直播足迹" }),
     ).toHaveTextContent("1 条");
   });
 
@@ -189,6 +189,54 @@ describe("HistoryView", () => {
     expect(column).toHaveTextContent("not-a-date");
   });
 
+  it("draws the rail across a day boundary, not just within one day", () => {
+    // The rail ended at every day boundary because "last" was taken from the day group rather
+    // than the column. A column with one record per day — exactly what the channel column holds —
+    // therefore drew no connecting line at all, and the two columns stopped looking like one
+    // component.
+    const now = new Date();
+    const yesterday = new Date(now.getTime() - 86_400_000);
+    const base = liveFootprint();
+    useAppStore.setState({
+      history: [
+        base,
+        {
+          ...base,
+          id: "live-main:CCTV1",
+          channel: { ...base.channel, id: "live-main:CCTV1", name: "CCTV1" },
+          updatedAt: yesterday.toISOString(),
+        },
+      ],
+    });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const column = screen.getByRole("region", { name: "电视直播足迹" });
+    const rows = [...column.querySelectorAll("li")];
+    expect(rows).toHaveLength(2);
+
+    // The first row is not the last in the column, so it must draw a connector even though it is
+    // the last row of its own day.
+    const connectors = (row: Element) =>
+      [...row.querySelectorAll("span")].filter((s) =>
+        (s.className ?? "").includes("w-px"),
+      ).length;
+    expect(connectors(rows[0])).toBe(1);
+    // The genuinely last row ends the rail.
+    expect(connectors(rows[1])).toBe(0);
+  });
+
+  it("does not repeat the counts beside the page title", () => {
+    // Each column states its own count; a second pair up here only asked the reader to compare
+    // two places for the same fact.
+    useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const heading = screen.getByRole("heading", { name: "足迹" });
+    const header = heading.closest("header");
+    expect(header?.textContent).not.toMatch(/影视\s*\d/);
+    expect(header?.textContent).not.toMatch(/直播\s*\d/);
+  });
+
   it("states the episode, the line it played on, and the position", () => {
     useAppStore.setState({ history: [vodFootprint()] });
     const { container } = render(<HistoryView onNavigate={() => {}} />);
@@ -219,7 +267,7 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    const liveColumn = screen.getByRole("region", { name: "电视足迹" });
+    const liveColumn = screen.getByRole("region", { name: "电视直播足迹" });
     expect(liveColumn).toHaveTextContent("新闻");
     expect(liveColumn).not.toHaveTextContent("线路");
   });
@@ -231,8 +279,8 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    const liveColumn = screen.getByRole("region", { name: "电视足迹" });
-    expect(liveColumn).toHaveTextContent("还没有电视足迹");
+    const liveColumn = screen.getByRole("region", { name: "电视直播足迹" });
+    expect(liveColumn).toHaveTextContent("还没有电视直播足迹");
     expect(liveColumn).toHaveTextContent("0 条");
     // It offers the way to produce one.
     expect(
@@ -261,7 +309,7 @@ describe("HistoryView", () => {
 
     expect(screen.getByText("还没有足迹")).toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "影视足迹" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "电视足迹" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "电视直播足迹" })).toBeNull();
   });
 
   it("explains how to get a first record when there are none", () => {

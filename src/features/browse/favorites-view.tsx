@@ -21,7 +21,6 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { MediaPlayer, type MediaStatus } from "@/features/player/media-player";
 import { PlaybackDiagnostics } from "@/features/player/playback-diagnostics";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
@@ -34,11 +33,13 @@ import {
 import { useStreamProbes } from "@/features/player/use-stream-probes";
 import { getVodDetail } from "@/features/browse/cms-adapter";
 import { relinkFavorite } from "@/features/browse/favorite-relink";
-import { useAppStore } from "@/stores/app-store";
 import {
-  catalogCardClassName,
-  catalogCardOverlayClassName,
-} from "@/lib/card-styles";
+  Chip,
+  TimelineColumnEmpty,
+  TimelineColumnHeader,
+  TimelineRail,
+} from "@/features/browse/timeline";
+import { useAppStore } from "@/stores/app-store";
 import { cn } from "@/lib/utils";
 import type { ViewKey } from "@/types/moseek";
 import type {
@@ -60,14 +61,13 @@ import type {
  * promise is stored with it and played here: the work with its episodes, or the channel with all
  * of its lines.
  *
- * 影视 and 直播 are separate tabs rather than one mixed list. They are different things with
- * different affordances — one resumes an episode, the other just starts a stream — and mixing
- * them meant a grid where half the cards behaved differently from the other half.
+ * 影视 and 电视直播 are two columns rather than two tabs, matching 足迹. A tab hides half the
+ * collection behind a control and makes the counts a thing to go and check; side by side, both
+ * are visible at once and the page reads the same way as the timeline it sits beside.
  */
 export function FavoritesView({ onNavigate }: FavoritesViewProps) {
   const favorites = useAppStore((state) => state.favorites);
   const liveFavorites = useAppStore((state) => state.liveFavorites);
-  const [tab, setTab] = useState<"vod" | "live">("vod");
   const [openVodKey, setOpenVodKey] = useState<string | null>(null);
   const [openLiveKey, setOpenLiveKey] = useState<string | null>(null);
 
@@ -98,6 +98,26 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
     }
   }, [liveFavorites, openLiveKey]);
 
+  // A player takes the whole page; the columns are the browsing state.
+  if (openVodFavorite) {
+    return (
+      <FavoriteWatchView
+        favorite={openVodFavorite}
+        onBack={() => setOpenVodKey(null)}
+      />
+    );
+  }
+  if (openLiveFavorite) {
+    return (
+      <FavoriteLiveView
+        favorite={openLiveFavorite}
+        onBack={() => setOpenLiveKey(null)}
+      />
+    );
+  }
+
+  const isEmpty = favorites.length === 0 && liveFavorites.length === 0;
+
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-border/70 bg-card/40 px-4 backdrop-blur-md select-none">
@@ -107,57 +127,40 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
             我的收藏
           </h1>
         </div>
-        {/* The switch sits on the right, where the "继续探索" button used to be. It is a scope
-            control for the whole page, so it belongs with the other end-of-bar control rather
-            than beside the title, where it competed with the heading. */}
-        <Tabs
-          value={tab}
-          onValueChange={(value) => setTab(value as "vod" | "live")}
-        >
-          <TabsList>
-            <TabsTrigger value="vod" className="gap-1.5">
-              <Clapperboard className="size-3.5" aria-hidden="true" />
-              影视
-              <span className="text-muted-foreground">({favorites.length})</span>
-            </TabsTrigger>
-            <TabsTrigger value="live" className="gap-1.5">
-              <Radio className="size-3.5" aria-hidden="true" />
-              电视直播
-              <span className="text-muted-foreground">
-                ({liveFavorites.length})
-              </span>
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
       </header>
 
-      <div className="min-h-0 flex-1">
-        {tab === "vod" ? (
-          openVodFavorite ? (
-            <FavoriteWatchView
-              favorite={openVodFavorite}
-              onBack={() => setOpenVodKey(null)}
+      <ScrollArea
+        className="min-h-0 flex-1"
+        // The same Radix `display: table` wrapper as 足迹: without this the centred column
+        // never centres, because the table grows to the widest row.
+        viewportClassName="[&>div]:!block"
+      >
+        <div className="px-6 py-5">
+          {isEmpty ? (
+            <EmptyState
+              icon={<Bookmark className="size-4 text-primary" />}
+              title="还没有收藏"
+              description="在影视库或电视直播里点击心形图标，收藏的内容就会汇聚在这里，点开即可接着看。"
+              actionLabel="浏览影视库"
+              onAction={() => onNavigate("browse")}
             />
           ) : (
-            <VodFavoritesGrid
-              favorites={favorites}
-              onOpen={openVod}
-              onNavigate={onNavigate}
-            />
-          )
-        ) : openLiveFavorite ? (
-          <FavoriteLiveView
-            favorite={openLiveFavorite}
-            onBack={() => setOpenLiveKey(null)}
-          />
-        ) : (
-          <LiveFavoritesGrid
-            favorites={liveFavorites}
-            onOpen={openLive}
-            onNavigate={onNavigate}
-          />
-        )}
-      </div>
+            <div className="mx-auto grid max-w-7xl items-start gap-x-10 gap-y-8 lg:grid-cols-2">
+              <VodFavoritesColumn
+                favorites={favorites}
+                onOpen={openVod}
+                onNavigate={onNavigate}
+              />
+              <LiveFavoritesColumn
+                favorites={liveFavorites}
+                onOpen={openLive}
+                onNavigate={onNavigate}
+              />
+            </div>
+          )}
+        </div>
+        <ScrollBar />
+      </ScrollArea>
     </div>
   );
 }
@@ -166,7 +169,14 @@ interface FavoritesViewProps {
   onNavigate: (view: ViewKey) => void;
 }
 
-function VodFavoritesGrid({
+/**
+ * The favourited works, as a timeline in the same shape as 足迹.
+ *
+ * A column rather than a poster grid because the two things a person needs here are "which one"
+ * and "where was I", and the grid could only show the first. The row carries the saved position
+ * and the line, which is the whole reason a favourite is worth keeping.
+ */
+function VodFavoritesColumn({
   favorites,
   onOpen,
   onNavigate,
@@ -177,82 +187,129 @@ function VodFavoritesGrid({
 }) {
   const toggleFavorite = useAppStore((state) => state.toggleFavorite);
 
-  if (favorites.length === 0) {
-    return (
-      <EmptyState
-        icon={<Bookmark className="size-4 text-primary" />}
-        title="还没有收藏影视"
-        description="在影视库浏览时点击心形图标，影片就会汇聚在这里，并能从这里直接接着看。"
-        actionLabel="浏览影视库"
-        onAction={() => onNavigate("browse")}
-      />
-    );
-  }
-
   return (
-    <ScrollArea className="h-full">
-      <div className="grid grid-cols-3 gap-3 p-4 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8">
-        {favorites.map((favorite) => (
-          <div
-            key={favorite.key}
-            className={catalogCardClassName}
-            onClick={() => onOpen(favorite.key)}
-          >
-            <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted/40">
-              <MediaPoster
-                src={favorite.item.poster}
-                alt={`${favorite.item.name} 海报`}
-                className="size-full"
-                imageClassName="transition-transform duration-300 group-hover:scale-105"
-              />
-              <div className={catalogCardOverlayClassName}>
-                <span className="flex size-9 items-center justify-center rounded-full bg-primary text-primary-foreground transition-transform duration-200 group-hover:scale-110">
-                  <Play className="size-4 fill-current" aria-hidden="true" />
-                </span>
-              </div>
-              {/* Removing a favourite stays on the card: it is an action on the collection, not on
-                  the artwork, and the collection is what this page is. */}
-              <div className="absolute top-1.5 right-1.5 z-10">
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleFavorite(favorite.item);
-                  }}
-                  aria-label={`取消收藏 ${favorite.item.name}`}
-                  className="flex size-7 items-center justify-center rounded-full bg-black/65 text-primary backdrop-blur-xs transition-all duration-200 hover:scale-110 hover:bg-black/80 active:scale-95"
-                  title="取消收藏"
-                >
-                  <Heart className="size-3.5 fill-current" />
-                </button>
-              </div>
-            </div>
-            <div className="flex flex-col gap-1 p-2.5">
-              <p className="truncate text-xs font-semibold text-foreground transition-colors group-hover:text-primary">
-                {favorite.item.name}
-              </p>
-              {/* Where they left off is the single most useful thing to show: it is what makes
-                  resuming a decision the user does not have to make. */}
-              {favorite.progress ? (
-                <p className="truncate text-[11px] text-primary/90">
-                  {favorite.progress.episodeName} · 看到{" "}
-                  {formatClock(favorite.progress.seconds)}
-                </p>
-              ) : (
-                <p className="truncate text-xs text-muted-foreground">
-                  {favorite.sourceName}
-                </p>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-      <ScrollBar />
-    </ScrollArea>
+    <section
+      role="region"
+      aria-label="影视收藏"
+      className="flex min-w-0 flex-col"
+    >
+      <TimelineColumnHeader
+        tone="vod"
+        icon={<Clapperboard className="size-3.5" aria-hidden="true" />}
+        title="影视"
+        count={favorites.length}
+      />
+
+      {favorites.length === 0 ? (
+        <TimelineColumnEmpty
+          tone="vod"
+          icon={<Clapperboard className="size-4" aria-hidden="true" />}
+          title="还没有收藏影视"
+          hint="在影视库浏览时点击心形图标，影片就会汇聚在这里，并能从这里直接接着看。"
+          actionLabel="浏览影视库"
+          onAction={() => onNavigate("browse")}
+        />
+      ) : (
+        <ol className="flex flex-col">
+          {favorites.map((favorite, index) => (
+            <FavoriteVodRow
+              key={favorite.key}
+              favorite={favorite}
+              isLast={index === favorites.length - 1}
+              onOpen={() => onOpen(favorite.key)}
+              onRemove={() => toggleFavorite(favorite.item)}
+            />
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 
-function LiveFavoritesGrid({
+function FavoriteVodRow({
+  favorite,
+  isLast,
+  onOpen,
+  onRemove,
+}: {
+  favorite: VodFavorite;
+  isLast: boolean;
+  onOpen: () => void;
+  onRemove: () => void;
+}) {
+  // The line the saved position belongs to, by name — the same fact 足迹 records, and the one
+  // worth knowing when playback misbehaves.
+  const lineName = favorite.progress
+    ? favorite.item.playLines.find((line) => line.id === favorite.progress?.lineId)
+        ?.name
+    : undefined;
+
+  return (
+    <li className="group/row flex gap-3">
+      <TimelineRail tone="vod" isLast={isLast} />
+
+      <div className="flex min-w-0 flex-1 items-start gap-3 py-2">
+        {/* The whole row opens the work. It is the primary action, so it is the row rather than a
+            control inside it; removal is the secondary one and stays a button. */}
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex min-w-0 flex-1 items-start gap-3 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        >
+          <MediaPoster
+            src={favorite.item.poster}
+            alt={`${favorite.item.name} 海报`}
+            className="h-[4.25rem] w-12 shrink-0 overflow-hidden rounded ring-1 ring-border/50"
+          />
+
+          <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+            <span className="flex items-baseline gap-3">
+              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                {favorite.item.name}
+              </span>
+              {/* The saved position is the point of the row, so it sits where the eye lands
+                  after the title rather than being buried under the metadata. */}
+              {favorite.progress ? (
+                <span className="shrink-0 text-[11px] tabular-nums text-primary/90">
+                  看到 {formatClock(favorite.progress.seconds)}
+                </span>
+              ) : (
+                <span className="shrink-0 text-[11px] text-muted-foreground">
+                  未观看
+                </span>
+              )}
+            </span>
+
+            <span className="flex min-w-0 flex-wrap items-center gap-1.5">
+              {favorite.progress ? (
+                <Chip>{favorite.progress.episodeName}</Chip>
+              ) : (
+                <Chip>第 1 集</Chip>
+              )}
+              {lineName && <Chip tone="accent">线路 {lineName}</Chip>}
+              <span className="ml-auto min-w-0 shrink-0 truncate pl-2 text-[11px] text-muted-foreground/90">
+                {favorite.sourceName}
+              </span>
+            </span>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={onRemove}
+          aria-label={`取消收藏 ${favorite.item.name}`}
+          title="取消收藏"
+          className="mt-1 shrink-0 rounded-full p-1.5 text-primary transition-colors hover:bg-primary/15"
+        >
+          <Heart className="size-3.5 fill-current" aria-hidden="true" />
+        </button>
+      </div>
+    </li>
+  );
+}
+
+/** The favourited channels, in the same column shape. */
+function LiveFavoritesColumn({
   favorites,
   onOpen,
   onNavigate,
@@ -263,63 +320,93 @@ function LiveFavoritesGrid({
 }) {
   const toggleLiveFavorite = useAppStore((state) => state.toggleLiveFavorite);
 
-  if (favorites.length === 0) {
-    return (
-      <EmptyState
-        icon={<Bookmark className="size-4 text-primary" />}
-        title="还没有收藏频道"
-        description="在电视直播里点「收藏」，频道就会出现在这里，点开即可观看，不必再回直播页翻找。"
-        actionLabel="前往电视直播"
-        onAction={() => onNavigate("live")}
-      />
-    );
-  }
-
   return (
-    <ScrollArea className="h-full">
-      <div className="grid grid-cols-2 gap-3 p-4 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
-        {favorites.map((favorite) => (
-          <div
-            key={favorite.key}
-            className="group flex cursor-pointer items-center gap-3 rounded-md border border-border/60 bg-card/60 p-3 transition-colors hover:border-primary/50 hover:bg-card"
-            onClick={() => onOpen(favorite.key)}
-          >
-            <span className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded bg-muted/50">
-              {favorite.channel.logoUrl ? (
-                <img
-                  src={favorite.channel.logoUrl}
-                  alt=""
-                  className="size-full object-contain"
-                  loading="lazy"
-                />
-              ) : (
-                <Radio className="size-4 text-muted-foreground" aria-hidden="true" />
-              )}
-            </span>
-            <div className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-xs font-semibold text-foreground group-hover:text-primary">
-                {favorite.channel.name}
-              </span>
-              <span className="truncate text-[11px] text-muted-foreground">
-                {favorite.channel.groupName || favorite.sourceName}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={(event) => {
-                event.stopPropagation();
-                toggleLiveFavorite(favorite.channel, favorite.sourceName);
-              }}
-              className="shrink-0 rounded-full p-1 text-primary transition-transform hover:scale-110 active:scale-95"
-              title="取消收藏"
-            >
-              <Heart className="size-3.5 fill-current" />
-            </button>
-          </div>
-        ))}
-      </div>
-      <ScrollBar />
-    </ScrollArea>
+    <section
+      role="region"
+      aria-label="电视直播收藏"
+      className="flex min-w-0 flex-col"
+    >
+      <TimelineColumnHeader
+        tone="live"
+        icon={<Radio className="size-3.5" aria-hidden="true" />}
+        title="电视直播"
+        count={favorites.length}
+      />
+
+      {favorites.length === 0 ? (
+        <TimelineColumnEmpty
+          tone="live"
+          icon={<Radio className="size-4" aria-hidden="true" />}
+          title="还没有收藏频道"
+          hint="在电视直播里点「收藏」，频道就会出现在这里，点开即可观看，不必再回直播页翻找。"
+          actionLabel="前往电视直播"
+          onAction={() => onNavigate("live")}
+        />
+      ) : (
+        <ol className="flex flex-col">
+          {favorites.map((favorite, index) => (
+            <li key={favorite.key} className="group/row flex gap-3">
+              <TimelineRail
+                tone="live"
+                isLast={index === favorites.length - 1}
+              />
+
+              <div className="flex min-w-0 flex-1 items-start gap-3 py-2">
+                <button
+                  type="button"
+                  onClick={() => onOpen(favorite.key)}
+                  className="flex min-w-0 flex-1 items-start gap-3 rounded text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                >
+                  <span className="flex h-[4.25rem] w-12 shrink-0 items-center justify-center overflow-hidden rounded bg-muted/40 ring-1 ring-border/50">
+                    {favorite.channel.logoUrl ? (
+                      <img
+                        src={favorite.channel.logoUrl}
+                        alt=""
+                        className="size-full object-contain"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <Radio
+                        className="size-4 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </span>
+
+                  <span className="flex min-w-0 flex-1 flex-col gap-1.5">
+                    <span className="flex items-baseline gap-3">
+                      <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                        {favorite.channel.name}
+                      </span>
+                    </span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <Chip tone="live">
+                        {favorite.channel.groupName || "未分组"}
+                      </Chip>
+                      <span className="ml-auto min-w-0 shrink-0 truncate pl-2 text-[11px] text-muted-foreground/90">
+                        {favorite.sourceName}
+                      </span>
+                    </span>
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    toggleLiveFavorite(favorite.channel, favorite.sourceName)
+                  }
+                  aria-label={`取消收藏 ${favorite.channel.name}`}
+                  title="取消收藏"
+                  className="mt-1 shrink-0 rounded-full p-1.5 text-primary transition-colors hover:bg-primary/15"
+                >
+                  <Heart className="size-3.5 fill-current" aria-hidden="true" />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 

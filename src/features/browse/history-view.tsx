@@ -11,8 +11,17 @@ import {
   EmptyTitle,
 } from "@/components/ui/empty";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
+import {
+  Chip,
+  DayHeading,
+  TimelineColumnEmpty,
+  TimelineColumnHeader,
+  TimelineRail,
+  formatClock,
+  formatClockTime,
+  groupByDay,
+} from "@/features/browse/timeline";
 import { useAppStore } from "@/stores/app-store";
-import { cn } from "@/lib/utils";
 import type { FootprintRecord, ViewKey } from "@/types/moseek";
 
 interface HistoryViewProps {
@@ -50,25 +59,9 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
           <h1 className="text-sm font-semibold tracking-tight text-foreground">
             足迹
           </h1>
-          {!isEmpty && (
-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <span className="flex items-center gap-1">
-                <span
-                  className="size-1.5 rounded-full bg-primary"
-                  aria-hidden="true"
-                />
-                影视 {vodRecords.length}
-              </span>
-              <span className="text-muted-foreground/30">/</span>
-              <span className="flex items-center gap-1">
-                <span
-                  className="size-1.5 rounded-full bg-sky-400"
-                  aria-hidden="true"
-                />
-                直播 {liveRecords.length}
-              </span>
-            </span>
-          )}
+          {/* No counts beside the title. Each column already states its own count in its heading,
+              and a second pair of numbers up here only asked the reader to compare two places for
+              the same fact. */}
         </div>
         {!isEmpty && (
           <Button
@@ -126,7 +119,9 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
               />
               <TimelineColumn
                 kind="live"
-                title="电视"
+                // "电视直播", matching the navigation entry and the favourites tab. "电视" alone
+                // left the same thing with two names in one product.
+                title="电视直播"
                 icon={<Radio className="size-3.5" aria-hidden="true" />}
                 records={liveRecords}
                 emptyHint="在电视直播里选择频道，这里就会记下你看过哪些台。"
@@ -141,12 +136,7 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
   );
 }
 
-/**
- * One column: a heading, a count, and its own timeline.
- *
- * The count is on the column rather than only in the header so each side states how much it holds
- * without the reader comparing two numbers in a toolbar.
- */
+/** One column: a heading, a count, and its own timeline. */
 function TimelineColumn({
   kind,
   title,
@@ -163,7 +153,7 @@ function TimelineColumn({
   onNavigate: (view: ViewKey) => void;
 }) {
   const isVod = kind === "vod";
-  const groups = groupByDay(records);
+  const groups = groupByDay(records, (record) => record.updatedAt);
 
   return (
     /* The role is explicit rather than relying on `<section aria-label>` alone: browsers do not
@@ -175,71 +165,40 @@ function TimelineColumn({
       aria-label={`${title}足迹`}
       className="flex min-w-0 flex-col"
     >
-      <div className="mb-3 flex items-center gap-2">
-        <span
-          className={cn(
-            "flex size-6 shrink-0 items-center justify-center rounded-md",
-            isVod ? "bg-primary/12 text-primary" : "bg-sky-400/12 text-sky-400",
-          )}
-        >
-          {icon}
-        </span>
-        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
-        <span className="text-xs tabular-nums text-muted-foreground">
-          {records.length} 条
-        </span>
-        {/* A hairline filling the remaining width, so the heading reads as a section rule rather
-            than as a label floating above a list. */}
-        <span className="h-px flex-1 bg-border" aria-hidden="true" />
-      </div>
+      <TimelineColumnHeader
+        tone={kind}
+        icon={icon}
+        title={title}
+        count={records.length}
+      />
 
       {records.length === 0 ? (
-        /* A column with nothing in it still has to look intentional. A dashed outline keeps the
-           column's shape so the page reads as two panels, one of which happens to be empty,
-           rather than as a layout that failed to fill. */
-        <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed border-border/60 px-4 py-10 text-center">
-          <span
-            className={cn(
-              "flex size-8 items-center justify-center rounded-full",
-              isVod ? "bg-primary/10 text-primary/80" : "bg-sky-400/10 text-sky-400/80",
-            )}
-            aria-hidden="true"
-          >
-            {icon}
-          </span>
-          <p className="text-xs text-muted-foreground">还没有{title}足迹</p>
-          <p className="max-w-xs text-xs leading-5 text-muted-foreground">
-            {emptyHint}
-          </p>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="mt-1"
-            onClick={() => onNavigate(isVod ? "browse" : "live")}
-          >
-            {isVod ? "去影视库看看" : "去电视直播看看"}
-          </Button>
-        </div>
+        <TimelineColumnEmpty
+          tone={kind}
+          icon={icon}
+          title={`还没有${title}足迹`}
+          hint={emptyHint}
+          actionLabel={isVod ? "去影视库看看" : "去电视直播看看"}
+          onAction={() => onNavigate(isVod ? "browse" : "live")}
+        />
       ) : (
         <div className="flex flex-col gap-4">
-          {groups.map((group) => (
+          {groups.map((group, groupIndex) => (
             <div key={group.key} className="flex flex-col">
-              {/* The day. Grouping by day is what makes this a timeline rather than a list with
-                  dots: it answers "when" before the reader has to parse a timestamp, and it lets
-                  each entry show only a clock time. */}
-              <div className="mb-1 flex items-center gap-2">
-                <span className="text-[11px] font-medium tracking-wide text-muted-foreground">
-                  {group.label}
-                </span>
-                <span className="h-px flex-1 bg-border/60" aria-hidden="true" />
-              </div>
+              <DayHeading label={group.label} />
               <ol className="flex flex-col">
                 {group.records.map((record, index) => (
                   <TimelineEntry
                     key={record.id}
                     record={record}
-                    isLast={index === group.records.length - 1}
+                    // "Last" means last in the column, not last in this day. Passing the group's
+                    // own last index ended the rail at every day boundary, so a column with one
+                    // record per day — which is exactly what the 电视直播 column holds — drew no
+                    // line at all, and the two columns stopped looking like one component.
+                    isLast={
+                      groupIndex === groups.length - 1 &&
+                      index === group.records.length - 1
+                    }
                   />
                 ))}
               </ol>
@@ -253,9 +212,6 @@ function TimelineColumn({
 
 /**
  * One stop on the timeline.
- *
- * The rail is a continuous line drawn behind the node rather than a border on the row, so it
- * survives rows of different heights without the spacing drifting.
  *
  * The metadata under the title is deliberately given three different weights instead of being one
  * dot-separated run. "第01集 · 线路 dyttm3u8 · 电影天堂" read as a single grey sentence even though
@@ -283,35 +239,7 @@ function TimelineEntry({
 
   return (
     <li className="group/entry flex gap-3">
-      {/* The rail. The last entry's line stops at its node, so the timeline ends where the
-          history does rather than trailing into nothing. */}
-      <div className="relative flex w-4 shrink-0 justify-center">
-        {!isLast && (
-          <span
-            className={cn(
-              "absolute top-5 bottom-[-0.5rem] w-px",
-              isVod ? "bg-primary/20" : "bg-sky-400/20",
-            )}
-            aria-hidden="true"
-          />
-        )}
-        {/* A two-part node: a soft halo with a solid core. A single flat dot reads as a bullet;
-            the halo is what makes it read as a point on a line. */}
-        <span
-          className={cn(
-            "relative z-10 mt-[1.15rem] flex size-2.5 shrink-0 items-center justify-center rounded-full ring-[3px] ring-background",
-            isVod ? "bg-primary/25" : "bg-sky-400/25",
-          )}
-          aria-hidden="true"
-        >
-          <span
-            className={cn(
-              "size-1.5 rounded-full",
-              isVod ? "bg-primary" : "bg-sky-400",
-            )}
-          />
-        </span>
-      </div>
+      <TimelineRail tone={isVod ? "vod" : "live"} isLast={isLast} />
 
       <div className="flex min-w-0 flex-1 items-start gap-3 py-2">
         <Poster record={record} />
@@ -359,9 +287,7 @@ function TimelineEntry({
             </>
           ) : (
             <div className="flex min-w-0 items-center gap-1.5">
-              <Chip tone="live">
-                {record.channel.groupName || "未分组"}
-              </Chip>
+              <Chip tone="live">{record.channel.groupName || "未分组"}</Chip>
               <span className="ml-auto min-w-0 shrink-0 truncate pl-2 text-[11px] text-muted-foreground/90">
                 {sourceName}
               </span>
@@ -370,28 +296,6 @@ function TimelineEntry({
         </div>
       </div>
     </li>
-  );
-}
-
-/** A small labelled token. Used for the two facts that name a discrete thing. */
-function Chip({
-  children,
-  tone = "neutral",
-}: {
-  children: React.ReactNode;
-  tone?: "neutral" | "accent" | "live";
-}) {
-  return (
-    <span
-      className={cn(
-        "min-w-0 max-w-full truncate rounded px-1.5 py-0.5 text-[11px] leading-4",
-        tone === "neutral" && "bg-muted text-foreground/75",
-        tone === "accent" && "bg-primary/12 text-primary/90",
-        tone === "live" && "bg-sky-400/12 text-sky-400/90",
-      )}
-    >
-      {children}
-    </span>
   );
 }
 
@@ -427,73 +331,6 @@ function Poster({ record }: { record: FootprintRecord }) {
   );
 }
 
-interface DayGroup {
-  key: string;
-  label: string;
-  records: FootprintRecord[];
-}
-
-/**
- * Splits an already newest-first list into consecutive days.
- *
- * Consecutive grouping is enough and avoids a second sort: the list arrives ordered, so records
- * sharing a day are already adjacent. A record with an unparseable timestamp becomes its own
- * group rather than being silently merged into the day above it.
- */
-function groupByDay(records: FootprintRecord[]): DayGroup[] {
-  const groups: DayGroup[] = [];
-  for (const record of records) {
-    const date = new Date(record.updatedAt);
-    const valid = !Number.isNaN(date.getTime());
-    const key = valid
-      ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
-      : record.updatedAt;
-    const last = groups[groups.length - 1];
-    if (last && last.key === key) {
-      last.records.push(record);
-    } else {
-      groups.push({
-        key,
-        label: formatDayLabel(record.updatedAt),
-        records: [record],
-      });
-    }
-  }
-  return groups;
-}
-
-/** "今天" / "昨天" / "9 月 17 日", and the year only when it is not the current one. */
-function formatDayLabel(value: string) {
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return value;
-  const date = new Date(timestamp);
-  const now = new Date();
-  const days = dayDifference(date, now);
-  if (days === 0) return "今天";
-  if (days === 1) return "昨天";
-  const monthDay = `${date.getMonth() + 1} 月 ${date.getDate()} 日`;
-  return date.getFullYear() === now.getFullYear()
-    ? monthDay
-    : `${date.getFullYear()} 年 ${monthDay}`;
-}
-
-/** Whole days between two dates, compared by calendar day rather than by elapsed hours. */
-function dayDifference(date: Date, now: Date) {
-  const startOfDay = (value: Date) =>
-    new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime();
-  return Math.round((startOfDay(now) - startOfDay(date)) / 86_400_000);
-}
-
-/** `HH:MM` — the clock time, since the day is already stated by the group heading. */
-function formatClockTime(value: string) {
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return "";
-  const date = new Date(timestamp);
-  return `${String(date.getHours()).padStart(2, "0")}:${String(
-    date.getMinutes(),
-  ).padStart(2, "0")}`;
-}
-
 /**
  * How far through the episode the position is, as a percentage.
  *
@@ -505,10 +342,4 @@ function formatClockTime(value: string) {
 const NOMINAL_EPISODE_SECONDS = 45 * 60;
 function progressPercent(seconds: number) {
   return Math.min(100, Math.round((seconds / NOMINAL_EPISODE_SECONDS) * 100));
-}
-
-/** `m:ss` — a position inside an episode, not a time of day. */
-function formatClock(seconds: number) {
-  const total = Math.max(0, Math.floor(seconds));
-  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
