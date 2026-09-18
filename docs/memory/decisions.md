@@ -464,3 +464,16 @@
 - **又一次「合成事件测不到 CSS 伪类」**：悬停验证仍然必须用 CDP 真指针；实测 `borderChanged: true`、`removeOpacity` `"0"` → `"1"`、`noLift: true`、`noShadow: true`。
 - 实测：`flowsLeftToRight: true`、`wraps: true`、封面比例 **0.67（2:3）**、5 张卡片各有取消按钮、`hasSource: false` 且 `hasLine: false`（**确认信息已精简**）、两列等宽 620、无溢出。
 - 本轮最终：前端 **341 项**（新增 favorites-view 4 项）、Rust 107 项、`clippy` 零警告、`pnpm build` 零警告。
+- **适配器页重做**（用户四点要求：四张卡看不懂/占地方、「矩阵」难懂、参考源清单重排且底部溢出、筛选加图标并精简选项）：
+  - **四张摘要大卡删掉，改为一句话计数条**。用户说「数据不是那么重要」——那就**不该给它三分之一屏**。计数条留在 `CardHeader` 内，三个计数（可执行/待适配/已阻止）**本身就是筛选按钮**（`aria-pressed`，再点一次回到全部），**「从『有几个被阻止』到『是哪几个』只有一次点击」**。
+  - **`partial` 不作为筛选项**：注册表里**没有任何 adapter 映射到 partial**，给它一个筛选项等于提供一个永远空的选项（沿用上一轮 部分支持 的同一判断）。但计数仍显示（仅当 > 0），**否则数字加不到总数**。
+  - **「适配器矩阵」→「适配器」**，图标 `Link2` → `Blocks`。**「矩阵」是个数学词，它没有告诉用户这里有什么。**
+  - **底部溢出的真正原因不是表格**：`TabsContent value="adapters"` **漏了** 源清单有的 `flex min-h-0 flex-1 flex-col gap-4`，所以卡片根本没有被约束高度，`ScrollArea` 拿不到可分配空间。**补上后实测：viewport 429px vs 表格 964px（真的在滚动）、卡片底 785 ≤ 窗口 805、`pageScrolls: false`。**
+    - **这是「表格包了滚动区」和「滚动区真的在滚」的区别**：第一次实测 `viewportClips: true` 就已经为真，但 `viewportHeight` 是 **964（比 900 的窗口还高）**——**一个「裁剪」的容器如果自己不裁剪，断言就是假通过**。加了 `cardFitsWindow` / `pageScrolls` 才是真的量到了用户说的「底部溢出」。
+  - **表头措辞统一**：`执行状态`→`状态`、`边界说明`→`说明`；筛选器加 `Filter` 图标 + `aria-label="筛选适配器"`。
+  - **一个我自己引入的不一致，靠追查发现**：计数条和筛选项写 `可执行`，但同一状态的表格徽章走 `adapterStatusLabel()` 返回 **`已启用`**——**用户点了「可执行 3 个源」，然后要去找三行根本不叫这个名字的记录**。改 `adapterStatusLabel` 的 `enabled` → `可执行`、`partial` → `部分支持`（该函数**全项目只有一处调用**，改动面可控），并**新增一条测试钉住「计数用的词 = 徽章用的词」**；用 mutation（把 `可执行` 改回 `已启用`）确认该测试**真的会红**。
+  - **对比度实算发现一个真缺陷**：计数条单位 `个源` 用了 `text-muted-foreground/70`，70% 混合后实测 **3.61:1**，**低于正文 4.5:1 下限**。改回不带透明度的 `text-muted-foreground`（**6.24:1**）。其余：计数数字 15.81:1、主色 9.14:1。
+  - **又一次「Radix 切 Tab 必须用真指针」**：合成的 `PointerEvent` 在真实浏览器里**切不动 Tab**（`data-state` 停在 `inactive`），必须走 CDP `Input.dispatchMouseEvent`。**harness 通过 `window.__TAB_POINT__` 交握手，runner 移真鼠标过去按下。**
+  - 实测：`tabs: [源清单, 适配器, 原始配置, 解析报告]`、`hasMatrixWord: false`、`filterHasIcon: true`、`filterOptions: [全部适配器, 可执行, 待适配, 已阻止]`、点计数 `rows 16 → 9 → 16`、`cardFitsWindow: true`、`pageScrolls: false`。
+  - 本轮最终：前端 **350 项**（config-center 49 项；本轮新增的是「计数用词 = 徽章用词」这条一致性测试，其余为上一轮已加的滚动区/精简计数条/筛选项测试）、Rust 107 项、`clippy` 零警告、`pnpm build` 零警告。
+  - **注**：期间外部提交 `8e8a9f8`（用户自己的品牌图标改动）落在 `28565d0` 之上，新增 `app-logo.test.tsx` 并替换 favicon，**这解释了 341→349 的测试数增量，不是本次改动**。

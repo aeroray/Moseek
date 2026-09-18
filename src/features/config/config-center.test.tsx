@@ -126,6 +126,13 @@ function chooseFilter(label: string) {
   fireEvent.click(option);
 }
 
+/** Opens the 适配器 tab. Radix switches tabs on pointer-down, not click. */
+function openAdaptersTab() {
+  const tab = screen.getByRole("tab", { name: "适配器" });
+  fireEvent.mouseDown(tab, { button: 0 });
+  fireEvent.click(tab);
+}
+
 describe("config center", () => {
   afterEach(cleanup);
 
@@ -352,6 +359,105 @@ describe("config center", () => {
       .closest("div.flex.h-full");
     expect(page?.className).toContain("overflow-hidden");
     expect(page?.className).not.toContain("overflow-auto");
+  });
+
+  it("gives the adapter list its own scroll region, like the source list", () => {
+    // Without it the adapter table ran past the bottom of the card instead of scrolling inside it.
+    renderCenter();
+    openAdaptersTab();
+
+    // The tab is also labelled 适配器, so scope to the card rather than matching the text alone.
+    const card = screen
+      .getAllByText("适配器")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean);
+    const scroller = card?.querySelector("[data-slot='scroll-area']");
+    expect(scroller).not.toBeNull();
+    expect(scroller?.className).toContain("min-h-0");
+  });
+
+  it("summarises the adapter counts in a compact strip, not four cards", () => {
+    // The four cards took a third of the viewport to state four numbers, and the per-adapter
+    // detail below is what a reader actually came for.
+    renderCenter();
+    openAdaptersTab();
+
+    const summary = screen.getByRole("button", { name: /可执行/ });
+    // The count is stated on the strip itself.
+    expect(summary).toHaveTextContent(/\d+/);
+    expect(summary).toHaveTextContent("个源");
+    // No oversized figure: the old cards used a 2xl display number.
+    expect(summary.querySelector(".text-2xl")).toBeNull();
+  });
+
+  it("filters the adapter list from the summary, and toggles back off", () => {
+    // Clicking a count is the shortest path from "how many are blocked" to "which ones".
+    renderCenter();
+    openAdaptersTab();
+
+    const blocked = screen.getByRole("button", { name: /已阻止/ });
+    fireEvent.click(blocked);
+    expect(blocked).toHaveAttribute("aria-pressed", "true");
+
+    // Clicking the same one again returns to the full list rather than leaving a stuck filter.
+    fireEvent.click(screen.getByRole("button", { name: /已阻止/ }));
+    expect(
+      screen.getByRole("button", { name: /已阻止/ }),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("offers a shorter adapter filter without the state nothing maps to", () => {
+    // 部分支持 has no adapter in the registry, so offering it as a filter was a choice that
+    // always came back empty.
+    renderCenter();
+    openAdaptersTab();
+
+    const trigger = screen.getByLabelText("筛选适配器");
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+
+    expect(screen.getByRole("option", { name: "全部适配器" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "可执行" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "待适配" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "已阻止" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "部分支持" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("names the adapter tab in plain words", () => {
+    renderCenter();
+
+    // "矩阵" was the hard word; the tab now just says what the panel holds.
+    expect(screen.getByRole("tab", { name: "适配器" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /矩阵/ })).not.toBeInTheDocument();
+  });
+
+  it("gives the adapter filter an icon, like the source list's", () => {
+    renderCenter();
+    openAdaptersTab();
+
+    expect(
+      screen.getByLabelText("筛选适配器").querySelector("svg"),
+    ).not.toBeNull();
+  });
+
+  it("uses the same word for a count as for the badge it leads to", () => {
+    // The count said 可执行 while the rows it revealed were badged 已启用, so clicking "3 个源"
+    // left the reader hunting for three rows that did not appear to exist.
+    renderCenter();
+    openAdaptersTab();
+
+    fireEvent.click(screen.getByRole("button", { name: /可执行/ }));
+
+    const card = screen
+      .getAllByText("适配器")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean);
+    expect(within(card as HTMLElement).getAllByText("可执行").length).toBeGreaterThan(
+      0,
+    );
+    expect(within(card as HTMLElement).queryByText("已启用")).not.toBeInTheDocument();
   });
 
   it("labels the test button for assistive technology instead of showing text", () => {

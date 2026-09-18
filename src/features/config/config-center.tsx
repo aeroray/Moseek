@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   AlertTriangle,
+  Blocks,
   Braces,
   Check,
   Code2,
@@ -20,7 +21,6 @@ import {
   Filter,
   Globe2,
   Info,
-  Link2,
   Layers3,
   ListFilter,
   LoaderCircle,
@@ -310,16 +310,6 @@ export function ConfigCenter() {
     for (const { adapter, sources: matchedSources } of adapterRows) {
       counts[adapter.execution] += matchedSources.length;
     }
-    return counts;
-  }, [adapterRows]);
-  const adapterProfileCounts = useMemo(() => {
-    const counts: Record<AdapterExecution, number> = {
-      enabled: 0,
-      partial: 0,
-      "needs-adapter": 0,
-      blocked: 0,
-    };
-    for (const { adapter } of adapterRows) counts[adapter.execution] += 1;
     return counts;
   }, [adapterRows]);
   const visibleAdapterRows = useMemo(
@@ -1168,8 +1158,8 @@ export function ConfigCenter() {
                 源清单
               </TabsTrigger>
               <TabsTrigger value="adapters" className="gap-1.5">
-                <Link2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                适配器矩阵
+                <Blocks className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                适配器
               </TabsTrigger>
               <TabsTrigger value="raw" className="gap-1.5">
                 <Code2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
@@ -1564,43 +1554,24 @@ export function ConfigCenter() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="adapters">
-            <div className="grid grid-cols-4 gap-3">
-              <AdapterSummary
-                label="可执行"
-                value={adapterCounts.enabled}
-                detail={`${adapterProfileCounts.enabled} 类适配器`}
-                execution="enabled"
-              />
-              <AdapterSummary
-                label="部分支持"
-                value={adapterCounts.partial}
-                detail={`${adapterProfileCounts.partial} 类适配器`}
-                execution="partial"
-              />
-              <AdapterSummary
-                label="待适配"
-                value={adapterCounts["needs-adapter"]}
-                detail={`${adapterProfileCounts["needs-adapter"]} 类适配器`}
-                execution="needs-adapter"
-              />
-              <AdapterSummary
-                label="已阻止"
-                value={adapterCounts.blocked}
-                detail={`${adapterProfileCounts.blocked} 类适配器`}
-                execution="blocked"
-              />
-            </div>
-            <Card>
-              <CardHeader>
+          <TabsContent
+            value="adapters"
+            className="flex min-h-0 flex-1 flex-col gap-4"
+          >
+            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
+              <CardHeader className="shrink-0 border-b pb-4 pt-5">
                 <div className="flex items-start justify-between gap-4">
-                  <div>
+                  <div className="min-w-0">
                     <CardTitle className="flex items-center gap-2 text-base">
-                      <Link2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                      适配器能力矩阵
+                      <Blocks
+                        className="size-4 text-primary"
+                        data-icon="inline-start"
+                        aria-hidden="true"
+                      />
+                      适配器
                     </CardTitle>
                     <CardDescription>
-                      适配器能运行不代表源一定可用；测试通过后才能确认内容能取到。
+                      适配器决定一个源能不能被读取；能运行不代表源一定可用，测试通过后才能确认内容能取到。
                     </CardDescription>
                   </div>
                   <Select
@@ -1609,79 +1580,189 @@ export function ConfigCenter() {
                       setAdapterFilter(value as AdapterFilter)
                     }
                   >
-                    <SelectTrigger size="sm" className="w-36" aria-label="筛选适配器状态">
-                      <SelectValue placeholder="适配器状态" />
+                    <SelectTrigger
+                      size="sm"
+                      className="w-40 shrink-0"
+                      aria-label="筛选适配器"
+                    >
+                      <Filter
+                        className="size-3.5"
+                        data-icon="inline-start"
+                        aria-hidden="true"
+                      />
+                      <SelectValue placeholder="筛选适配器" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
                         <SelectItem value="all">全部适配器</SelectItem>
                         <SelectItem value="enabled">可执行</SelectItem>
-                        <SelectItem value="partial">部分支持</SelectItem>
                         <SelectItem value="needs-adapter">待适配</SelectItem>
                         <SelectItem value="blocked">已阻止</SelectItem>
                       </SelectGroup>
                     </SelectContent>
                   </Select>
                 </div>
+
+                {/* The counts as one compact strip rather than four large cards. They summarise
+                    the table below; they are not a dashboard. The cards took a third of the
+                    viewport to state four numbers, and the per-adapter detail is what a reader
+                    actually came for.
+
+                    Each count is also the filter for it, so the shortest path from "how many are
+                    blocked" to "which ones" is one click. */}
+                <div className="mt-4 flex flex-wrap items-center gap-x-2 gap-y-2">
+                  {(
+                    [
+                      ["enabled", "可执行", adapterCounts.enabled],
+                      [
+                        "needs-adapter",
+                        "待适配",
+                        adapterCounts["needs-adapter"],
+                      ],
+                      ["blocked", "已阻止", adapterCounts.blocked],
+                    ] as const
+                  ).map(([execution, label, count]) => (
+                    <button
+                      key={execution}
+                      type="button"
+                      onClick={() =>
+                        setAdapterFilter(
+                          adapterFilter === execution ? "all" : execution,
+                        )
+                      }
+                      aria-pressed={adapterFilter === execution}
+                      className={cn(
+                        "flex items-center gap-2 rounded-md border border-transparent px-2.5 py-1 text-xs transition-colors",
+                        adapterFilter === execution
+                          ? "border-border bg-muted text-foreground"
+                          : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "size-2 shrink-0 rounded-full",
+                          execution === "enabled" &&
+                            "bg-[color:var(--status-supported)]",
+                          execution === "needs-adapter" &&
+                            "bg-[color:var(--status-adapter)]",
+                          execution === "blocked" &&
+                            "bg-[color:var(--status-blocked)]",
+                        )}
+                        aria-hidden="true"
+                      />
+                      {label}
+                      <span className="font-semibold tabular-nums text-foreground">
+                        {count}
+                      </span>
+                      <span className="text-muted-foreground">个源</span>
+                    </button>
+                  ))}
+                  {/* The partial state is not offered as a filter because nothing in the current
+                      registry maps to it; its count still belongs in the summary so the numbers
+                      add up to the configured total. */}
+                  {adapterCounts.partial > 0 && (
+                    <span className="flex items-center gap-2 px-2.5 py-1 text-xs text-muted-foreground">
+                      <span
+                        className="size-2 shrink-0 rounded-full bg-[color:var(--status-partial)]"
+                        aria-hidden="true"
+                      />
+                      部分支持
+                      <span className="font-semibold tabular-nums text-foreground">
+                        {adapterCounts.partial}
+                      </span>
+                      <span className="text-muted-foreground">个源</span>
+                    </span>
+                  )}
+                  <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                    共 {adapterRows.length} 类适配器
+                  </span>
+                </div>
               </CardHeader>
-              <CardContent className="p-0">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="pl-6">适配器</TableHead>
-                      <TableHead>执行状态</TableHead>
-                      <TableHead>支持操作</TableHead>
-                      <TableHead>当前源</TableHead>
-                      <TableHead className="pr-6">边界说明</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {visibleAdapterRows.map(
-                      ({ adapter, sources: matchedSources }) => (
-                        <TableRow key={adapter.id}>
-                          <TableCell className="pl-6">
-                            <div>
-                              <p className="font-medium">{adapter.label}</p>
-                              <p className="mt-1 font-mono text-xs text-muted-foreground">
-                                {adapter.id}
-                              </p>
-                            </div>
-                          </TableCell>
-                          <TableCell>
-                            <AdapterStatusBadge execution={adapter.execution} />
-                          </TableCell>
-                          <TableCell>
-                            {adapter.operations.length > 0 ? (
-                              <div className="flex flex-wrap gap-1.5">
-                                {adapter.operations.map((operation) => (
-                                  <Badge
-                                    key={operation}
-                                    variant="secondary"
-                                    className="text-xs py-0.5 px-2"
-                                  >
-                                    {operation}
-                                  </Badge>
-                                ))}
-                              </div>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">
-                                无执行操作
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-sm text-muted-foreground">
-                            {matchedSources.length > 0
-                              ? `${matchedSources.length} 个`
-                              : "未使用"}
-                          </TableCell>
-                          <TableCell className="max-w-[360px] pr-6 text-sm text-muted-foreground">
-                            {adapter.reason}
-                          </TableCell>
+
+              <CardContent className="flex min-h-0 flex-1 flex-col p-0">
+                {visibleAdapterRows.length > 0 ? (
+                  /* The list is the only scrolling region, matching 源清单: it takes whatever
+                     height is left after the fixed header, so the page never scrolls and the
+                     controls stay put. Without this the table ran past the bottom of the card. */
+                  <ScrollArea className="min-h-0 flex-1">
+                    <Table containerClassName="overflow-visible">
+                      <TableHeader className="sticky top-0 z-10 bg-card">
+                        <TableRow className="hover:bg-transparent">
+                          <TableHead className="pl-6">适配器</TableHead>
+                          <TableHead>状态</TableHead>
+                          <TableHead>支持操作</TableHead>
+                          <TableHead>当前源</TableHead>
+                          <TableHead className="pr-6">说明</TableHead>
                         </TableRow>
-                      ),
-                    )}
-                  </TableBody>
-                </Table>
+                      </TableHeader>
+                      <TableBody>
+                        {visibleAdapterRows.map(
+                          ({ adapter, sources: matchedSources }) => (
+                            <TableRow key={adapter.id}>
+                              <TableCell className="pl-6">
+                                <div>
+                                  <p className="font-medium">{adapter.label}</p>
+                                  <p className="mt-1 font-mono text-xs text-muted-foreground">
+                                    {adapter.id}
+                                  </p>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <AdapterStatusBadge execution={adapter.execution} />
+                              </TableCell>
+                              <TableCell>
+                                {adapter.operations.length > 0 ? (
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {adapter.operations.map((operation) => (
+                                      <Badge
+                                        key={operation}
+                                        variant="secondary"
+                                        className="px-2 py-0.5 text-xs"
+                                      >
+                                        {operation}
+                                      </Badge>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">
+                                    无执行操作
+                                  </span>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-sm text-muted-foreground">
+                                {matchedSources.length > 0
+                                  ? `${matchedSources.length} 个`
+                                  : "未使用"}
+                              </TableCell>
+                              <TableCell className="max-w-[360px] whitespace-normal pr-6 text-xs leading-5 text-muted-foreground">
+                                {adapter.reason}
+                              </TableCell>
+                            </TableRow>
+                          ),
+                        )}
+                      </TableBody>
+                    </Table>
+                    <ScrollBar />
+                  </ScrollArea>
+                ) : (
+                  <div className="p-4">
+                    <Empty className="min-h-72">
+                      <EmptyHeader>
+                        <EmptyMedia variant="icon">
+                          <Blocks
+                            className="size-4"
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                        </EmptyMedia>
+                        <EmptyTitle>没有匹配的适配器</EmptyTitle>
+                        <EmptyDescription>
+                          切换筛选条件即可查看全部适配器。
+                        </EmptyDescription>
+                      </EmptyHeader>
+                    </Empty>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
@@ -2507,41 +2588,6 @@ function isRelativeConfiguredUrl(value: string) {
     trimmed.startsWith("./") ||
     trimmed.startsWith("../") ||
     trimmed.includes("/")
-  );
-}
-
-function AdapterSummary({
-  label,
-  value,
-  detail,
-  execution,
-}: {
-  label: string;
-  value: number;
-  detail: string;
-  execution: AdapterExecution;
-}) {
-  const toneClass = {
-    enabled:
-      "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)]",
-    partial:
-      "border-[color:var(--status-partial-border)] bg-[color:var(--status-partial-bg)]",
-    "needs-adapter":
-      "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)]",
-    blocked:
-      "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)]",
-  }[execution];
-  return (
-    <div className={`rounded-md border p-4 ${toneClass}`}>
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-xs text-muted-foreground">{label}源</p>
-          <p className="mt-1 font-display text-2xl font-semibold">{value}</p>
-        </div>
-        <AdapterStatusBadge execution={execution} />
-      </div>
-      <p className="mt-2 text-xs text-muted-foreground">{detail}</p>
-    </div>
   );
 }
 

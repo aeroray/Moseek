@@ -235,9 +235,11 @@ export function getAdapterProfile(
 }
 
 export function adapterStatusLabel(execution: AdapterExecution) {
+  // These must match the words the adapter tab uses for its counts and filter. A reader who
+  // clicks "可执行 3 个源" then has to find those three rows, so the badge cannot say 已启用.
   return {
-    enabled: "已启用",
-    partial: "部分启用",
+    enabled: "可执行",
+    partial: "部分支持",
     "needs-adapter": "待适配",
     blocked: "已阻止",
   }[execution];
