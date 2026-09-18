@@ -198,6 +198,99 @@ describe("FavoritesView", () => {
     expect(await screen.findByTestId("media-player")).toHaveTextContent("示例剧");
   });
 
+  it("lays the works out as a poster grid, not a list", () => {
+    // A row spent a whole line of height on one title and showed only a handful at once, which is
+    // the wrong trade for a collection you scan. The grid matches 影视库 because recognising a
+    // work by its cover is the same task.
+    useAppStore.setState({
+      favorites: [
+        favorite(),
+        favorite({ key: "cms-main:vod-2", item: item({ id: "vod-2", name: "第二部" }) }),
+      ],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    const column = screen.getByRole("region", { name: "影视收藏" });
+    const grid = column.querySelector("div[class*='grid-cols-3']");
+    expect(grid).not.toBeNull();
+    // Both covers are direct children of that one grid, so they flow left-to-right and wrap.
+    expect(grid?.children).toHaveLength(2);
+  });
+
+  it("puts only the title, the position and the removal control on a card", () => {
+    // The source, the line and the episode count were all on the row version; none of them help
+    // you find the work you are looking for.
+    useAppStore.setState({
+      favorites: [
+        favorite({
+          progress: {
+            lineId: "line-1",
+            episodeId: "ep-2",
+            episodeName: "第02集",
+            seconds: 620,
+            episodeCount: 3,
+            updatedAt: "2026-01-02T00:00:00.000Z",
+          },
+        }),
+      ],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    const card = screen.getByRole("button", { name: "继续观看 示例剧" });
+    expect(card).toHaveTextContent("示例剧");
+    expect(card).toHaveTextContent(/第02集/);
+    expect(card).toHaveTextContent(/10:20/);
+    // The source name is gone from the card.
+    expect(card).not.toHaveTextContent("主用影视源");
+    // The removal control is inside the card, on the cover.
+    expect(
+      card.querySelector("button[aria-label='取消收藏 示例剧']"),
+    ).not.toBeNull();
+  });
+
+  it("says 未观看 on a card that has no saved position", () => {
+    useAppStore.setState({ favorites: [favorite({ progress: null })] });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    expect(
+      screen.getByRole("button", { name: "继续观看 示例剧" }),
+    ).toHaveTextContent("未观看");
+  });
+
+  it("lays the channels out in the same grid", () => {
+    // A different shape for channels would break the grid's rhythm for an asset the source may
+    // not even provide.
+    useAppStore.setState({
+      liveFavorites: [
+        {
+          key: "live-main:News:City News",
+          channel: {
+            id: "live-main:News:City News",
+            name: "City News",
+            groupId: "news",
+            groupName: "新闻",
+            logoUrl: "",
+            streamUrl: "https://stream.example/news.m3u8",
+            streamUrls: ["https://stream.example/news.m3u8"],
+            mediaKind: "hls",
+            sourceKey: "live-main",
+          },
+          sourceKey: "live-main",
+          sourceName: "直播源",
+          savedAt: "2026-01-01T00:00:00.000Z",
+        },
+      ],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    const column = screen.getByRole("region", { name: "电视直播收藏" });
+    expect(
+      column.querySelector("div[class*='grid-cols-3']"),
+    ).not.toBeNull();
+    expect(column).toHaveTextContent("City News");
+    expect(column).toHaveTextContent("新闻");
+  });
+
   it("shows where the user left off, not just the source name", async () => {
     // The position is the single most useful thing on the card: it is what makes resuming a
     // decision the user does not have to make.

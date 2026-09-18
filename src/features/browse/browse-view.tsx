@@ -41,6 +41,7 @@ import { isFavoriteItem } from "@/lib/favorite-key";
 import {
   catalogCardClassName,
   catalogCardOverlayClassName,
+  catalogGridClassName,
 } from "@/lib/card-styles";
 import { cn } from "@/lib/utils";
 import { PlayerView } from "@/features/player/player-view";
@@ -316,7 +317,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
             <CatalogSkeleton viewMode={viewMode} />
           ) : catalog?.items.length ? (
             viewMode === "grid" ? (
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
+              <div className={catalogGridClassName}>
                 {catalog.items.map((item) => (
                   <CatalogCard
                     key={item.id}
@@ -540,7 +541,7 @@ function CatalogSkeleton({ viewMode }: { viewMode: CatalogViewMode }) {
   }
 
   return (
-    <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8 gap-3">
+    <div className={catalogGridClassName}>
       {/* Enough placeholders to fill the tallest supported grid (7 columns) for three full rows,
           so the loading state has the same shape as the content that replaces it. */}
       {Array.from({ length: 21 }, (_, idx) => (

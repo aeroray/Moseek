@@ -27,3 +27,26 @@ export const catalogCardClassName = [
  */
 export const catalogCardOverlayClassName =
   "absolute inset-0 flex items-center justify-center bg-black/25 opacity-0 transition-opacity duration-200 group-hover:opacity-100";
+
+/**
+ * The poster grid used by 影视库, which fills the whole content area.
+ *
+ * The breakpoints are viewport-based, which is correct here because this grid *is* the page.
+ */
+export const catalogGridClassName =
+  "grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-7 2xl:grid-cols-8";
+
+/**
+ * The poster grid used inside a half-width column.
+ *
+ * Viewport breakpoints cannot size this: 我的收藏 splits the content area in two, so at a 1440px
+ * window the library's `xl:grid-cols-7` produced seven 76px covers — unreadable, and nothing like
+ * the library it is meant to resemble. The tracks are keyed to the column's own width instead, so
+ * the covers stay a sensible size whatever the window does.
+ *
+ * The column itself carries `@container`; a container query matches the nearest *ancestor*
+ * container, so putting `@container` on this grid would make it query something else entirely and
+ * the variants would never fire.
+ */
+export const columnGridClassName =
+  "grid grid-cols-2 gap-3 @md:grid-cols-3 @4xl:grid-cols-4";

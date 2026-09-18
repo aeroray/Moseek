@@ -34,12 +34,16 @@ import { useStreamProbes } from "@/features/player/use-stream-probes";
 import { getVodDetail } from "@/features/browse/cms-adapter";
 import { relinkFavorite } from "@/features/browse/favorite-relink";
 import {
-  Chip,
   ColumnEmpty,
   ColumnHeader,
   formatClock,
 } from "@/features/browse/columns";
 import { useAppStore } from "@/stores/app-store";
+import {
+  catalogCardClassName,
+  catalogCardOverlayClassName,
+  columnGridClassName,
+} from "@/lib/card-styles";
 import { cn } from "@/lib/utils";
 import type { ViewKey } from "@/types/moseek";
 import type {
@@ -170,16 +174,19 @@ interface FavoritesViewProps {
 }
 
 /**
- * The favourited works.
+ * The favourited works, as a poster grid.
  *
- * A list rather than a poster grid: the two things a person needs here are "which one" and "where
- * was I", and a grid of covers can only answer the first. A list also gives each row somewhere to
- * put the saved position, which is the whole reason a favourite is worth keeping.
+ * The same grid as 影视库, because this is the same task: recognising a work by its cover. A
+ * horizontal row spent a whole line of height on one title and could show only a handful at once,
+ * which is the wrong trade for a collection you scan.
+ *
+ * Only three things belong on a card: what it is, where you were, and the control that removes it.
+ * The source, the line and the episode count were all on the row version and none of them help
+ * you find the one you are looking for.
  *
  * Not a timeline. 足迹 is a record of what happened and its order is the information; a collection
- * has no order beyond the one you last added to, and drawing a rail through it would promise a
- * chronology that is not there. The two pages share their frame — heading, empty state, the
- * token for a discrete fact — and differ in what a row is for.
+ * has no order beyond the one you last added to, so a rail through it would promise a chronology
+ * that is not there.
  */
 function VodFavoritesColumn({
   favorites,
@@ -196,7 +203,7 @@ function VodFavoritesColumn({
     <section
       role="region"
       aria-label="影视收藏"
-      className="flex min-w-0 flex-col"
+      className="@container flex min-w-0 flex-col"
     >
       <ColumnHeader
         tone="vod"
@@ -215,7 +222,7 @@ function VodFavoritesColumn({
           onAction={() => onNavigate("browse")}
         />
       ) : (
-        <ul className="flex flex-col gap-2">
+        <div className={columnGridClassName}>
           {favorites.map((favorite) => (
             <FavoriteVodCard
               key={favorite.key}
@@ -224,19 +231,19 @@ function VodFavoritesColumn({
               onRemove={() => toggleFavorite(favorite.item)}
             />
           ))}
-        </ul>
+        </div>
       )}
     </section>
   );
 }
 
 /**
- * One favourited work.
+ * One favourited work, as a poster.
  *
- * The cover is the recognition anchor — it is how you know which one this is before reading
- * anything — so it is a real poster rather than a thumbnail beside text, and the removal control
- * sits on it, where the thing being removed is. That is also what keeps the row's own width for
- * the two facts that matter: what part you were on, and how far in.
+ * The removal control sits on the cover rather than in a text row: it acts on this artwork, and
+ * putting it here is what lets the card carry nothing but a title and a position. It is revealed
+ * on hover so a wall of hearts does not become the page's subject, and it stays reachable by
+ * keyboard through `focus-visible`.
  */
 function FavoriteVodCard({
   favorite,
@@ -247,116 +254,86 @@ function FavoriteVodCard({
   onOpen: () => void;
   onRemove: () => void;
 }) {
-  // The line the saved position belongs to, by name — the fact worth knowing when playback
-  // misbehaves, and the one a user comes back to check.
-  const lineName = favorite.progress
-    ? favorite.item.playLines.find((line) => line.id === favorite.progress?.lineId)
-        ?.name
-    : undefined;
   const seconds = favorite.progress?.seconds ?? 0;
   const hasProgress = seconds > 5;
 
   return (
-    <li>
-      {/* The whole card opens the work, so the card itself is the control rather than a button
-          nested inside a row. Hover is what says so: the border takes the accent, the surface
-          lifts a step, and the play affordance appears over the cover. */}
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={onOpen}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onOpen();
-          }
-        }}
-        aria-label={`继续观看 ${favorite.item.name}`}
-        className={cn(
-          "group/card flex cursor-pointer items-stretch gap-3 rounded-lg border border-border/50 bg-card/40 p-2.5",
-          "transition-[border-color,background-color] duration-200 ease-out",
-          "hover:border-primary/45 hover:bg-card/80",
-          "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-        )}
-      >
-        <div className="relative aspect-[2/3] w-[3.75rem] shrink-0 overflow-hidden rounded-md ring-1 ring-border/50">
-          <MediaPoster
-            src={favorite.item.poster}
-            alt={`${favorite.item.name} 海报`}
-            className="size-full"
-            imageClassName="transition-transform duration-300 group-hover/card:scale-105"
-          />
-          {/* The play affordance, revealed on hover. It states what the click does without
-              spending permanent space on a row whose job is to be scanned. */}
-          <span
-            className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 transition-opacity duration-200 group-hover/card:opacity-100 group-focus-visible/card:opacity-100"
-            aria-hidden="true"
-          >
-            <span className="flex size-7 items-center justify-center rounded-full bg-primary text-primary-foreground">
-              <Play className="size-3.5 fill-current" />
-            </span>
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      aria-label={`继续观看 ${favorite.item.name}`}
+      className={catalogCardClassName}
+    >
+      <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted/40">
+        <MediaPoster
+          src={favorite.item.poster}
+          alt={`${favorite.item.name} 海报`}
+          className="size-full"
+          imageClassName="transition-transform duration-300 group-hover:scale-105"
+        />
+
+        <div className={catalogCardOverlayClassName}>
+          <span className="flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground transition-transform duration-200 group-hover:scale-110">
+            <Play className="size-4 fill-current" aria-hidden="true" />
           </span>
-          {/* Removal lives on the cover: it is an action on this artwork, and keeping it here
-              leaves the text column for the facts rather than for a control. */}
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove();
-            }}
-            aria-label={`取消收藏 ${favorite.item.name}`}
-            title="取消收藏"
-            className={cn(
-              "absolute top-1 right-1 z-10 flex size-5 items-center justify-center rounded-full bg-black/70 text-primary backdrop-blur-xs",
-              "transition-opacity duration-200 hover:bg-black/85",
-              // Visible on hover, and always visible to the keyboard. Keeping it hidden at rest
-              // stops a row of hearts reading as the page's subject.
-              "opacity-0 group-hover/card:opacity-100 focus-visible:opacity-100",
-            )}
-          >
-            <Heart className="size-3 fill-current" aria-hidden="true" />
-          </button>
         </div>
 
-        <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
-          <p className="truncate text-sm font-semibold text-foreground transition-colors group-hover/card:text-primary">
-            {favorite.item.name}
-          </p>
-
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            {favorite.progress ? (
-              <Chip>{favorite.progress.episodeName}</Chip>
-            ) : (
-              <Chip>未观看</Chip>
-            )}
-            {lineName && <Chip tone="accent">线路 {lineName}</Chip>}
-            <span className="ml-auto min-w-0 shrink-0 truncate pl-2 text-[11px] text-muted-foreground/90">
-              {favorite.sourceName}
-            </span>
+        {/* How far in, drawn across the foot of the cover. It reads as part of the artwork rather
+            than as another line of text, and a bar is what answers "how much is left" — which is
+            the question someone opening their favourites actually has. */}
+        {hasProgress && (
+          <div className="absolute inset-x-0 bottom-0 h-1 bg-black/50">
+            <div
+              className="h-full bg-primary"
+              style={{ width: `${progressPercent(seconds)}%` }}
+            />
           </div>
+        )}
 
-          {/* A bar, because "看到 10:20" says a position but not how far through that is — and
-              that is the question someone opening their favourites actually has. */}
-          {hasProgress && (
-            <div className="flex items-center gap-2">
-              <span className="h-1 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-                <span
-                  className="block h-full rounded-full bg-primary/70"
-                  style={{ width: `${progressPercent(seconds)}%` }}
-                />
-              </span>
-              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                {formatClock(seconds)}
-              </span>
-            </div>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          aria-label={`取消收藏 ${favorite.item.name}`}
+          title="取消收藏"
+          className={cn(
+            "absolute top-1.5 right-1.5 z-10 flex size-7 items-center justify-center rounded-full bg-black/65 text-primary backdrop-blur-xs",
+            "transition-opacity duration-200 hover:bg-black/85",
+            // Hidden until hover so the grid is a wall of covers rather than of hearts, and always
+            // shown to the keyboard, which has no hover to reveal it with.
+            "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
           )}
-        </div>
+        >
+          <Heart className="size-3.5 fill-current" aria-hidden="true" />
+        </button>
       </div>
-    </li>
+
+      <div className="flex flex-col gap-1 p-2.5">
+        <p className="truncate text-xs font-semibold text-foreground transition-colors group-hover:text-primary">
+          {favorite.item.name}
+        </p>
+        {/* Only the position, or a plain statement that there is none. The source and the line
+            were on the row version and neither helps you find the work you are looking for. */}
+        <p className="truncate text-[11px] tabular-nums text-muted-foreground">
+          {favorite.progress
+            ? `${favorite.progress.episodeName} · 看到 ${formatClock(seconds)}`
+            : "未观看"}
+        </p>
+      </div>
+    </div>
   );
 }
 
-/** The favourited channels, in the same card shape. */
+/** The favourited channels, in the same grid. */
 function LiveFavoritesColumn({
   favorites,
   onOpen,
@@ -372,7 +349,7 @@ function LiveFavoritesColumn({
     <section
       role="region"
       aria-label="电视直播收藏"
-      className="flex min-w-0 flex-col"
+      className="@container flex min-w-0 flex-col"
     >
       <ColumnHeader
         tone="live"
@@ -391,7 +368,7 @@ function LiveFavoritesColumn({
           onAction={() => onNavigate("live")}
         />
       ) : (
-        <ul className="flex flex-col gap-2">
+        <div className={columnGridClassName}>
           {favorites.map((favorite) => (
             <FavoriteLiveCard
               key={favorite.key}
@@ -402,12 +379,19 @@ function LiveFavoritesColumn({
               }
             />
           ))}
-        </ul>
+        </div>
       )}
     </section>
   );
 }
 
+/**
+ * One favourited channel, as a card in the same grid.
+ *
+ * A channel has no cover, so the logo sits on the same 2:3 surface in the same slot. Giving it a
+ * different shape would break the grid's rhythm for the sake of an asset the source may not even
+ * provide.
+ */
 function FavoriteLiveCard({
   favorite,
   onOpen,
@@ -418,79 +402,66 @@ function FavoriteLiveCard({
   onRemove: () => void;
 }) {
   return (
-    <li>
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={onOpen}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            onOpen();
-          }
-        }}
-        aria-label={`观看 ${favorite.channel.name}`}
-        className={cn(
-          "group/card flex cursor-pointer items-stretch gap-3 rounded-lg border border-border/50 bg-card/40 p-2.5",
-          "transition-[border-color,background-color] duration-200 ease-out",
-          "hover:border-sky-400/45 hover:bg-card/80",
-          "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-        )}
-      >
-        <div className="relative aspect-[2/3] w-[3.75rem] shrink-0 overflow-hidden rounded-md bg-muted/40 ring-1 ring-border/50">
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen();
+        }
+      }}
+      aria-label={`观看 ${favorite.channel.name}`}
+      className={catalogCardClassName}
+    >
+      <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted/40">
+        <span className="flex size-full items-center justify-center p-2">
           {favorite.channel.logoUrl ? (
             <img
               src={favorite.channel.logoUrl}
               alt=""
-              className="size-full object-contain p-1"
+              className="size-full object-contain"
               loading="lazy"
             />
           ) : (
-            <span className="flex size-full items-center justify-center">
-              <Radio className="size-5 text-muted-foreground" aria-hidden="true" />
-            </span>
+            <Radio className="size-6 text-muted-foreground" aria-hidden="true" />
           )}
-          <span
-            className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 transition-opacity duration-200 group-hover/card:opacity-100 group-focus-visible/card:opacity-100"
-            aria-hidden="true"
-          >
-            <span className="flex size-7 items-center justify-center rounded-full bg-sky-400 text-[#04121b]">
-              <Play className="size-3.5 fill-current" />
-            </span>
+        </span>
+
+        <div className={catalogCardOverlayClassName}>
+          <span className="flex size-10 items-center justify-center rounded-full bg-sky-400 text-[#04121b] transition-transform duration-200 group-hover:scale-110">
+            <Play className="size-4 fill-current" aria-hidden="true" />
           </span>
-          <button
-            type="button"
-            onClick={(event) => {
-              event.stopPropagation();
-              onRemove();
-            }}
-            aria-label={`取消收藏 ${favorite.channel.name}`}
-            title="取消收藏"
-            className={cn(
-              "absolute top-1 right-1 z-10 flex size-5 items-center justify-center rounded-full bg-black/70 text-primary backdrop-blur-xs",
-              "transition-opacity duration-200 hover:bg-black/85",
-              "opacity-0 group-hover/card:opacity-100 focus-visible:opacity-100",
-            )}
-          >
-            <Heart className="size-3 fill-current" aria-hidden="true" />
-          </button>
         </div>
 
-        <div className="flex min-w-0 flex-1 flex-col justify-center gap-1.5">
-          <p className="truncate text-sm font-semibold text-foreground transition-colors group-hover/card:text-sky-400">
-            {favorite.channel.name}
-          </p>
-          <div className="flex min-w-0 items-center gap-1.5">
-            <Chip tone="live">
-              {favorite.channel.groupName || "未分组"}
-            </Chip>
-            <span className="ml-auto min-w-0 shrink-0 truncate pl-2 text-[11px] text-muted-foreground/90">
-              {favorite.sourceName}
-            </span>
-          </div>
-        </div>
+        <button
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onRemove();
+          }}
+          aria-label={`取消收藏 ${favorite.channel.name}`}
+          title="取消收藏"
+          className={cn(
+            "absolute top-1.5 right-1.5 z-10 flex size-7 items-center justify-center rounded-full bg-black/65 text-primary backdrop-blur-xs",
+            "transition-opacity duration-200 hover:bg-black/85",
+            "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+          )}
+        >
+          <Heart className="size-3.5 fill-current" aria-hidden="true" />
+        </button>
       </div>
-    </li>
+
+      <div className="flex flex-col gap-1 p-2.5">
+        <p className="truncate text-xs font-semibold text-foreground transition-colors group-hover:text-sky-400">
+          {favorite.channel.name}
+        </p>
+        <p className="truncate text-[11px] text-muted-foreground">
+          {favorite.channel.groupName || "未分组"}
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -506,6 +477,7 @@ const NOMINAL_EPISODE_SECONDS = 45 * 60;
 function progressPercent(seconds: number) {
   return Math.min(100, Math.round((seconds / NOMINAL_EPISODE_SECONDS) * 100));
 }
+
 
 /**
  * The watch surface for a favourited work.
