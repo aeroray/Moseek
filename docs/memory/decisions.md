@@ -421,3 +421,16 @@
 - 变异验证 8 项全部抓到（`columnsUnfiltered`、`columnsSwapped`、`emptyColumnHidden`、`emptyColumnNoAction`、`neverOverallEmpty`、`columnCountWrong` 等）。
 - 真实浏览器实测：`dayLabels: ["今天","昨天"]`、chips 正确（`["HD中字","线路 dyttm3u8", …]`，**源不在 chip 里**）、`nodeHasHalo: true`、两列**等宽 620**（gap 40）、**无溢出**；高 DPI 截图逐张确认过层级与对齐。
 - 本轮最终：前端 **331 项**（新增 history-view 2 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。
+- **卡片悬停效果全部去掉**（用户要求）：**不再上浮、不再有阴影、封面不再模糊**。现在悬停只改边框颜色 + 底色。理由：**近黑背景上黑色阴影无处可落，只会显脏；上浮让整片海报网格在光标下变得不稳**。封面上的 `backdrop-blur` 也去掉了——**遮罩的作用是标记可点击，模糊封面正好和「用户来看海报」这件事相反**。影视库与收藏页共用 `card-styles.ts`，两处同时生效。
+- 实测（真实浏览器计算样式）：`hover.transform: "none"`、`hover.boxShadow: "none"`、`overlay.backdropFilter: "none"`、`img.filter: "none"`，收藏页卡片同样 `noLift/noShadow: true`。
+- **播放诊断 403 排查结论：不是本地 bug，是上游按地区封锁。**
+  - 直接请求该 m3u8 **无论带不带 UA/Referer 都是 403**；解析到**真实 IP**（绕过本机 fake-IP）后仍是 403。
+  - **上游响应体明确写着 `The region has been denied.`**，并附 `Connection: 82.26.72.153 (Client)`。
+  - 本机出口 IP 正是 **82.26.72.153（日本 Tokyo，IDC Cube）**——与响应体完全一致。
+  - 根因：本机在跑 **SpeedCat**（TUN 模式代理，`127.0.0.1:7892` + `SpeedCat Tunnel` 网卡 `198.18.0.1`），**所有域名都被解析成 `198.18.0.x` 假 IP**（连 baidu.com 都是 `198.18.0.115`），所以出口在日本，被该站按地区拒绝。**关闭代理或换允许地区的出口即可播放，与 Moseek 无关。**
+- **顺带修了一个真实的诊断缺陷**：Rust 用 `error_for_status()`，**它会把响应体丢掉**，而**响应体是唯一说明「为什么」的地方**。于是诊断只能说「拒绝访问」，并把用户指向「运营商网络限制」这个**错误的排查方向**。改为**读取错误响应体**（上限 4KB）并保留在消息里。
+  - 前端新增 `looksLikeRegionDenial()`：命中地区封锁措辞时给出**不同的、可执行的**结论（换出口 / 换源），不再和运营商封锁混为一谈。
+  - **`collapse_whitespace()` 的两个坑**：① 只按「行首是否 `<`」过滤会把 `<p>The region has been denied.</p>` 这句**唯一有用的话**丢掉（测试当场抓到）；② `<style>` 内容会混进用户可见消息里（实测输出里出现了 `address { line-height: 1.8; }`）。现在**先剥离 style/script 块、再去标签、再解 HTML 实体**。
+  - 实测该真实地址经新代码返回：`媒体资源返回错误状态：HTTP 403；403 Forbidden 403 Forbidden The region has been denied. Connection: 82.26.72.153 (Client) -> (Server) …`——**没有 CSS、实体已解码**。
+- `clippy` 抓到一条我自己写的**恒真断言**（`assert!(CONST > 0 && CONST <= 16*1024)`）——它被删掉了：**那是编译期检查，不是测试**。
+- 本轮最终：前端 **333 项**（新增 diagnostics 2 项）、Rust **107 项**（新增 policy 3 项）、`clippy` 零警告、`pnpm build` 零警告。

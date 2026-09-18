@@ -31,6 +31,33 @@ describe("upstream status recovery", () => {
 });
 
 describe("HLS failure messages", () => {
+  it("names a region block, which has a different remedy from an operator lock", () => {
+    // The upstream states the reason in the body: "The region has been denied". Reporting that as
+    // "只对特定运营商网络开放" points the user at the wrong fix — the address is not
+    // operator-restricted, it is refused for where the request came from.
+    const message = formatHlsError(
+      "manifestLoadError",
+      403,
+      "媒体资源返回错误状态：HTTP 403；403 Forbidden The region has been denied.",
+    );
+    expect(message).toContain("按地区拒绝");
+    expect(message).toContain("地区");
+    // The remedy is named, not just the cause.
+    expect(message).toContain("允许的地区");
+    expect(message).not.toContain("运营商网络");
+  });
+
+  it("still reports a plain rejection as an operator or credential lock", () => {
+    // The distinction has to survive: a 403 with no region wording keeps the old explanation.
+    const message = formatHlsError(
+      "manifestLoadError",
+      403,
+      "媒体资源返回错误状态：HTTP 403",
+    );
+    expect(message).toContain("运营商网络");
+    expect(message).not.toContain("按地区拒绝");
+  });
+
   it("blames the upstream when it rejects the client", () => {
     const message = formatHlsError("manifestLoadError", 403);
     expect(message).toContain("上游拒绝访问");

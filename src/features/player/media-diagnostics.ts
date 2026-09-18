@@ -310,6 +310,13 @@ export function formatHlsError(
         return "当前频道返回了 HTTP 200，但正文不是有效的 HLS 清单，已跳过该线路。";
       }
       if (upstreamStatus === 401 || upstreamStatus === 403) {
+        // A region block is a distinct and common cause, and it is the one the user can actually
+        // act on — by changing which network or exit the request leaves from. The upstream names
+        // it in the response body ("The region has been denied"), so the diagnosis does too,
+        // rather than lumping it in with a generic refusal.
+        if (looksLikeRegionDenial(responseText)) {
+          return `上游按地区拒绝了访问${status}：该地址在当前网络出口所在地区不可用。换用其它源，或让请求从允许的地区发出即可播放。`;
+        }
         return `上游拒绝访问当前频道${status}。这类地址通常只对特定运营商网络或授权客户端开放。`;
       }
       // Timeout before the connection markers: a timed-out request also reads as "connection
@@ -372,5 +379,35 @@ function looksLikeTimeout(responseText?: string) {
     "timeout",
     "deadline has elapsed",
     "超时",
+  ].some((marker) => text.includes(marker));
+}
+
+/**
+ * Whether the upstream refused by region rather than by credential.
+ *
+ * Worth separating from a plain 401/403 because the two have different remedies and the upstream
+ * states which one it is. Several Chinese CDNs answer a blocked region with an English body —
+ * "The region has been denied", "Access denied by region", "not available in your country" — and
+ * that is the whole explanation. Reporting it as "只对特定运营商网络开放" points the user at the
+ * wrong thing: the address is not operator-restricted, it is refused for where the request came
+ * from, so changing network or exit is what fixes it.
+ */
+function looksLikeRegionDenial(responseText?: string) {
+  if (!responseText) return false;
+  const text = responseText.toLowerCase();
+  return [
+    "region has been denied",
+    "region denied",
+    "denied by region",
+    "region is not allowed",
+    "not available in your",
+    "not available in this",
+    "geo-restricted",
+    "geoblocked",
+    "geo blocked",
+    "地区限制",
+    "区域限制",
+    "当前地区",
+    "不在服务范围",
   ].some((marker) => text.includes(marker));
 }

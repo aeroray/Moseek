@@ -18,6 +18,90 @@ use serde_json::Value;
 /// out. The lookup now happens on the blocking pool under a hard deadline.
 const DNS_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// How much of an error response body is kept for the diagnosis.
+///
+/// Error pages are short — the one that named the region block was 406 bytes — and a body larger
+/// than this is not an explanation. Bounded so a hostile or misconfigured upstream cannot stream
+/// an unbounded amount into a message that is displayed to the user.
+const ERROR_BODY_MAX_BYTES: usize = 4 * 1024;
+
+/// Flattens an error page into one line.
+///
+/// The useful sentence is usually *inside* a tag rather than on a line of its own —
+/// `<p>The region has been denied.</p>` — so filtering out lines that start with `<` discards
+/// exactly the text worth keeping. Tags are removed instead, and what remains is collapsed.
+///
+/// `<style>` and `<script>` bodies are removed first: they are code, not explanation, and leaving
+/// them in put a CSS rule into the middle of a user-facing message.
+fn collapse_whitespace(value: &str) -> String {
+    let mut text = String::with_capacity(value.len());
+    let mut in_tag = false;
+    let mut tag = String::new();
+    // While set, everything until the matching closing tag is dropped.
+    let mut skip_until: Option<String> = None;
+    for character in value.chars() {
+        if in_tag {
+            if character == '>' {
+                in_tag = false;
+                let name = tag
+                    .trim_start_matches('/')
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches('/')
+                    .to_ascii_lowercase();
+                match &skip_until {
+                    Some(closing) if name == *closing => skip_until = None,
+                    Some(_) => {}
+                    None if !tag.starts_with('/') => match name.as_str() {
+                        "style" => skip_until = Some(name),
+                        "script" => skip_until = Some(name),
+                        _ => {}
+                    },
+                    None => {}
+                }
+                // A tag is a word boundary; without this "a</p><p>b" would run together.
+                if skip_until.is_none() {
+                    text.push(' ');
+                }
+                tag.clear();
+            } else {
+                tag.push(character);
+            }
+            continue;
+        }
+        if skip_until.is_some() {
+            if character == '<' {
+                in_tag = true;
+                tag.clear();
+            }
+            continue;
+        }
+        if character == '<' {
+            in_tag = true;
+            tag.clear();
+        } else {
+            text.push(character);
+        }
+    }
+    // Entities are common on these pages and would otherwise reach the user as "&gt;".
+    let decoded = text
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&");
+    let collapsed = decoded.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed: String = collapsed.chars().take(400).collect();
+    if trimmed.is_empty() {
+        // A body that really is nothing but markup still has to say something.
+        value.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        trimmed
+    }
+}
+
 fn resolve_host(host: &str, port: u16) -> Result<Vec<std::net::SocketAddr>, String> {
     (host, port)
         .to_socket_addrs()
@@ -205,7 +289,7 @@ async fn fetch_response_bytes(
         if let Some(body) = body.clone() {
             request = request.body(body);
         }
-        let response = request
+        let mut response = request
             .send()
             .await
             .map_err(|error| describe_http_error(format!("{resource_name}请求失败"), &error))?;
@@ -242,9 +326,32 @@ async fn fetch_response_bytes(
             current_url = next_url;
             continue;
         }
-        let mut response = response
-            .error_for_status()
-            .map_err(|error| describe_http_error(format!("{resource_name}返回错误状态"), &error))?;
+        // An error status is read rather than short-circuited. `error_for_status` discards the
+        // body, and the body is often the only place the upstream states *why* — a region block
+        // answers 403 with "The region has been denied", which is a different problem with a
+        // different remedy from an operator-restricted address. Without this the diagnosis could
+        // only ever say "拒绝访问" and point the user at the wrong cause.
+        if !response.status().is_success() {
+            let status = response.status();
+            let mut detail = String::new();
+            while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+                // Enough for an error page; anything longer is not an explanation.
+                if detail.len().saturating_add(chunk.len()) > ERROR_BODY_MAX_BYTES {
+                    break;
+                }
+                detail.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            let trimmed = detail.trim();
+            return Err(if trimmed.is_empty() {
+                format!("{resource_name}返回错误状态：HTTP {}", status.as_u16())
+            } else {
+                format!(
+                    "{resource_name}返回错误状态：HTTP {}；{}",
+                    status.as_u16(),
+                    collapse_whitespace(trimmed)
+                )
+            });
+        }
         let content_type = response
             .headers()
             .get(reqwest::header::CONTENT_TYPE)
@@ -368,7 +475,7 @@ fn is_disallowed_ip(address: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_host, validate_remote_url, DNS_TIMEOUT};
+    use super::{collapse_whitespace, resolve_host, validate_remote_url, DNS_TIMEOUT};
 
     #[test]
     fn policy_rejects_non_http_and_local_urls() {
@@ -417,5 +524,46 @@ mod tests {
         // The whole point of the fix: an unresolvable name must fail in seconds, not in the
         // resolver's own retry budget, because the UI waits on this call.
         assert!(DNS_TIMEOUT.as_secs() > 0 && DNS_TIMEOUT.as_secs() <= 15);
+    }
+
+    #[test]
+    fn an_error_page_body_is_flattened_into_one_readable_line() {
+        // The real body the cinema CDN returned for a blocked region. Its one useful sentence
+        // sits between markup and blank lines; the diagnosis needs that sentence, not the markup.
+        let body = "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n\t<title>403 Forbidden</title>\n\
+                    \t<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\"/>\n\
+                    </head>\n<body>\n\n<h1>403 Forbidden</h1>\n\
+                    <p>The region has been denied.</p>\n</body>\n</html>";
+        let flattened = collapse_whitespace(body);
+        assert!(flattened.contains("The region has been denied."));
+        // No tag survives, and no run of whitespace either.
+        assert!(!flattened.contains('<'));
+        assert!(!flattened.contains("  "));
+    }
+
+    #[test]
+    fn style_and_script_bodies_are_dropped_from_the_message() {
+        // The live 403 body carried a CSS rule, which reached the user as
+        // "address { line-height: 1.8; }" in the middle of the explanation.
+        let body = "<html><head><style>address { line-height: 1.8; }</style>\
+                    <script>var x = 1;</script></head>\
+                    <body><h1>403 Forbidden</h1><p>The region has been denied.</p></body></html>";
+        let flattened = collapse_whitespace(body);
+        assert!(flattened.contains("The region has been denied."));
+        assert!(!flattened.contains("line-height"));
+        assert!(!flattened.contains("var x"));
+    }
+
+    #[test]
+    fn html_entities_are_decoded_rather_than_shown_raw() {
+        let flattened = collapse_whitespace("<p>a &gt; b &amp; c</p>");
+        assert!(flattened.contains("a > b & c"), "{flattened}");
+    }
+
+    #[test]
+    fn a_body_that_is_only_markup_still_produces_something() {
+        // Falling through to an empty string would leave the diagnosis saying only "HTTP 403".
+        let flattened = collapse_whitespace("<html><body></body></html>");
+        assert!(!flattened.is_empty());
     }
 }
