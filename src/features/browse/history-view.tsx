@@ -13,12 +13,14 @@ import {
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import {
   Chip,
-  DayHeading,
-  TimelineColumnEmpty,
-  TimelineColumnHeader,
-  TimelineRail,
+  ColumnEmpty,
+  ColumnHeader,
   formatClock,
   formatClockTime,
+} from "@/features/browse/columns";
+import {
+  DayHeading,
+  TimelineRail,
   groupByDay,
 } from "@/features/browse/timeline";
 import { useAppStore } from "@/stores/app-store";
@@ -165,7 +167,7 @@ function TimelineColumn({
       aria-label={`${title}足迹`}
       className="flex min-w-0 flex-col"
     >
-      <TimelineColumnHeader
+      <ColumnHeader
         tone={kind}
         icon={icon}
         title={title}
@@ -173,7 +175,7 @@ function TimelineColumn({
       />
 
       {records.length === 0 ? (
-        <TimelineColumnEmpty
+        <ColumnEmpty
           tone={kind}
           icon={icon}
           title={`还没有${title}足迹`}

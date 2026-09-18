@@ -447,3 +447,14 @@
 - **真实浏览器实测**：`liveRail: [1, 0]`（**电视直播列的两条跨天记录之间现在有竖线**，修复前是 `[0, 0]`）、`headerText: "足迹清空足迹"`（**计数已移除**）、`tabCount: 0`（**Tab 已移除**）、`sideBySide: true`、`showsProgress/showsLine/showsUnwatched: true`。
 - **两页几何实测完全一致**：足迹 `vod {left:100,width:620}` / `live {left:760,width:620}`，收藏 `favVod {left:100,width:620}` / `favLive {left:760,width:620}`，**`pagesAlign: true`**——**这是「两页读起来是同一个系统」的可测证据**。
 - 本轮最终：前端 **337 项**（新增 history-view 2 项、favorites-view 2 项）、Rust 107 项、`clippy` 零警告、`pnpm build` 零警告。
+- **我的收藏整体重做**（用户要求，用了 `impeccable` 技能，判定为**既有界面的窄幅精修**）：
+  - **保留左右布局，去掉时间线**。理由写进了注释：**足迹是「发生过什么」的记录，顺序就是信息；收藏是一个集合，除了「最后加的」之外没有顺序，给它画轨道等于承诺一个并不存在的时序**。
+  - **列表项改为卡片**：**封面是识别锚点**（在看文字之前先认出是哪一部），所以用真实海报而不是小缩略图；**「取消收藏」放到封面上**（用户要求）——**它是对这张封面图的操作，放这里也让文字列留给真正要读的事实**。
+  - **悬停反馈**：边框转主色 + 底色抬一档 + 封面浮出播放按钮 + 取消收藏按钮淡入。**仍然没有位移和阴影**，与产品其余部分一致。
+  - **进度条保留**：「看到 10:20」说明了位置但没说明「看到多少了」，而**打开收藏时真正的问题就是后者**。
+  - 整张卡片是 `role="button"` + `tabIndex=0` + Enter/Space 处理，**键盘可达**；取消收藏是嵌套按钮，`stopPropagation` 防止顺带打开作品。
+- **抽出 `columns.tsx`（共享框架：`ColumnHeader` / `ColumnEmpty` / `Chip` / `formatClock` / `formatClockTime`）与 `timeline.tsx`（只有时间线需要的：`TimelineRail` / `DayHeading` / `groupByDay`）**。**两页共用框架但一行是什么由各自决定**——这正是「看起来像同一个系统，但不是同一个页面」的实现方式。
+- **测量方法上的一个重要坑**：第一次测悬停时 `borderChanged: false`、`backgroundChanged: false`，看起来像样式没生效。**实际是测量方法错了——合成 `mouseover` 事件不会让 CSS `:hover` 伪类匹配**，所以读到的是静止态。改为**通过 CDP `Input.dispatchMouseEvent` 移动真实鼠标**后才读到：`borderChanged: true`、`backgroundChanged: true`、`removeOpacity` 从 `"0"` → `"1"`、封面遮罩 `"0"` → `"1"`。**「合成事件能触发 React 处理器」不等于「能触发 CSS 伪类」——测样式必须用真指针。**
+- 实测：`rails: 0`（**确认没有时间线轨道**）、`sideBySide: true`、`keyboardReachable: true`、`removeButton.insideCover: true` 且 `hiddenAtRest: true`、两列**等宽 620**（left 100/760）、三张卡片等高 112、**无溢出**。
+- **对比度实算**（floor 为正文 ≥4.5:1）：标题 16.41:1、悬停标题 9.21:1、源名 `muted/90` 5.35:1、中性 chip 8.89:1、主色 chip 6.42:1、直播 chip 6.27:1——**全部通过**。机械检测器 `impeccable detect` 返回 `[]`。
+- 本轮最终：前端 **337 项**、Rust 107 项、`clippy` 零警告、`pnpm build` 零警告。
