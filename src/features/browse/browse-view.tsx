@@ -37,6 +37,7 @@ import { useAppStore } from "@/stores/app-store";
 import type { CatalogViewMode, ViewKey, VodItem } from "@/types/moseek";
 import { searchVod } from "@/features/browse/cms-adapter";
 import { isMovieLibrarySource } from "@/lib/adapters";
+import { isFavoriteItem } from "@/lib/favorite-key";
 import {
   catalogCardClassName,
   catalogCardOverlayClassName,
@@ -393,7 +394,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
 
 function CatalogCard({ item, onOpen }: { item: VodItem; onOpen: () => void }) {
   const isFavorite = useAppStore((state) =>
-    state.favorites.some((favorite) => favorite.item.id === item.id),
+    isFavoriteItem(state.favorites, item),
   );
   const toggleFavorite = useAppStore((state) => state.toggleFavorite);
 

@@ -38,6 +38,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAppStore } from "@/stores/app-store";
 import { inferMediaKind } from "@/lib/media-kind";
+import { isFavoriteItem } from "@/lib/favorite-key";
 import {
   isTauriRuntime,
   type PlaybackResolution,
@@ -147,9 +148,7 @@ export function PlayerView({
   const mediaKind = activeEpisode
     ? inferMediaKind(activeEpisode.url)
     : ("unknown" as MediaKind);
-  const isFavorite = favorites.some(
-    (favorite) => favorite.item.id === item.id,
-  );
+  const isFavorite = isFavoriteItem(favorites, item);
   // The resolve effect keys off these primitives rather than the episode object. The detail
   // request replaces the play lines with fresh objects for the same episodes, so an object
   // dependency would re-run the effect on arrival, blank the player and resolve the same URL

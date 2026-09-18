@@ -1,4 +1,4 @@
-import { Footprints, Radio, Trash2 } from "lucide-react";
+import { Clapperboard, Footprints, Radio, Trash2 } from "lucide-react";
 
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
@@ -20,19 +20,26 @@ interface HistoryViewProps {
 }
 
 /**
- * 足迹 — where the user has been, newest first.
+ * 足迹 — where the user has been, newest first, split by what kind of thing it was.
  *
  * Read-only on purpose. An earlier version made every row a button back into the library, which
  * promised a return to the exact place and could not deliver it: the source may have been
  * deleted, or the episode renumbered, and the click landed somewhere adjacent at best. A record
  * of the past should not pretend to be a door.
  *
- * A timeline rather than a grid because the order is the information. A grid says "these are
- * things"; a column with times says "this is when", which is what a history is actually for.
+ * Two columns rather than one merged list. A film and a channel are watched for different reasons
+ * and at different times, and interleaving them meant scanning past rows that were never
+ * candidates for what you were looking for. Side by side, each column answers its own question.
  */
 export function HistoryView({ onNavigate }: HistoryViewProps) {
   const history = useAppStore((state) => state.history);
   const clearHistory = useAppStore((state) => state.clearHistory);
+
+  // The store keeps one ordered list; each column filters it, so both stay newest-first without
+  // a second sort or a second stored order that could drift.
+  const vodRecords = history.filter((record) => record.kind === "vod");
+  const liveRecords = history.filter((record) => record.kind === "live");
+  const isEmpty = history.length === 0;
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -42,11 +49,13 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
           <h1 className="text-sm font-semibold tracking-tight text-foreground">
             足迹
           </h1>
-          <span className="text-xs text-muted-foreground">
-            ({history.length} 条记录)
-          </span>
+          {!isEmpty && (
+            <span className="text-xs text-muted-foreground">
+              (影视 {vodRecords.length} · 直播 {liveRecords.length})
+            </span>
+          )}
         </div>
-        {history.length > 0 && (
+        {!isEmpty && (
           <Button
             type="button"
             variant="ghost"
@@ -63,13 +72,12 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
       <ScrollArea
         className="min-h-0 flex-1"
         // Radix wraps the viewport's children in an inline `display: table; min-width: 100%`
-        // element, which sizes to its content. That wrapper was why the centred column never
-        // centred: the table grew to the widest row and pinned everything to the left, leaving
-        // the right half of the page empty.
+        // element, which sizes to its content. That wrapper is why a centred column never
+        // centres: the table grows to the widest row and pins everything to the left.
         viewportClassName="[&>div]:!block"
       >
         <div className="p-4">
-          {history.length === 0 ? (
+          {isEmpty ? (
             <div className="flex h-96 items-center justify-center">
               <Empty className="max-w-md border-border/40 bg-card/20 py-8">
                 <EmptyHeader>
@@ -89,23 +97,121 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
               </Empty>
             </div>
           ) : (
-            /* Two columns once there is room. A single narrow column pinned to the left made the
-               page read as unfinished rather than as deliberately margined, and a timeline is a
-               list — it can use the width it is given. */
-            <div className="mx-auto grid max-w-6xl gap-x-8 lg:grid-cols-2">
-              {history.map((record, index) => (
-                <TimelineEntry
-                  key={record.id}
-                  record={record}
-                  isLast={index === history.length - 1}
-                />
-              ))}
+            /* Two independent columns. Each keeps its own heading and its own empty state, so a
+               column with nothing in it still explains itself instead of collapsing and leaving
+               the page looking half-built. */
+            <div className="mx-auto grid max-w-7xl items-start gap-x-8 gap-y-6 lg:grid-cols-2">
+              <TimelineColumn
+                kind="vod"
+                title="影视"
+                icon={<Clapperboard className="size-3.5" aria-hidden="true" />}
+                records={vodRecords}
+                emptyHint="在影视库点开任意影片，这里就会记下你看到哪一集、用的是哪条线路。"
+                onNavigate={onNavigate}
+              />
+              <TimelineColumn
+                kind="live"
+                title="电视"
+                icon={<Radio className="size-3.5" aria-hidden="true" />}
+                records={liveRecords}
+                emptyHint="在电视直播里选择频道，这里就会记下你看过哪些台。"
+                onNavigate={onNavigate}
+              />
             </div>
           )}
         </div>
         <ScrollBar />
       </ScrollArea>
     </div>
+  );
+}
+
+/**
+ * One column: a heading, a count, and its own timeline.
+ *
+ * The count is on the column rather than only in the header so each side states how much it holds
+ * without the reader comparing two numbers in a toolbar.
+ */
+function TimelineColumn({
+  kind,
+  title,
+  icon,
+  records,
+  emptyHint,
+  onNavigate,
+}: {
+  kind: "vod" | "live";
+  title: string;
+  icon: React.ReactNode;
+  records: FootprintRecord[];
+  emptyHint: string;
+  onNavigate: (view: ViewKey) => void;
+}) {
+  const isVod = kind === "vod";
+
+  return (
+    /* The role is explicit rather than relying on `<section aria-label>` alone: browsers do not
+       consistently expose that as a landmark, so a query by role failed to find a column that was
+       plainly on screen. An explicit role also makes the two columns navigable landmarks for
+       assistive technology, which is the reason for labelling them at all. */
+    <section
+      role="region"
+      aria-label={`${title}足迹`}
+      className="flex min-w-0 flex-col"
+    >
+      <div className="mb-1 flex items-center gap-2 border-b border-border/60 pb-2">
+        <span
+          className={cn(
+            "flex size-6 shrink-0 items-center justify-center rounded-md",
+            isVod ? "bg-primary/15 text-primary" : "bg-sky-400/15 text-sky-400",
+          )}
+        >
+          {icon}
+        </span>
+        <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+        <span className="text-xs text-muted-foreground">{records.length} 条</span>
+      </div>
+
+      {records.length === 0 ? (
+        /* A column with nothing in it still has to look intentional. A dashed outline keeps the
+           column's shape so the page reads as two panels, one of which happens to be empty,
+           rather than as a layout that failed to fill. */
+        <div className="mt-3 flex flex-col items-center gap-2 rounded-lg border border-dashed border-border/60 px-4 py-10 text-center">
+          <span
+            className={cn(
+              "flex size-8 items-center justify-center rounded-full",
+              isVod ? "bg-primary/10 text-primary/70" : "bg-sky-400/10 text-sky-400/70",
+            )}
+            aria-hidden="true"
+          >
+            {icon}
+          </span>
+          <p className="text-xs text-muted-foreground">还没有{title}足迹</p>
+          <p className="max-w-xs text-xs leading-5 text-muted-foreground/70">
+            {emptyHint}
+          </p>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="mt-1"
+            onClick={() => onNavigate(isVod ? "browse" : "live")}
+          >
+            {isVod ? "去影视库看看" : "去电视直播看看"}
+          </Button>
+        </div>
+      ) : (
+        <ol className="flex flex-col">
+          {records.map((record, index) => (
+            <TimelineEntry
+              key={record.id}
+              record={record}
+              isLast={index === records.length - 1}
+            />
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 
@@ -175,16 +281,8 @@ function TimelineEntry({
         <div className="flex min-w-0 flex-1 flex-col gap-1.5">
           <div className="flex items-center gap-2">
             <p className="truncate text-sm font-semibold text-foreground">{title}</p>
-            <span
-              className={cn(
-                "shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium",
-                isVod
-                  ? "bg-primary/15 text-primary"
-                  : "bg-sky-400/15 text-sky-400",
-              )}
-            >
-              {isVod ? "影视" : "直播"}
-            </span>
+            {/* No kind badge. The column heading already says whether this is 影视 or 电视, and a
+                label repeated on every row is noise that the grouping made unnecessary. */}
             {/* The time sits at the end of the title row, so the right edge of every entry
                 carries the same kind of information and the column does not read as ragged. */}
             <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground/70">

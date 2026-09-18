@@ -7,6 +7,7 @@ import {
   type ConfigDocumentSummary,
   type StoredConfigDocument,
 } from "@/lib/tauri";
+import { favoriteKey } from "@/lib/favorite-key";
 import type {
   FavoriteProgress,
   FootprintRecord,
@@ -406,7 +407,7 @@ export const useAppStore = create<AppStore>()(
        */
       toggleFavorite: (item) =>
         set((state) => {
-          const key = `${item.sourceKey}:${item.id}`;
+          const key = favoriteKey(item);
           const existing = state.favorites.find(
             (favorite) => favorite.key === key,
           );

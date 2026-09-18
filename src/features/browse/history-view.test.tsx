@@ -84,16 +84,38 @@ describe("HistoryView", () => {
     expect(screen.queryByText(/最近播放历史/)).toBeNull();
   });
 
-  it("shows both a work and a channel on the same timeline", () => {
-    // They are the two things a user can watch, and a history that silently omitted one would be
-    // wrong about where they had been.
+  it("splits the two kinds into their own columns", () => {
+    // A film and a channel are watched for different reasons, and interleaving them meant
+    // scanning past rows that were never candidates for what you were looking for.
     useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    expect(screen.getByText("冬城猎凶")).toBeInTheDocument();
-    expect(screen.getByText("City News")).toBeInTheDocument();
-    expect(screen.getByText("影视")).toBeInTheDocument();
-    expect(screen.getByText("直播")).toBeInTheDocument();
+    const vodColumn = screen.getByRole("region", { name: "影视足迹" });
+    const liveColumn = screen.getByRole("region", { name: "电视足迹" });
+
+    // Each entry is in its own column, not merely somewhere on the page.
+    expect(vodColumn).toHaveTextContent("冬城猎凶");
+    expect(vodColumn).not.toHaveTextContent("City News");
+    expect(liveColumn).toHaveTextContent("City News");
+    expect(liveColumn).not.toHaveTextContent("冬城猎凶");
+  });
+
+  it("gives each column its own count", () => {
+    useAppStore.setState({
+      history: [
+        vodFootprint(),
+        vodFootprint({ id: "vod-1:ep-2", episodeId: "ep-2" }),
+        liveFootprint(),
+      ],
+    });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    expect(
+      screen.getByRole("region", { name: "影视足迹" }),
+    ).toHaveTextContent("2 条");
+    expect(
+      screen.getByRole("region", { name: "电视足迹" }),
+    ).toHaveTextContent("1 条");
   });
 
   it("is read-only — no row navigates anywhere", () => {
@@ -103,7 +125,7 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
     render(<HistoryView onNavigate={onNavigate} />);
 
-    // The only button is the header's clear action; nothing in the timeline is interactive.
+    // The only button is the header's clear action; nothing in either timeline is interactive.
     const buttons = screen.getAllByRole("button");
     expect(buttons).toHaveLength(1);
     expect(buttons[0]).toHaveTextContent("清空足迹");
@@ -154,8 +176,49 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    expect(screen.getByText("新闻")).toBeInTheDocument();
-    expect(screen.queryByText(/线路/)).toBeNull();
+    const liveColumn = screen.getByRole("region", { name: "电视足迹" });
+    expect(liveColumn).toHaveTextContent("新闻");
+    expect(liveColumn).not.toHaveTextContent("线路");
+  });
+
+  it("keeps an empty column visible and explains it", () => {
+    // With only films watched, the television column must still be there. Collapsing it would
+    // leave a page that looks half-built, and the reader could not tell whether the app had lost
+    // their channel history or simply had none.
+    useAppStore.setState({ history: [vodFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const liveColumn = screen.getByRole("region", { name: "电视足迹" });
+    expect(liveColumn).toHaveTextContent("还没有电视足迹");
+    expect(liveColumn).toHaveTextContent("0 条");
+    // It offers the way to produce one.
+    expect(
+      screen.getByRole("button", { name: "去电视直播看看" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the film column visible when only channels were watched", () => {
+    // The mirror case, which a one-sided implementation would miss.
+    useAppStore.setState({ history: [liveFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const vodColumn = screen.getByRole("region", { name: "影视足迹" });
+    expect(vodColumn).toHaveTextContent("还没有影视足迹");
+    expect(vodColumn).toHaveTextContent("0 条");
+    expect(
+      screen.getByRole("button", { name: "去影视库看看" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the single overall empty state only when both sides are empty", () => {
+    // One message for "nothing at all" is clearer than two identical panels saying the same
+    // thing, and it names both ways in.
+    useAppStore.setState({ history: [] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    expect(screen.getByText("还没有足迹")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "影视足迹" })).toBeNull();
+    expect(screen.queryByRole("region", { name: "电视足迹" })).toBeNull();
   });
 
   it("explains how to get a first record when there are none", () => {

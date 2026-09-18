@@ -44,7 +44,6 @@ const systemNavItems: NavItem[] = [
 
 export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
   const sourceCount = useAppStore((state) => state.sources.length);
-  const favoritesCount = useAppStore((state) => state.favorites.length);
 
   return (
     <TooltipProvider delayDuration={150}>
@@ -93,9 +92,6 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
                   </TooltipTrigger>
                   <TooltipContent side="right" sideOffset={12} className="font-medium">
                     {item.label}
-                    {item.key === "favorites" &&
-                      favoritesCount > 0 &&
-                      ` (${favoritesCount})`}
                   </TooltipContent>
                 </Tooltip>
               );

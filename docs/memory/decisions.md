@@ -392,3 +392,20 @@
 - 变异验证共 15 项。**4 项第一次存活，逐一定位后都补齐或确认了真实原因**：`savesThumbnail`（jsdom 不加载图片，解析器总是返回原图，所以必须先 mock 解析器）、`noUpperClamp`（按钮会自我禁用，**只有滚轮这条路径能越界**，改从滚轮测）、`resetLeavesPan`（1x 的 effect 已经清了偏移，**这行是冗余的，直接删掉而不是补测试**）、`noOffsetClear`/`dragFlagAsState`（补 PointerEvent polyfill 后才可测）。
 - 真实浏览器实测：列表卡片上放大按钮 **0 个**、观看页详情图里有入口、源列缩略图 → 显示 **1200px**、滚轮 `1200%`/回到 `100%`、按钮两次点击 `scale(2)`、**拖动 `translate(60px, 40px)`**、重置回到 `translate(0px, 0px) scale(1)`、下载调用的是解析后地址、足迹显示「第01集 · 线路 dytt · 主用影视源」且进度条存在。
 - 本轮最终：前端 **322 项**（新增 poster-lightbox 12 项、poster-candidates 7 项、history-view 2 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。
+- **侧栏「我的收藏」提示里的数字删掉，而且它本来就不准确**——数字取的是 `favorites.length`（只有影视），**而收藏页同时装着影视和电视直播**，所以任何被收藏的频道都不计入。**用户说「不准确」是对的，这不是单纯的冗余。**
+- **顺带查出一个更严重的真 bug：收藏心形的判断和存储用的键不一致**。
+  - store 按 `` `${sourceKey}:${id}` `` 存储（**id 只在单个源内唯一，两个源都可能有 `vod-1`**）；
+  - 但影视库卡片和观看页的心形**只按 `id` 比较**。
+  - 后果：**另一个源里同 id 的作品会显示成「已收藏」，而且点心形关不掉**（store 切换的是另一个键）。
+  - 抽成 `src/lib/favorite-key.ts` 的 `favoriteKey()` / `isFavoriteItem()`，三处（store、影视库卡片、观看页）统一使用。**同一个概念有两套判断规则，迟早会不一致——这次就是。**
+- **足迹拆成左右两条时间线**（用户要求）：左「影视」、右「电视」。**一部电影和一个频道被观看的理由和时机都不同，混在一起会让人在一堆根本不是目标的记录里翻找**；并排之后每列各自回答自己的问题。
+  - **两个 kind 徽标从每一行删掉了**：列标题已经说明这是影视还是电视，**每行再重复一遍就是分组本来已经消除的噪音**。
+  - 每列**自己带计数**，读者不必去表头比对两个数字。
+  - **空状态分三层处理**（用户特别要求）：
+    1. **两边都空** → 一个整体的空状态，说明两种产生足迹的方式。**两条一模一样的空面板说同一件事只会更啰嗦。**
+    2. **只有一边空** → **空的列必须保留**，用虚线框住并说明「还没有电视足迹」+ 一句提示 + 一个去对应页面的按钮。**折叠掉会让页面看起来像只做了一半，用户也无法判断是「应用丢了我的记录」还是「本来就没有」。**
+    3. 两个方向都测了（只有影视 / 只有直播），**单边实现最容易漏掉镜像的那一半**。
+- **`<section aria-label>` 不产生 `role="region"`**：Chrome 实测**不会**把它暴露成 landmark，所以按 role 查询找不到一个明明在屏幕上的列。改为**显式 `role="region"`**——顺带这也才真正让两列成为可导航的 landmark，而给它们命名本来就是为了这个。**这也说明：单元测试里 `getByRole("region")` 通过，不代表浏览器里也有这个 role。**
+- 变异验证 8 项全部抓到：`heartByIdOnly`、`keyWithoutSource`、`columnsUnfiltered`、`columnsSwapped`、`emptyColumnHidden`、`emptyColumnNoAction`、`neverOverallEmpty`、`columnCountWrong`。
+- 真实浏览器实测：tooltip 文本**恰好是 `["我的收藏"]`**、`hasNumber: false`；两列 `sideBySide: true` 且**各自只含自己那一类**（`vodHasChannel: false`、`liveHasFilm: false`）、`rowBadgeCount: 0`；只有影视时 `liveText: "电视0 条还没有电视足迹…去电视直播看看"` 且 `livePresent: true`，只有直播时镜像成立；几何实测两列**等宽 624**（left 100 / 756、gap 32、窗口 1424）。
+- 本轮最终：前端 **329 项**（新增 favorite-key 3 项、history-view 4 项）、Rust 103 项、`clippy` 零警告、`pnpm build` 零警告。
