@@ -108,6 +108,17 @@ import {
   type DraftSource,
 } from "@/features/config/config-drafts";
 import {
+  activeFilterGroupCount,
+  defaultSourceFilter,
+  isFilterUnfiltered,
+  matchesSourceFilterState,
+  type SourceFilterState,
+} from "@/features/config/source-filter";
+import {
+  SourceFilterFacets,
+  SourceFilterTrigger,
+} from "@/features/config/source-filter-panel";
+import {
   adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
@@ -142,16 +153,17 @@ import type {
 } from "@/types/moseek";
 
 /**
- * The list groups sources by whether an adapter exists for them.
+ * The source list's filter.
  *
- * The words are 已适配 / 未适配 rather than 可用 / 不可用 because the list cannot promise a
- * source works: a source with an adapter may still fail its test, and "可用" claimed otherwise.
- * Whether a particular source actually works is what the 状态 column reports, and what the test
- * run is for. 全部 exists so the unadapted ones can be found and pruned.
+ * Four independent questions — which adapter, can it run, how did the last test go, is it switched
+ * on — grouped in a popover. The words are 已适配 / 未适配 rather than 可用 / 不可用 because the list
+ * cannot promise a source works: a source with an adapter may still fail its test, and "可用"
+ * claimed otherwise. Whether a particular source actually works is what the 状态 column reports.
  */
-type SourceFilter = "available" | "unusable" | "all";
-type AdapterFilter = "all" | AdapterExecution;
 type ImportMode = "remote" | "local";
+
+/** The adapter tab's own filter, which narrows a table of adapters rather than of sources. */
+type AdapterFilter = "all" | AdapterExecution;
 
 /**
  * How many sources a batch test probes at once.
@@ -162,18 +174,6 @@ type ImportMode = "remote" | "local";
  * behind three others without looking like a flood.
  */
 const TEST_CONCURRENCY = 4;
-
-/**
- * Whether a source falls on the "可用" or the "不可用" side of the filter.
- *
- * Driven by the adapter, matching the status column: a source is usable when Moseek has a code path
- * for it. This used to read `capability === "supported" || capability === "partial"`, which put
- * sources with no adapter on the usable side and gave the removed `partial` state a meaning here.
- */
-function matchesSourceFilter(source: SourceRecord, filter: SourceFilter) {
-  if (filter === "all") return true;
-  return filter === "available" ? isTestableSource(source) : !isTestableSource(source);
-}
 
 export function ConfigCenter() {
   const toast = useToast();
@@ -191,11 +191,18 @@ export function ConfigCenter() {
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
   const [query, setQuery] = useState("");
   /**
-   * Defaults to 可用. A configuration usually carries far more sources than a user can act on,
-   * and the ones that cannot run are not what they came to look at — they are what they may
-   * later want to prune. Starting on 全部 made the page open on a wall of unusable rows.
+   * The source list's filter.
+   *
+   * Opens on the sources that can actually run — `executions: ["enabled"]`, the default in
+   * `source-filter.ts` — because a configuration carries far more sources than a user can act on
+   * and the ones with no runnable adapter are what they may later prune, not what they came to look
+   * at. Unlike the previous default it is a visible, clearable choice in the panel rather than a
+   * hidden rule, so the list can be widened without discovering a second control.
    */
-  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("available");
+  const [sourceFilter, setSourceFilter] =
+    useState<SourceFilterState>(defaultSourceFilter);
+  /** Whether the filter panel is expanded. Closed by default so the list keeps the height. */
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [adapterFilter, setAdapterFilter] = useState<AdapterFilter>("all");
   const [adapterQuery, setAdapterQuery] = useState("");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
@@ -558,7 +565,7 @@ export function ConfigCenter() {
   const filteredSources = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return sources.filter((source) => {
-      const matchesFilter = matchesSourceFilter(source, sourceFilter);
+      const matchesFilter = matchesSourceFilterState(source, sourceFilter);
       const matchesQuery =
         !normalizedQuery ||
         [source.name, source.key, source.api].some((value) =>
@@ -679,11 +686,29 @@ export function ConfigCenter() {
     }
   };
 
+  /**
+   * Single tests the user has abandoned, by source key.
+   *
+   * A request already in flight cannot be recalled, so cancelling means the interface stops waiting
+   * and drops the outcome — the same approach the batch cancel takes, for the same reason: a source
+   * that hangs is exactly what the user is trying to escape, and waiting for it would reproduce the
+   * freeze the button exists to fix. The backend still bounds the request at 25 seconds.
+   */
+  const cancelledTestKeys = useRef(new Set<string>());
+
   const handleTestSource = async (source: SourceRecord) => {
     if (testingKeys.has(source.key)) return;
+    cancelledTestKeys.current.delete(source.key);
     setTestingKeys((current) => new Set(current).add(source.key));
     try {
       const result = await testSource(source);
+      // **Checked before anything is written.** A cancelled test must not persist its result: a
+      // failure would switch the source off, so abandoning a test and then having it silently
+      // disable the source would be worse than not offering the cancel at all.
+      if (cancelledTestKeys.current.has(source.key)) {
+        cancelledTestKeys.current.delete(source.key);
+        return null;
+      }
       if (!result) {
         throw new Error(
           "浏览器预览不会直接请求 CMS 或直播源，请在 Tauri 桌面应用中测试。",
@@ -693,6 +718,12 @@ export function ConfigCenter() {
         activeConfigId === null
           ? null
           : await updateSourceTest(activeConfigId, source.key, result);
+      // The persist round-trip is awaited too, so the check is repeated: the user can cancel while
+      // the result is being written.
+      if (cancelledTestKeys.current.has(source.key)) {
+        cancelledTestKeys.current.delete(source.key);
+        return null;
+      }
       if (persistedDocument) {
         setConfigDocument(persistedDocument);
       } else {
@@ -715,6 +746,10 @@ export function ConfigCenter() {
       });
       return result;
     } catch (error) {
+      if (cancelledTestKeys.current.has(source.key)) {
+        cancelledTestKeys.current.delete(source.key);
+        return null;
+      }
       // Reported the same way as a completed test: this is the outcome of the same action, and
       // mixing a toast with a page banner for the failure case would make the error look like a
       // different kind of event.
@@ -731,6 +766,21 @@ export function ConfigCenter() {
         return next;
       });
     }
+  };
+
+  /**
+   * Abandons a single test.
+   *
+   * The loading state clears immediately rather than when the request settles, so the row stops
+   * looking busy the moment the user asks it to. The outcome is dropped when it arrives.
+   */
+  const handleCancelTestSource = (sourceKey: string) => {
+    cancelledTestKeys.current.add(sourceKey);
+    setTestingKeys((current) => {
+      const next = new Set(current);
+      next.delete(sourceKey);
+      return next;
+    });
   };
 
   /**
@@ -1360,10 +1410,11 @@ export function ConfigCenter() {
                     </Button>
                     {/* Pruning in bulk: the sources that cannot work are usually the majority,
                         and removing them one at a time is the tedious part of ending up with a
-                        configuration that works. It acts only on the rows currently listed, so
-                        it can never delete something the user cannot see — and it is hidden
-                        under 已适配, where none of those rows are on screen. */}
-                    {bulkRemovableSources.length > 0 && sourceFilter !== "available" && (
+                        configuration that works. It acts only on the rows currently listed, so it
+                        can never delete something the user cannot see. That is also why it needs no
+                        separate guard for the default view: with the filter on the runnable
+                        sources, no removable row is on screen and the button does not appear. */}
+                    {bulkRemovableSources.length > 0 && (
                       <Button
                         type="button"
                         variant="outline"
@@ -1387,44 +1438,41 @@ export function ConfigCenter() {
                     )}
                   </div>
                 </div>
-                <div className="mt-4 flex items-center gap-2">
-                  <div className="relative min-w-0 flex-1">
-                    <Search
-                      className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
-                      data-icon="inline-start"
-                      aria-hidden="true"
+                {/* The toolbar is a row; the filter panel expands underneath it. The panel is a
+                    sibling of the row rather than a child so an open panel pushes the list down
+                    instead of squeezing the search box. */}
+                <div className="mt-4 flex flex-col gap-2">
+                  <div className="flex items-center gap-2">
+                    <div className="relative min-w-0 flex-1">
+                      <Search
+                        className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
+                        data-icon="inline-start"
+                        aria-hidden="true"
+                      />
+                      <Input
+                        size="sm"
+                        value={query}
+                        onChange={(event) => setQuery(event.target.value)}
+                        placeholder="搜索源名称或 API"
+                        className="pl-8"
+                      />
+                    </div>
+                    <SourceFilterTrigger
+                      activeGroupCount={activeFilterGroupCount(sourceFilter)}
+                      open={isFilterOpen}
+                      onOpenChange={setIsFilterOpen}
                     />
-                    <Input
-                      size="sm"
-                      value={query}
-                      onChange={(event) => setQuery(event.target.value)}
-                      placeholder="搜索源名称或 API"
-                      className="pl-8"
-                    />
+                    <span className="shrink-0 text-xs text-muted-foreground">
+                      共 {filteredSources.length} 个
+                    </span>
                   </div>
-                  <Select
-                    value={sourceFilter}
-                    onValueChange={(value) =>
-                      setSourceFilter(value as SourceFilter)
-                    }
-                  >
-                    <SelectTrigger size="sm" className="w-36 shrink-0" aria-label="筛选状态">
-                      <Filter className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                      <SelectValue placeholder="筛选状态" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        {/* 全部 first because it is the widest scope and the natural place to
-                            start reading, even though 已适配 is what is selected by default. */}
-                        <SelectItem value="all">全部</SelectItem>
-                        <SelectItem value="available">已适配</SelectItem>
-                        <SelectItem value="unusable">未适配</SelectItem>
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    共 {filteredSources.length} 个
-                  </span>
+                  {isFilterOpen && (
+                    <SourceFilterFacets
+                      sources={sources}
+                      value={sourceFilter}
+                      onChange={setSourceFilter}
+                    />
+                  )}
                 </div>
               </CardHeader>
               <CardContent className="flex min-h-0 flex-1 flex-col p-0">
@@ -1548,7 +1596,11 @@ export function ConfigCenter() {
                                     variant="ghost"
                                     size="icon-sm"
                                     className="group/test relative text-muted-foreground"
-                                    disabled={isTesting && !isBatchTesting}
+                                    // A row being tested is always cancellable, including on its
+                                    // own. This used to be disabled unless a batch was running and
+                                    // its cancel reached only the batch, so a single test offered
+                                    // an X that did nothing — the one control a user reaches for
+                                    // when a row hangs.
                                     aria-label={
                                       isTesting
                                         ? `取消测试 ${source.name}`
@@ -1557,11 +1609,21 @@ export function ConfigCenter() {
                                     title={
                                       isTesting ? "取消测试" : "测试这个源"
                                     }
-                                    onClick={() =>
-                                      isTesting
-                                        ? handleCancelTestAll()
-                                        : void handleTestSource(source)
-                                    }
+                                    onClick={() => {
+                                      if (!isTesting) {
+                                        void handleTestSource(source);
+                                        return;
+                                      }
+                                      // A row that is busy because a batch owns it cancels the
+                                      // batch: that is the operation the user is waiting on, and
+                                      // stopping only this row would leave the rest running with no
+                                      // way to stop them from here.
+                                      if (isBatchTesting) {
+                                        handleCancelTestAll();
+                                        return;
+                                      }
+                                      handleCancelTestSource(source.key);
+                                    }}
                                   >
                                     {/* A row stuck on "测试中" is where a user looks when they
                                         want it to stop, so the cancel control appears exactly
@@ -1635,13 +1697,13 @@ export function ConfigCenter() {
                           <Search className="size-4" data-icon="inline-start" aria-hidden="true" />
                         </EmptyMedia>
                         <EmptyTitle>
-                          {sourceFilter === "available" && !query.trim()
-                            ? "当前配置没有已适配的源"
+                          {isFilterUnfiltered(sourceFilter) && !query.trim()
+                            ? "当前配置没有源"
                             : "没有匹配的源"}
                         </EmptyTitle>
                         <EmptyDescription>
-                          {sourceFilter === "available" && !query.trim()
-                            ? "这些源都没有可用的适配器。切换到「未适配」可以查看并清理它们。"
+                          {isFilterUnfiltered(sourceFilter) && !query.trim()
+                            ? "导入一份配置后，源会出现在这里。"
                             : "调整关键词或筛选条件后重试。"}
                         </EmptyDescription>
                       </EmptyHeader>
@@ -2606,23 +2668,35 @@ export function ConfigCenter() {
                         variant="outline"
                         size="sm"
                         className="gap-1.5"
-                        disabled={testingKeys.has(inspectedSource.key)}
-                        onClick={() => void handleTestSource(inspectedSource)}
+                        // The same control both starts and cancels, matching the toolbar's batch
+                        // button. It used to disable itself while running, which left the drawer
+                        // with no way out of a test that was not finishing — the case where the
+                        // user most wants one.
+                        onClick={() =>
+                          testingKeys.has(inspectedSource.key)
+                            ? handleCancelTestSource(inspectedSource.key)
+                            : void handleTestSource(inspectedSource)
+                        }
                       >
                         {testingKeys.has(inspectedSource.key) ? (
-                          <LoaderCircle
-                            className="size-3.5 animate-spin"
-                            data-icon="inline-start"
-                            aria-hidden="true"
-                          />
+                          <>
+                            <X
+                              className="size-3.5"
+                              data-icon="inline-start"
+                              aria-hidden="true"
+                            />
+                            取消测试
+                          </>
                         ) : (
-                          <TestTube2
-                            className="size-3.5"
-                            data-icon="inline-start"
-                            aria-hidden="true"
-                          />
+                          <>
+                            <TestTube2
+                              className="size-3.5"
+                              data-icon="inline-start"
+                              aria-hidden="true"
+                            />
+                            测试
+                          </>
                         )}
-                        测试
                       </Button>
                     )}
                     {/* The switch is offered on the same condition as the list's, which draws a

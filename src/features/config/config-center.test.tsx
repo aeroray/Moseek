@@ -11,6 +11,7 @@ import {
   replaceAllConfigDocuments,
   saveConfigDocument,
   testSource as testSourceCommand,
+  updateSourceTest as updateSourceTestCommand,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
 import type { SourceRecord, SourceTestResult } from "@/types/moseek";
@@ -155,14 +156,41 @@ function renderCenter() {
   return renderPage(<ConfigCenter />);
 }
 
-/** Radix Select renders its list in a portal and needs a pointer sequence to open. */
+/**
+ * Sets the source list's filter from the old vocabulary.
+ *
+ * The panel replaced a single dropdown, so the tests keep their words. The old filter was binary —
+ * 已适配 / 未适配 — while the panel splits the second into 已阻止 and 待适配, so 未适配 means both of
+ * the ways a source can lack a runnable adapter.
+ */
 function chooseFilter(label: string) {
-  const trigger = screen.getByLabelText("筛选状态");
-  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-  fireEvent.click(trigger);
-  const option = screen.getByRole("option", { name: label });
-  fireEvent.pointerUp(option);
-  fireEvent.click(option);
+  openFilterPanel();
+  const reset = screen.getByRole("button", { name: "重置" });
+  if (!(reset as HTMLButtonElement).disabled) fireEvent.click(reset);
+  if (label === "已适配") {
+    fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
+  } else if (label === "未适配") {
+    fireEvent.click(screen.getByRole("checkbox", { name: "已阻止" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "待适配" }));
+  }
+  // 全部 is the reset on its own: every group cleared.
+}
+
+/** Ticks one choice in the filter panel, opening it first. */
+function toggleFilterFacet(label: string) {
+  openFilterPanel();
+  fireEvent.click(screen.getByRole("checkbox", { name: label }));
+}
+
+/** Expands the filter panel. Idempotent, so a test may call it before choosing. */
+function openFilterPanel() {
+  if (screen.queryByLabelText("筛选条件")) return;
+  fireEvent.click(screen.getByRole("button", { name: /筛选/ }));
+}
+
+/** Collapses the panel, so a test can check what the toolbar reports while it is closed. */
+function closeFilterPanel() {
+  fireEvent.click(screen.getByRole("button", { name: /筛选/ }));
 }
 
 /** Opens the 适配器 tab. Radix switches tabs on pointer-down, not click. */
@@ -292,21 +320,155 @@ describe("config center", () => {
     expect(screen.queryByText("待适配的源")).not.toBeInTheDocument();
   });
 
-  it("groups the filter into usable and unusable rather than five parser states", () => {
-    // 部分可用 / 待适配 / 配置无效 all mean "not usable right now"; asking a user to choose
-    // between them is asking them to learn the parser's taxonomy.
+  it("offers four named groups rather than five parser states", () => {
+    // The old dropdown was one binary choice. The panel asks the four questions a user actually has
+    // — which adapter, can it run, how did the test go, is it on — each with its own heading, so the
+    // relationship between the choices is visible instead of implied.
     renderCenter();
+    openFilterPanel();
 
-    const trigger = screen.getByLabelText("筛选状态");
-    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-    fireEvent.click(trigger);
+    const panel = screen.getByLabelText("筛选条件");
+    for (const group of ["适配器", "适配器状态", "测试状态", "启用"]) {
+      expect(within(panel).getByText(group)).toBeInTheDocument();
+    }
+    // The states the parser produces are offered, and the removed one is not.
+    expect(within(panel).getByRole("checkbox", { name: "可执行" })).toBeInTheDocument();
+    expect(within(panel).getByRole("checkbox", { name: "待适配" })).toBeInTheDocument();
+    expect(within(panel).getByRole("checkbox", { name: "已阻止" })).toBeInTheDocument();
+    expect(within(panel).getByRole("checkbox", { name: "配置无效" })).toBeInTheDocument();
+    expect(within(panel).queryByRole("checkbox", { name: "部分支持" })).not.toBeInTheDocument();
+  });
 
-    expect(screen.getByRole("option", { name: "已适配" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "未适配" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "全部" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "部分可用" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "待适配" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "配置无效" })).not.toBeInTheDocument();
+  it("explains how the groups combine", () => {
+    // OR within a group and AND across groups is the usual reading, but it is an assumption the user
+    // should not have to make: the panel states it.
+    renderCenter();
+    openFilterPanel();
+
+    expect(
+      screen.getByText("同一组内满足任一条件，组与组之间需同时满足。"),
+    ).toBeInTheDocument();
+  });
+
+  it("combines choices across groups", () => {
+    // The whole point of the redesign: "an adapter that runs, and the source is switched on" was
+    // not expressible before. In the fixture only 可用的源 satisfies both.
+    //
+    // Each group is asserted to be doing work on its own, because a filter that silently ignores a
+    // group still shows the right rows when the groups happen to agree — which is how a double
+    // toggle that cancelled itself out went unnoticed here.
+    renderCenter();
+    openFilterPanel();
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+
+    // The adapter group alone excludes the two sources with no runnable adapter.
+    fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
+    expect(screen.getByText("可用的源")).toBeInTheDocument();
+    expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
+    expect(screen.queryByText("待适配的源")).not.toBeInTheDocument();
+
+    // Adding the enabled group keeps it, because 可用的源 is enabled.
+    fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
+    expect(screen.getByText("可用的源")).toBeInTheDocument();
+
+    // Removing the adapter group leaves the enabled group doing the work: still just 可用的源.
+    fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
+    expect(screen.getByText("可用的源")).toBeInTheDocument();
+    expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
+
+    // And clearing the last group shows everything, which is what proves the earlier narrowing was
+    // the filter's doing rather than an accident of the fixture.
+    fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
+    expect(screen.getByText("不可用的源")).toBeInTheDocument();
+    expect(screen.getByText("待适配的源")).toBeInTheDocument();
+  });
+
+  it("disables a choice that would leave nothing, instead of hiding it", () => {
+    // A count that leads nowhere is the panel's whole value: the user can see it before taking it.
+    // The choice is disabled rather than removed so the panel keeps its shape while being read.
+    renderCenter();
+    openFilterPanel();
+
+    // The default keeps only the runnable sources, and the fixture's runnable source is enabled, so
+    // "已停用" would leave nothing.
+    expect(screen.getByRole("checkbox", { name: "已停用" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "已启用" })).toBeEnabled();
+  });
+
+  it("ticks a choice once per click, whether the box or its label is clicked", () => {
+    // The row is a click target containing a checkbox, so a click can reach both. Measured in
+    // `propagation.test.tsx`: the visible state lands correctly even when it fires twice, because
+    // the update is computed from the closure's value. So the check that discriminates is that the
+    // list narrowed and then widened — a filter that fired twice would look like it ignored the
+    // click.
+    renderCenter();
+    openFilterPanel();
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+
+    const box = screen.getByRole("checkbox", { name: "可执行" });
+    fireEvent.click(box);
+    expect(box).toBeChecked();
+    expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
+
+    fireEvent.click(box);
+    expect(box).not.toBeChecked();
+    expect(screen.getByText("不可用的源")).toBeInTheDocument();
+
+    // Clicking the row rather than the box does the same thing.
+    const row = screen.getByRole("checkbox", { name: "已启用" }).closest("div");
+    fireEvent.click(row as HTMLElement);
+    expect(screen.getByRole("checkbox", { name: "已启用" })).toBeChecked();
+  });
+
+  it("shows how many sources each choice would leave", () => {
+    renderCenter();
+    openFilterPanel();
+
+    const panel = screen.getByLabelText("筛选条件");
+    const runnable = within(panel)
+      .getByRole("checkbox", { name: "可执行" })
+      .closest("div");
+    // One source in the fixture is runnable, so the count beside it is 1.
+    expect(runnable?.textContent).toContain("1");
+  });
+
+  it("resets every group at once", () => {
+    renderCenter();
+    openFilterPanel();
+    fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
+    fireEvent.click(screen.getByRole("button", { name: "重置" }));
+
+    // Nothing is selected, so every source is listed — including the ones the page does not open on.
+    expect(screen.getByText("可用的源")).toBeInTheDocument();
+    expect(screen.getByText("不可用的源")).toBeInTheDocument();
+    expect(screen.getByText("待适配的源")).toBeInTheDocument();
+  });
+
+  it("reports how many groups are narrowing, on the toolbar", () => {
+    // The panel can be collapsed, so the trigger has to say that a filter is active without it.
+    renderCenter();
+    closeFilterPanel();
+    // The default narrows by one group (the adapter can run).
+    expect(screen.getByRole("button", { name: /筛选/ }).textContent).toContain("1");
+
+    openFilterPanel();
+    fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
+    closeFilterPanel();
+    expect(screen.getByRole("button", { name: /筛选/ }).textContent).toContain("2");
+  });
+
+  it("filters by one adapter on its own", () => {
+    // The adapter group is what makes a configuration with a dozen families navigable: the user can
+    // ask for just the XBPQ sources without knowing which of them are enabled.
+    renderCenter();
+    openFilterPanel();
+    const reset = screen.getByRole("button", { name: "重置" });
+    fireEvent.click(reset);
+
+    toggleFilterFacet("内置 CMS 适配器");
+
+    expect(screen.getByText("可用的源")).toBeInTheDocument();
+    expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
   });
 
   it("filters to the unusable sources when asked", () => {
@@ -887,8 +1049,12 @@ describe("config center", () => {
     chooseFilter("未适配");
 
     expect(screen.queryByText("部分支持")).not.toBeInTheDocument();
-    // It falls back to the adapter's verdict, which is a word the model still has.
-    expect(screen.getByText("待适配")).toBeInTheDocument();
+    // It falls back to the adapter's verdict, which is a word the model still has. Read from the
+    // row rather than the page: the filter panel also offers 待适配 as a choice.
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("旧状态源"));
+    expect(row?.textContent).toContain("待适配");
   });
 
   it("lets the adapter, not a stale capability, word the status column", () => {
@@ -1126,8 +1292,13 @@ describe("config center", () => {
     });
     renderPage(<ConfigCenter />);
 
-    expect(screen.getByText("当前配置没有已适配的源")).toBeInTheDocument();
-    expect(screen.getByText(/切换到「未适配」/)).toBeInTheDocument();
+    // The default filter is on, so the list is empty — but the configuration is not. The message
+    // has to say which of the two it is and how to widen it, which is now a filter the user can see
+    // rather than a mode they have to know about.
+    expect(screen.getByText("没有匹配的源")).toBeInTheDocument();
+    expect(screen.getByText(/调整关键词或筛选条件后重试/)).toBeInTheDocument();
+    // The filter button reports that a group is narrowing, so the way out is on screen.
+    expect(screen.getByRole("button", { name: /筛选/ }).textContent).toContain("1");
   });
 
   it("insets the empty state from the card edge", () => {
@@ -1468,6 +1639,80 @@ describe("config center", () => {
       name: /取消测试 可用的源/,
     });
     expect(rowCancel).toBeInTheDocument();
+  });
+
+  it("cancels a single test, not only a batch", async () => {
+    // A single test used to offer an X that reached only the batch runner, so clicking it on a
+    // lone test did nothing at all — the one control a user reaches for when a row hangs.
+    let resolveTest: (result: SourceTestResult) => void = () => {};
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>((resolve) => { resolveTest = resolve; }),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+
+    // The row reports that it is busy, and offers the way out.
+    const cancel = await screen.findByRole("button", { name: /取消测试 可用的源/ });
+    fireEvent.click(cancel);
+
+    // The loading state clears as soon as the user asks, rather than when the request settles.
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "测试 可用的源" }),
+      ).toBeInTheDocument();
+    });
+
+    // **The abandoned result is dropped.** A failure would switch the source off, so a cancelled
+    // test that still persisted would be worse than not offering the cancel at all. Asserted
+    // through the command that writes it, not only the store: the store is also where an
+    // unsaved result lands, so checking it alone would pass even if the write went through.
+    const writesBefore = vi.mocked(updateSourceTestCommand).mock.calls.length;
+    resolveTest(testResult({ status: "failed", message: "请求失败。" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "测试 可用的源" }),
+      ).toBeInTheDocument();
+    });
+    expect(vi.mocked(updateSourceTestCommand).mock.calls.length).toBe(writesBefore);
+    expect(useAppStore.getState().sources[0].testStatus).toBe("untested");
+    expect(useAppStore.getState().sources[0].enabled).toBe(true);
+  });
+
+  it("offers cancellation in the detail sheet too", async () => {
+    // The sheet's test button used to disable itself while running, which left the drawer with no
+    // way out of a test that was not finishing. Cancelling from here has to reach the same test the
+    // row started, so the assertion is that the run actually stops — not merely that the word
+    // changed.
+    let resolveTest: (result: SourceTestResult) => void = () => {};
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>((resolve) => { resolveTest = resolve; }),
+    );
+    renderCenter();
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("可用的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    fireEvent.click(within(sheet).getByRole("button", { name: "测试" }));
+
+    const cancel = await within(sheet).findByRole("button", { name: "取消测试" });
+    fireEvent.click(cancel);
+
+    // The button returns to 测试 without the request having settled, which is the loading state
+    // clearing on demand.
+    expect(
+      await within(sheet).findByRole("button", { name: "测试" }),
+    ).toBeInTheDocument();
+
+    // And the abandoned result does not reach the store.
+    resolveTest(testResult({ status: "failed", message: "请求失败。" }));
+    await waitFor(() => {
+      expect(useAppStore.getState().sources[0].testStatus).toBe("untested");
+    });
   });
 
   it("switches off a source the test found unusable", async () => {
