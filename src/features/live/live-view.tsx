@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Heart,
+  RotateCw,
   Search,
   TriangleAlert,
   Tv,
@@ -10,7 +11,6 @@ import {
 } from "lucide-react";
 
 import { TruncatedText } from "@/components/truncated-text";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
@@ -70,6 +70,11 @@ export function LiveView() {
     groups: [],
   });
   const [loadError, setLoadError] = useState<string | null>(null);
+  /**
+   * Bumped by the retry action. The catalog effect keys on it, so asking again re-runs the load
+   * without needing to change the selected source.
+   */
+  const [reloadToken, setReloadToken] = useState(0);
   const [epgPrograms, setEpgPrograms] = useState<EpgProgram[]>([]);
   const [epgError, setEpgError] = useState<string | null>(null);
   const [epgMode, setEpgMode] = useState<EpgAdapterResult["mode"]>("empty");
@@ -115,7 +120,7 @@ export function LiveView() {
     return () => {
       cancelled = true;
     };
-  }, [liveSource?.api, liveSource?.ext, liveSource?.key]);
+  }, [liveSource?.api, liveSource?.ext, liveSource?.key, reloadToken]);
 
   const channels = catalog.channels;
   const groups = catalog.groups;
@@ -522,30 +527,9 @@ export function LiveView() {
         </div>
       </header>
 
-      {/* Only a *catalog* failure is shown here: without channels there is nothing to watch, so
-          the reason has to be visible. A guide failure is different — the channel still plays,
-          and the strip below the player already says the guide is unavailable, so a banner on
-          top of a working player would report a problem the user does not have. The raw error
-          text (a reqwest chain naming DNS and deadlines) is not actionable either way; the
-          specific reason belongs in 播放诊断, where it can be read in full. */}
-      {loadError && (
-        <div className="shrink-0 px-3 pt-2">
-          <Alert variant="destructive" className="py-2">
-            <TriangleAlert
-              className="size-4"
-              data-icon="inline-start"
-              aria-hidden="true"
-            />
-            <AlertTitle className="text-xs font-semibold">
-              直播源请求失败
-            </AlertTitle>
-            <AlertDescription className="text-xs text-destructive/90">
-              无法读取这个直播源的频道列表，因此没有可播放的频道。
-              请检查该源的地址是否有效，或在配置中心重新测试它。
-            </AlertDescription>
-          </Alert>
-        </div>
-      )}
+      {/* No catalog-failure banner here. It used to sit above the whole workspace and pushed the
+          channel list and player down to report a problem the player area can state itself, which
+          is where every other playback failure is reported. The player surface below carries it. */}
 
       {/* Main Live Workspace: Dual-Pane (Left: Channel List, Right: Player + EPG) */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
@@ -632,6 +616,31 @@ export function LiveView() {
                   }
                 }}
               />
+            ) : loadError ? (
+              /* A catalog failure is reported here, in the player surface, because that is where
+                 every other playback failure appears and because without channels there is nothing
+                 this area could show instead. The reason is stated plainly; the raw error text (a
+                 reqwest chain naming DNS and deadlines) is not actionable, and 播放诊断 carries it
+                 in full for anyone who wants it. */
+              <div className="flex max-w-md flex-col items-center gap-3 px-8 text-center">
+                <TriangleAlert className="size-7 text-destructive/80" aria-hidden="true" />
+                <p className="text-sm font-medium text-foreground">
+                  直播源请求失败
+                </p>
+                <p className="text-xs leading-5 text-muted-foreground">
+                  无法读取这个直播源的频道列表，因此没有可播放的频道。
+                  请检查该源的地址是否有效，或在配置中心重新测试它。
+                </p>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setReloadToken((token) => token + 1)}
+                >
+                  <RotateCw className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                  重试
+                </Button>
+              </div>
             ) : (
               <div className="flex flex-col items-center gap-2 text-muted-foreground">
                 <Tv className="size-8 opacity-30" />
@@ -643,10 +652,11 @@ export function LiveView() {
               </div>
             )}
 
-            {/* No in-player alert here. The player already shows "无法播放当前内容" with a retry
-                action, and a second banner saying the same thing on top of it only competed for
-                attention. The specific cause is available in 播放诊断, which is where a user who
-                wants it will look. */}
+            {/* No in-player alert for a *playback* failure: the player already shows
+                "无法播放当前内容" with a retry action, and a second message saying the same thing on
+                top of it only competed for attention. The specific cause is available in 播放诊断,
+                which is where a user who wants it will look. A catalog failure is different — there
+                is no player to defer to — which is why it is rendered above. */}
           </div>
 
           {/* Bottom Live Control & EPG Strip (44px) */}

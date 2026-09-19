@@ -1,7 +1,16 @@
+import { useState } from "react";
 import { Clapperboard, Footprints, Radio, Trash2 } from "lucide-react";
 
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   Empty,
   EmptyContent,
@@ -46,6 +55,7 @@ interface HistoryViewProps {
 export function HistoryView({ onNavigate }: HistoryViewProps) {
   const history = useAppStore((state) => state.history);
   const clearHistory = useAppStore((state) => state.clearHistory);
+  const [clearOpen, setClearOpen] = useState(false);
 
   // The store keeps one ordered list; each column filters it, so both stay newest-first without
   // a second sort or a second stored order that could drift.
@@ -71,13 +81,71 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
             variant="ghost"
             size="sm"
             className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={clearHistory}
+            onClick={() => setClearOpen(true)}
           >
             <Trash2 className="size-3.5" aria-hidden="true" />
             清空足迹
           </Button>
         )}
       </header>
+
+      {/* Clearing asks which footprints, because there are two independent columns and wanting to
+          tidy one is not a reason to lose the other. It also confirms, which the old one-click
+          button did not: the records cannot be recovered. */}
+      <Dialog open={clearOpen} onOpenChange={setClearOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>清空哪些足迹？</DialogTitle>
+            <DialogDescription>
+              清空后无法恢复。影视与电视直播各自独立，可以只清理其中一边。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2">
+            {(
+              [
+                ["vod", "影视足迹", vodRecords.length],
+                ["live", "电视直播足迹", liveRecords.length],
+              ] as const
+            ).map(([kind, label, count]) => (
+              <Button
+                key={kind}
+                type="button"
+                variant="outline"
+                className="justify-between"
+                disabled={count === 0}
+                onClick={() => {
+                  clearHistory(kind);
+                  setClearOpen(false);
+                }}
+              >
+                <span>{label}</span>
+                <span className="tabular-nums text-muted-foreground">
+                  {count} 条
+                </span>
+              </Button>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setClearOpen(false)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                clearHistory();
+                setClearOpen(false);
+              }}
+            >
+              全部清空
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <ScrollArea
         className="min-h-0 flex-1"
@@ -233,8 +301,12 @@ function TimelineEntry({
   const title = isVod ? record.item.name : record.channel.name;
   // The line's display name, not its id: "dyttm3u8" is what the source calls it and what the
   // user saw in the episode rail, while the id is an internal key.
+  //
+  // `playLines` is typed as required but this record was read back from localStorage, so it may
+  // have been written by an older version or stored before the field was populated. Reading it
+  // unguarded took the whole page down with "Cannot read properties of undefined".
   const lineName = isVod
-    ? record.item.playLines.find((line) => line.id === record.lineId)?.name
+    ? record.item.playLines?.find((line) => line.id === record.lineId)?.name
     : undefined;
   const sourceName = isVod ? record.item.sourceName : record.sourceName;
   const hasProgress = isVod && record.progress > 5;

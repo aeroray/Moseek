@@ -317,6 +317,78 @@ describe("merging source lists", () => {
     expect(stableStringify(existing)).toBe(before);
     expect(stableStringify(incoming)).toBe(stableStringify([src({ name: "新" })]));
   });
+
+  it("keeps two entries from the SAME list that share an identity", () => {
+    // The author's own 配置 2 holds four pairs like this (米搜 / 米搜-2, Aid / Aid-2,
+    // xgapp / 骑骑影院, MV_vod / MV_vod-2). Merging that document appended the first and then
+    // matched the second against it, overwriting it — one entry vanished, which is what "少了一些
+    // 内容" was. Two entries in one list are two entries the user can see.
+    const incoming = [
+      src({ key: "米搜", name: "米盘搜搜", api: "csp_MIPanSo", ext: '{"a":1}' }),
+      src({ key: "米搜-2", name: "米搜搜索", api: "csp_MIPanSo", ext: '{"a":1}' }),
+    ];
+
+    const result = mergeSourceLists([src({ key: "other", api: "https://other/v" })], incoming);
+
+    expect(result.sources).toHaveLength(3);
+    expect(result.sources.map((s) => s.key)).toEqual(["other", "米搜", "米搜-2"]);
+  });
+
+  it("emits unique keys so the loader has nothing to rename", () => {
+    // The merge matches on identity, not on key, so a merged list can hold several entries sharing
+    // a display key (`Bili` appears three times across the author's configurations). The Rust
+    // loader renames duplicates on every read, which made the key the user saw change each time
+    // the page opened — the "内容都会变" report.
+    const existing = [src({ key: "Bili", api: "csp_Bili", ext: "a" })];
+    const incoming = [
+      src({ key: "Bili", api: "csp_Bili", ext: "b" }),
+      src({ key: "Bili", api: "csp_Bili", ext: "c" }),
+    ];
+
+    const result = mergeSourceLists(existing, incoming);
+
+    const keys = result.sources.map((s) => s.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toEqual(["Bili", "Bili-2", "Bili-3"]);
+  });
+
+  it("is stable when the same merge is applied twice", () => {
+    // The merged list is written back and merged again on the next import, so it has to be a fixed
+    // point: a second pass must change nothing, keys included.
+    const existing = [src({ key: "Bili", api: "csp_Bili", ext: "a" })];
+    const incoming = [
+      src({ key: "Bili", api: "csp_Bili", ext: "b" }),
+      src({ key: "other", api: "https://other/v" }),
+    ];
+
+    const once = mergeSourceLists(existing, incoming);
+    const twice = mergeSourceLists(once.sources, incoming);
+
+    expect(twice.added).toBe(0);
+    expect(twice.sources.map((s) => s.key)).toEqual(once.sources.map((s) => s.key));
+  });
+
+  it("treats an ext object and its JSON-encoded twin as the same source", () => {
+    // A configuration writes `ext` as an object; the parser stores it as a string. Without this the
+    // raw text and the source list report the same site under two identities, so the two halves of
+    // a stored document drift apart (8 mismatches in the author's database).
+    //
+    // The string form here is deliberately NOT in canonical order and carries extra whitespace, so
+    // a plain string comparison cannot pass by coincidence — an earlier version of this test used a
+    // canonical string and stayed green even with the normalisation removed.
+    const asObject = sourceIdentity({ api: "csp_WoGG", ext: { "Cloud-drive": "x.txt" } });
+    const asString = sourceIdentity({
+      api: "csp_WoGG",
+      ext: '{ "Cloud-drive" : "x.txt" }',
+    });
+    expect(asString).toBe(asObject);
+  });
+
+  it("still treats genuinely different ext objects as different", () => {
+    const a = sourceIdentity({ api: "csp_WoGG", ext: { "Cloud-drive": "a.txt" } });
+    const b = sourceIdentity({ api: "csp_WoGG", ext: { "Cloud-drive": "b.txt" } });
+    expect(a).not.toBe(b);
+  });
 });
 
 describe("carrying local source state", () => {

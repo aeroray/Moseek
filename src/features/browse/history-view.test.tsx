@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { HistoryView } from "@/features/browse/history-view";
@@ -328,7 +328,62 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    screen.getByRole("button", { name: /清空足迹/ }).click();
+    // Clearing is destructive and irreversible, so it now asks first and names the scope.
+    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /全部清空/ }));
+
     expect(useAppStore.getState().history).toHaveLength(0);
+  });
+
+  it("clears one kind of footprint without touching the other", () => {
+    // Wanting to tidy the film history is not a reason to lose the channel history.
+    useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /影视足迹/ }));
+
+    const remaining = useAppStore.getState().history;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].kind).toBe("live");
+  });
+
+  it("clears the live footprints on their own too", () => {
+    useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /电视直播足迹/ }));
+
+    const remaining = useAppStore.getState().history;
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].kind).toBe("vod");
+  });
+
+  it("offers only the kinds that have something in them", () => {
+    // A button that would clear nothing is a control the user cannot act on.
+    useAppStore.setState({ history: [vodFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+
+    expect(screen.getByRole("button", { name: /影视足迹/ })).toBeEnabled();
+    expect(screen.getByRole("button", { name: /电视直播足迹/ })).toBeDisabled();
+  });
+
+  it("renders a footprint whose item is missing playLines", () => {
+    // The record comes back from localStorage, so it may predate a field or have been stored
+    // partially filled. Reading `playLines` unguarded took the whole page down with
+    // "Cannot read properties of undefined", which the error boundary turned into 界面错误.
+    const record = vodFootprint();
+    const withoutLines = {
+      ...record,
+      item: { ...record.item, playLines: undefined },
+    } as unknown as FootprintRecord;
+    useAppStore.setState({ history: [withoutLines] });
+
+    render(<HistoryView onNavigate={() => {}} />);
+
+    expect(screen.getByText("冬城猎凶")).toBeInTheDocument();
   });
 });

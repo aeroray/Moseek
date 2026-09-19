@@ -158,6 +158,9 @@ export interface LiveFootprint {
 
 export type FootprintRecord = VodFootprint | LiveFootprint;
 
+/** Which column a footprint belongs to, for actions that act on one kind at a time. */
+export type FootprintKind = FootprintRecord["kind"];
+
 export interface LiveGroup {
   id: string;
   name: string;

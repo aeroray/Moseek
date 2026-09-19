@@ -10,6 +10,7 @@ import {
 import { favoriteKey } from "@/lib/favorite-key";
 import type {
   FavoriteProgress,
+  FootprintKind,
   FootprintRecord,
   LiveChannel,
   LiveFavorite,
@@ -141,7 +142,14 @@ interface AppStore {
   addVodFootprint: (record: Omit<VodFootprint, "kind" | "id" | "updatedAt">) => void;
   /** Records a channel that was watched. */
   addLiveFootprint: (channel: LiveChannel, sourceName: string) => void;
-  clearHistory: () => void;
+  /**
+   * Clears footprints of one kind, or all of them.
+   *
+   * Clearing everything was the only option, which meant a user who wanted to tidy their film
+   * history had to lose their channel history too. The kind is named so each column can offer its
+   * own action.
+   */
+  clearHistory: (kind?: FootprintKind) => void;
   clearFavorites: () => void;
   toggleFavorite: (item: VodItem) => void;
   setPlaybackProgress: (historyId: string, seconds: number) => void;
@@ -390,10 +398,27 @@ export const useAppStore = create<AppStore>()(
             ].slice(0, 200),
           };
         }),
-      // Playback progress is keyed by history id and has no meaning without the record it
-      // belongs to, so clearing the history clears it too. Favourites are a separate list and
-      // are deliberately left alone.
-      clearHistory: () => set({ history: [], playbackProgress: {} }),
+      // Playback progress is keyed by history id and has no meaning without the record it belongs
+      // to, so clearing history drops the progress of exactly the records that went. Favourites are
+      // a separate list and are deliberately left alone.
+      clearHistory: (kind) =>
+        set((state) => {
+          if (kind === undefined) return { history: [], playbackProgress: {} };
+          const removing = new Set(
+            state.history
+              .filter((record) => record.kind === kind)
+              .map((record) => record.id),
+          );
+          const playbackProgress = Object.fromEntries(
+            Object.entries(state.playbackProgress).filter(
+              ([id]) => !removing.has(id),
+            ),
+          );
+          return {
+            history: state.history.filter((record) => record.kind !== kind),
+            playbackProgress,
+          };
+        }),
       clearFavorites: () => set({ favorites: [] }),
       /**
        * Adds or removes a favourite, storing the item whole.

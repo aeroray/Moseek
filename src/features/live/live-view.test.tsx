@@ -304,9 +304,10 @@ describe("LiveView EPG rendering", () => {
   });
 
   it("surfaces a live catalog request failure instead of showing an empty list", async () => {
-    // Without channels there is nothing to watch, so the reason has to be visible. The raw error
-    // text is not shown: a reqwest chain naming DNS and deadlines is not actionable. What the
-    // user can act on is stated instead.
+    // Without channels there is nothing to watch, so the reason has to be visible. It is reported
+    // in the player surface — where every other playback failure appears — rather than as a banner
+    // above the workspace, which pushed the list and player down to say the same thing. The raw
+    // error text is not shown: a reqwest chain naming DNS and deadlines is not actionable.
     loadLiveCatalog.mockResolvedValue({
       data: { channels: [], groups: [] },
       error: "直播源请求失败",
@@ -316,8 +317,51 @@ describe("LiveView EPG rendering", () => {
 
     expect(await screen.findByText("直播源请求失败")).toBeInTheDocument();
     expect(screen.getByText(/无法读取这个直播源的频道列表/)).toBeInTheDocument();
-    // The provider's raw message is not surfaced as the user-facing explanation.
-    expect(screen.queryByText("直播源请求失败", { selector: "p" })).toBeNull();
+
+    // It sits inside the player surface, not in a banner above the workspace.
+    const playerSurface = document.querySelector(".bg-black");
+    expect(playerSurface).not.toBeNull();
+    expect(playerSurface).toHaveTextContent("直播源请求失败");
+    expect(document.querySelector("[data-slot='alert']")).toBeNull();
+
+    // The provider's raw message is not used as the explanation.
+    expect(screen.queryByText(/reqwest|dns|deadline/i)).toBeNull();
+  });
+
+  it("lets the user ask for the catalog again after a failure", async () => {
+    // The failure names a source problem the user may have just fixed, so the retry has to exist
+    // where the failure is reported.
+    loadLiveCatalog.mockResolvedValueOnce({
+      data: { channels: [], groups: [] },
+      error: "直播源请求失败",
+    });
+    render(<LiveView />);
+
+    const retry = await screen.findByRole("button", { name: /重试/ });
+    loadLiveCatalog.mockResolvedValue({
+      data: {
+        channels: [
+          {
+            id: "c1",
+            name: "City News",
+            group: "默认",
+            streamUrls: ["https://live.example/a.m3u8"],
+            mediaKind: "hls",
+          },
+        ],
+        groups: [{ id: "默认", name: "默认" }],
+      },
+      error: null,
+    });
+    fireEvent.click(retry);
+
+    // The channel now appears in the list, and the failure message is gone. "City News" also
+    // reaches the player, so the list is what is asserted rather than the bare text.
+    const channelList = document.querySelector("aside");
+    await waitFor(() => {
+      expect(channelList).toHaveTextContent("City News");
+    });
+    expect(screen.queryByText("直播源请求失败")).toBeNull();
   });
 
   it("lets the channel list scroll instead of growing past its pane", async () => {

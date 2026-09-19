@@ -73,11 +73,33 @@ export const LOCAL_STATE_FIELDS = [
   "lastCheckedAt",
 ] as const;
 
-/** Collapses whitespace, lower-cases and drops trailing slashes so trivial differences agree. */
+/**
+ * Collapses whitespace, lower-cases and drops trailing slashes so trivial differences agree.
+ *
+ * A JSON-encoded string and the object it encodes are treated as the same value. `ext` is written as
+ * an object in a configuration file but stored as a string by the parser, so without this the raw
+ * text and the source list would report the same site under two different identities — measured on
+ * the author's own database, that alone accounted for 8 mismatches.
+ */
 function normalizeText(value: unknown): string {
   if (value === undefined || value === null) return "";
   if (typeof value === "string") {
-    return value.trim().toLowerCase().replace(/\/+$/, "");
+    const trimmed = value.trim();
+    // A string that happens to hold JSON is compared as the JSON it holds, so key order and
+    // whitespace do not make the same mapping look like two different ones. A configuration writes
+    // `ext` as an object while the parser stores it as a string, and the two spellings are only
+    // guaranteed to match if both sides go through the same canonical form.
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return stableStringify(JSON.parse(trimmed)).toLowerCase();
+      } catch {
+        // Not actually JSON; fall through to the plain string form.
+      }
+    }
+    return trimmed.toLowerCase().replace(/\/+$/, "");
   }
   // `ext` is a string for most dialects but an object for others (XBPQ ships a mapping). Both are
   // meaningful, so both are folded into a stable comparison key rather than dropped.
@@ -114,35 +136,28 @@ function normalizeSiteTypeValue(value: unknown): string {
 }
 
 /**
- * The identity of a site inside the raw configuration.
+ * The identity of a source: the pair that says which site this is.
+ *
+ * Used by BOTH merges — the raw configuration and the source snapshot — and they must agree, or the
+ * two halves of a stored document describe different sets: the raw text keeps entries the list has
+ * already collapsed (leaving duplicate keys for the loader to rename on every read) and the list
+ * loses entries the text still holds.
  *
  * `key` is deliberately excluded: it is a display label that differs between configurations for the
- * same site, and is reused across configurations for different sites. See the module comment.
- */
-export function rawSiteIdentity(site: JsonObject): string {
-  return [
-    normalizeSiteTypeValue(site.type),
-    normalizeText(site.api),
-    normalizeText(site.ext),
-  ].join("|");
-}
-
-/**
- * The identity of a parsed source, used to carry the user's own state across an import.
- *
- * Deliberately the same `api + ext` pair as {@link rawSiteIdentity} and deliberately NOT including
- * `sourceType`: the stored snapshots were written by an older parser that called every site
- * `"parser"` while the current parser calls the same site `"cms"`, so including it makes every
- * existing snapshot unmatchable and silently discards the user's switches and test results on the
- * first import after upgrading. Measured on the author's three real configurations: dropping
- * `sourceType` changes no merge outcome at all — 335 distinct sources either way, and no group ever
- * joins a live source to a non-live one.
+ * same site, and is reused across configurations for different sites. `type` is excluded because
+ * measuring the author's three configurations showed including it changes no outcome at all — the
+ * same 335 distinct sites either way, and no group ever joins a live source to a non-live one.
  */
 export function sourceIdentity(source: {
-  api?: string;
+  api?: unknown;
   ext?: unknown;
 }): string {
   return [normalizeText(source.api), normalizeText(source.ext)].join("|");
+}
+
+/** The identity of a site inside the raw configuration. Delegates, so the two cannot drift. */
+export function rawSiteIdentity(site: JsonObject): string {
+  return sourceIdentity(site);
 }
 
 /** Per-collection identity. Collections without a natural key fall back to whole-value equality. */
@@ -190,6 +205,12 @@ export interface MergeReport {
  * Unions one collection. The existing order is preserved so the list does not reshuffle on import;
  * a matching entry keeps its position but takes the incoming definition, which is what "the
  * configuration I just imported wins" means in practice.
+ *
+ * An entry is only ever matched against the *other* side, never against another entry of the same
+ * batch. Two entries inside one configuration that happen to share an identity are two entries the
+ * user can see, and collapsing them would silently delete one: the author's own 配置 2 holds four
+ * such pairs (米搜 / 米搜-2, Aid / Aid-2, xgapp / 骑骑影院, MV_vod / MV_vod-2), and merging that
+ * document used to overwrite the first with the second.
  */
 function mergeCollection(
   existing: JsonValue[],
@@ -197,21 +218,38 @@ function mergeCollection(
   collection: string,
 ): { merged: JsonValue[]; report: CollectionMerge } {
   const merged = [...existing];
-  const indexByIdentity = new Map<string, number>();
+  const slotsByIdentity = new Map<string, number[]>();
   merged.forEach((item, index) => {
-    indexByIdentity.set(identityFor(collection, item), index);
+    const identity = identityFor(collection, item);
+    const slots = slotsByIdentity.get(identity);
+    if (slots) slots.push(index);
+    else slotsByIdentity.set(identity, [index]);
   });
 
+  // Positions already claimed by this batch, so a second entry with the same identity appends
+  // instead of overwriting the one just placed.
+  const claimed = new Set<number>();
   const report: CollectionMerge = { added: 0, updated: 0, unchanged: 0 };
+
   for (const item of incoming) {
     const identity = identityFor(collection, item);
-    const at = indexByIdentity.get(identity);
+    const free = (slotsByIdentity.get(identity) ?? []).filter(
+      (index) => !claimed.has(index),
+    );
+    const at = free.length > 0 ? free[free.length - 1] : undefined;
+
     if (at === undefined) {
-      indexByIdentity.set(identity, merged.length);
+      const index = merged.length;
       merged.push(item);
+      const slots = slotsByIdentity.get(identity);
+      if (slots) slots.push(index);
+      else slotsByIdentity.set(identity, [index]);
+      claimed.add(index);
       report.added += 1;
       continue;
     }
+
+    claimed.add(at);
     if (stableStringify(merged[at]) === stableStringify(item)) {
       report.unchanged += 1;
       continue;
@@ -294,6 +332,19 @@ export function mergeRawConfigs(
 
     // Unknown top-level keys: incoming wins when present, otherwise the existing value stands.
     raw[key] = after;
+  }
+
+  // `sites` and `lives` are the collections the source list is built from, and their keys must be
+  // unique in the stored text. The merge matches on identity, not on key, so a merged configuration
+  // legitimately holds several entries sharing a display key (`Bili` appears three times across the
+  // author's three configurations); the Rust loader renames those on every read, which made the key
+  // the user sees change each time the page opened. Assigning the suffixes here means the stored
+  // text is already unique, and the loader has nothing left to rename.
+  for (const collection of ["sites", "lives"] as const) {
+    const items = raw[collection];
+    if (Array.isArray(items)) {
+      raw[collection] = ensureUniqueKeys(items as { key?: string }[]);
+    }
   }
 
   return { raw, report };
@@ -420,6 +471,7 @@ export interface SourceMergeResult<T> {
  */
 export function mergeSourceLists<
   T extends {
+    key?: string;
     api?: string;
     ext?: unknown;
     capability?: string;
@@ -427,24 +479,41 @@ export function mergeSourceLists<
   },
 >(existing: T[], incoming: T[]): SourceMergeResult<T> {
   const merged = [...existing];
-  const indexByIdentity = new Map<string, number>();
+  const slotsByIdentity = new Map<string, number[]>();
   merged.forEach((source, index) => {
-    indexByIdentity.set(sourceIdentity(source), index);
+    const identity = sourceIdentity(source);
+    const slots = slotsByIdentity.get(identity);
+    if (slots) slots.push(index);
+    else slotsByIdentity.set(identity, [index]);
   });
 
+  // Positions claimed by this batch. Without it, two entries in the same incoming list that share
+  // an identity would both resolve to the first free slot and one would overwrite the other —
+  // which is exactly how the author's 配置 2 lost 米搜 to 米搜-2.
+  const claimed = new Set<number>();
   let added = 0;
   let updated = 0;
   let unchanged = 0;
 
   for (const source of incoming) {
     const identity = sourceIdentity(source);
-    const at = indexByIdentity.get(identity);
+    const free = (slotsByIdentity.get(identity) ?? []).filter(
+      (index) => !claimed.has(index),
+    );
+    const at = free.length > 0 ? free[free.length - 1] : undefined;
+
     if (at === undefined) {
-      indexByIdentity.set(identity, merged.length);
+      const index = merged.length;
       merged.push(source);
+      const slots = slotsByIdentity.get(identity);
+      if (slots) slots.push(index);
+      else slotsByIdentity.set(identity, [index]);
+      claimed.add(index);
       added += 1;
       continue;
     }
+
+    claimed.add(at);
     const before = merged[at];
     // A plain record for the copy: an intersection with a generic parameter is readable but not
     // writable, and the fields being restored are not part of the generic's known shape.
@@ -465,5 +534,34 @@ export function mergeSourceLists<
     updated += 1;
   }
 
-  return { sources: merged, added, updated, unchanged };
+  return { sources: ensureUniqueKeys(merged), added, updated, unchanged };
+}
+
+/**
+ * Gives every entry a distinct key.
+ *
+ * The merge dedupes by `api + ext` and keeps each source's own key, so a merged configuration can
+ * legitimately hold several entries whose key is the same (`Bili` appears three times in the
+ * author's three configurations, `荐片` three times, and so on). The Rust loader calls
+ * `ensure_unique_source_keys` on every read, which renames those to `Bili-2`, `Bili-3`, … — so the
+ * key the UI shows changed on every visit to the page. Assigning the suffixes here means the stored
+ * data is already unique and the loader has nothing left to rename.
+ */
+function ensureUniqueKeys<
+  T extends { key?: string },
+>(sources: T[]): T[] {
+  const used = new Set<string>();
+  const nextSuffix = new Map<string, number>();
+  return sources.map((source) => {
+    const original = source.key ?? "";
+    let suffix = nextSuffix.get(original) ?? 2;
+    let unique = original;
+    while (used.has(unique)) {
+      unique = `${original}-${suffix}`;
+      suffix += 1;
+    }
+    nextSuffix.set(original, suffix);
+    used.add(unique);
+    return unique === original ? source : { ...source, key: unique };
+  });
 }
