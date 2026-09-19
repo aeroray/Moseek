@@ -2907,6 +2907,15 @@ function describeSourceDialect(
   return labels[dialect];
 }
 
+/**
+ * The word for a test status.
+ *
+ * `blocked` reads 未执行 rather than 未执行（缺少适配器）. The status has four causes — a spider or
+ * remote-JAR family, a record missing its address, an unbound local script archive, or a search the
+ * configuration marked unavailable — and only some of them are about an adapter at all. The author
+ * hit this on an XBPQ source whose adapter plainly exists, where the parenthetical was simply false.
+ * The 说明 row beside it carries the actual reason, so the label only has to say what happened.
+ */
 function testStatusLabel(source: SourceRecord) {
   return (
     {
@@ -2914,7 +2923,7 @@ function testStatusLabel(source: SourceRecord) {
       passed: "通过",
       empty: "没有内容",
       failed: "失败",
-      blocked: "未执行（缺少适配器）",
+      blocked: "未执行",
     }[source.testStatus ?? "untested"] ?? "尚未测试"
   );
 }

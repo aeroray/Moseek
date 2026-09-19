@@ -662,6 +662,66 @@ describe("config center", () => {
     expect(within(sheet).getByText(/缺少 key、name 或 api/)).toBeInTheDocument();
   });
 
+  it("does not blame a missing adapter for a test that was blocked", () => {
+    // `blocked` has four causes — a spider or remote-JAR family, a record with no usable address,
+    // an unbound local script archive, and a search the configuration marked unavailable — and only
+    // some of them are about an adapter. The label claimed 缺少适配器 for all of them, which was
+    // simply false on an XBPQ source whose adapter plainly exists. The 说明 row carries the reason.
+    const blockedTest = source({
+      key: "blocked-test",
+      name: "被阻止的源",
+      api: "csp_XBPQ",
+      siteProtocol: "xbpq",
+      testStatus: "blocked",
+      testMessage: "Spider、远程脚本或 JAR 适配器当前不会执行。",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [blockedTest] });
+    });
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("被阻止的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).getByText("未执行")).toBeInTheDocument();
+    expect(within(sheet).queryByText(/缺少适配器/)).not.toBeInTheDocument();
+    // The reason is still stated, so removing the parenthetical loses nothing.
+    expect(
+      within(sheet).getByText(/Spider、远程脚本或 JAR/),
+    ).toBeInTheDocument();
+  });
+
+  it("offers a test only where the backend would actually run one", () => {
+    // The interface and the backend have to agree about the same source: the button here and the
+    // Rust `ensure_executable` gate both decide from the adapter family. The author hit the case
+    // where the button was offered and the backend answered "缺少适配器" — a source whose stored
+    // `siteProtocol` was null while its api named the family.
+    const staleXbpq = source({
+      key: "stale-xbpq",
+      name: "旧协议字段的源",
+      api: "csp_XBPQ",
+      siteProtocol: null,
+      jar: "https://example.com/1.jar",
+      capability: "blocked",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [staleXbpq] });
+    });
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("旧协议字段的源"));
+    // The adapter is recognised from the api, so the row is on the usable side and has a switch.
+    expect(row).toBeTruthy();
+    expect(
+      screen.getByRole("switch", { name: "启用 旧协议字段的源" }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the page itself from scrolling and gives the list the scrollbar", () => {
     // The list is the tallest thing here; letting the page scroll as a whole pushed the controls
     // out of view. jsdom cannot measure overflow, so the class contract is what is pinned.

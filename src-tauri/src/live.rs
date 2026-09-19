@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
+    adapters::is_fetchable_live_url,
     cms::SourceTestResult,
     policy::{fetch_text, fetch_text_following_redirects, validate_remote_url},
     SourceOperationResult, SourceRecord,
@@ -65,8 +66,10 @@ pub async fn load_live_source(source: SourceRecord) -> Result<LiveCatalog, Strin
     if source.source_type != "live" {
         return Err("该源不是直播适配器支持的 live 类型。".to_string());
     }
-    if source.capability == "blocked" || source.capability == "invalid" {
-        return Err(source.capability_note);
+    // Derived from the address rather than from the stored `capability`, which the parser writes at
+    // import time and never revisits. See `SiteAdapterKind::ensure_executable`.
+    if !is_fetchable_live_url(&source.api) {
+        return Err("该直播源的地址不是可请求的 HTTP 地址，当前不会执行。".to_string());
     }
     let source_key = source.key;
     let source_url = source.api;
@@ -159,12 +162,12 @@ async fn test_live_source_inner(source: SourceRecord) -> Result<SourceTestResult
     let source_key = source.key.clone();
     let started = Instant::now();
     let tested_at = "刚刚".to_string();
-    if source.source_type != "live" || source.capability != "supported" {
+    if source.source_type != "live" || !is_fetchable_live_url(&source.api) {
         return Ok(SourceTestResult {
             source_key,
             status: "blocked".to_string(),
             adapter_id: "builtin-live".to_string(),
-            message: "该源不满足可执行的直播适配器条件。".to_string(),
+            message: "该源的地址不是可请求的 HTTP 地址，无法测试。".to_string(),
             item_count: 0,
             category_count: 0,
             duration_ms: started.elapsed().as_millis() as u64,
@@ -172,7 +175,7 @@ async fn test_live_source_inner(source: SourceRecord) -> Result<SourceTestResult
             operations: vec![SourceOperationResult {
                 operation: "catalog".to_string(),
                 status: "blocked".to_string(),
-                message: "该源不满足可执行的直播适配器条件。".to_string(),
+                message: "该源的地址不是可请求的 HTTP 地址，无法测试。".to_string(),
                 duration_ms: started.elapsed().as_millis() as u64,
             }],
         });
