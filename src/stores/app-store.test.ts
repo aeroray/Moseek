@@ -4,9 +4,27 @@ import {
   migrateFavorites,
   migrateHistory,
   migrateLiveFavorites,
+  migrateSources,
   useAppStore,
 } from "@/stores/app-store";
-import type { LiveChannel, VodItem } from "@/types/moseek";
+import type { LiveChannel, SourceRecord, VodItem } from "@/types/moseek";
+
+function storedSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
+  return {
+    key: "demo",
+    name: "示例源",
+    sourceType: "cms",
+    api: "https://example.com/api.php/provide/vod/",
+    searchable: true,
+    filterable: true,
+    capability: "supported",
+    capabilityNote: "普通 HTTP API。",
+    enabled: true,
+    lastCheckedAt: "刚刚",
+    requestCount: 0,
+    ...overrides,
+  };
+}
 
 function legacyItem(): VodItem {
   return {
@@ -24,6 +42,54 @@ function legacyItem(): VodItem {
     playLines: [],
   };
 }
+
+describe("capability migration", () => {
+  it("rewrites the removed 部分支持 state instead of rendering it", () => {
+    // `partial` was deleted from CapabilityStatus because nothing could produce it. Documents
+    // written by an older version still carry it, and rendering it literally is what put 部分支持
+    // on rows whose adapter column said 没有可用适配器.
+    const [migrated] = migrateSources([
+      storedSource({ capability: "partial" as never }),
+    ]);
+
+    expect(migrated.capability).toBe("needs-adapter");
+  });
+
+  it("leaves every state the current model can produce untouched", () => {
+    for (const capability of [
+      "supported",
+      "needs-adapter",
+      "blocked",
+      "invalid",
+    ] as const) {
+      const [migrated] = migrateSources([storedSource({ capability })]);
+      expect(migrated.capability).toBe(capability);
+    }
+  });
+
+  it("folds an unrecognised value to invalid rather than guessing", () => {
+    // A value the model cannot interpret is a record that cannot be trusted; `invalid` says so,
+    // and inventing a friendlier word would hide that.
+    const [migrated] = migrateSources([
+      storedSource({ capability: "something-else" as never }),
+    ]);
+
+    expect(migrated.capability).toBe("invalid");
+  });
+
+  it("returns the same object when nothing needed changing", () => {
+    // The list is rendered on every keystroke, so an unconditional copy would churn identities.
+    const source = storedSource({ capability: "supported" });
+    const [migrated] = migrateSources([source]);
+
+    expect(migrated).toBe(source);
+  });
+
+  it("survives a missing or malformed list", () => {
+    expect(migrateSources(undefined)).toEqual([]);
+    expect(migrateSources(null as never)).toEqual([]);
+  });
+});
 
 describe("favourite storage migration", () => {
   it("keeps favourites saved in the old bare-item shape", () => {

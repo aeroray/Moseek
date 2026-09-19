@@ -58,7 +58,7 @@ describe("adapter registry", () => {
       getAdapterProfile(
         source({
           jar: "https://example.com/adapter.jar",
-          capability: "partial",
+          capability: "blocked",
         }),
       ).id,
     ).toBe("remote-jar");
@@ -107,20 +107,33 @@ describe("adapter registry", () => {
     expect(profile.operations).toContain("节目单");
   });
 
-  it("requires an executable CMS and a passed probe for the movie library", () => {
+  it("lets the adapter decide testability, not the stored capability", () => {
     expect(isTestableCmsSource(source({ testStatus: "untested" }))).toBe(true);
+    // The adapter has a code path, so the source is testable even though its stored capability
+    // predates that support. Requiring `capability === "supported"` here left 60 sources with a
+    // working XBPQ adapter permanently untestable and missing from the movie library.
     expect(
       isTestableCmsSource(
-        source({ capability: "partial", siteProtocol: "http-extension" }),
+        source({ capability: "blocked", siteProtocol: "http-extension" }),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(isTestableCmsSource(source({ sourceType: "live" }))).toBe(false);
     expect(isTestableLiveSource(source({ sourceType: "live" }))).toBe(true);
     expect(isTestableSource(source({ sourceType: "live" }))).toBe(true);
+    // A live source whose adapter exists is testable regardless of a stale stored capability.
     expect(
-      isTestableLiveSource(
-        source({ sourceType: "live", capability: "partial" }),
-      ),
+      isTestableLiveSource(source({ sourceType: "live", capability: "blocked" })),
+    ).toBe(true);
+    // An unparseable record is the one hard stop: no adapter can build a request from it.
+    expect(
+      isTestableLiveSource(source({ sourceType: "live", capability: "invalid" })),
+    ).toBe(false);
+    expect(
+      isTestableCmsSource(source({ capability: "invalid", siteProtocol: "http-extension" })),
+    ).toBe(false);
+    // An adapter that cannot run still decides, and it says no.
+    expect(
+      isTestableCmsSource(source({ siteProtocol: "spider", jar: "https://x/1.jar" })),
     ).toBe(false);
     // Listing in the movie library depends on being enabled, not on having been audited. A test
     // the user has not run yet is not a reason to hide a source they turned on.
@@ -134,7 +147,7 @@ describe("adapter registry", () => {
       isMovieLibrarySource(
         source({ capability: "blocked", testStatus: "passed" }),
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isMovieLibrarySource(source({ enabled: false, testStatus: "passed" })),
     ).toBe(false);

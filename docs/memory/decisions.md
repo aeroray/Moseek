@@ -535,3 +535,14 @@
   - **顺带排查**：`liveRecoveryAttempts` 用的是同类 ref 守卫，但它**在 await 之前同步 add、且没有 cleanup 取消**，所以 StrictMode 下是正确的（第二次挂载跳过、第一次的 promise 照常完成）。其余 `useRef(false)` 都是事件处理器标志位，与 effect 生命周期无关。
   - **测试隔离的一个坑**：mutation 时发现 mock 调用次数会跨用例累积（`toHaveBeenCalledTimes` 读到 7），在 `beforeEach` 里补了 `mockClear`/`mockReset`。
 - 本轮最终：前端 **409 项**、Rust 109 项、`clippy` 零警告、`pnpm build` 零警告。
+- **配置中心「状态显示部分支持、但适配器却没适配」（用户报）——不是文案问题，是两个权威在打架**：
+  - **`partial` 是一个没有任何代码能产生的状态**：parser 只赋 `supported`/`needs-adapter`/`blocked`/`invalid`（实测确认），适配器注册表里也没有任何 profile 用 `execution: "partial"`（9 个 enabled、5 个 blocked、2 个 needs-adapter）。用户那 17 条「部分支持」是**旧版本 parser 写进存储的遗留值**——提示文案「API 部分可用；存在远程 JAR 依赖」在整个 `src/` 里**搜不到**。**能进存储、却再也产生不出来的状态，是用户无法据以行动的状态**：直接**从模型里删掉**，而不是换个说法。
+  - **真正的矛盾在渲染逻辑**：`SourceStatusBadge` 在「没有可用适配器」时回退到 `CapabilityBadge status={source.capability}`，于是**状态列读能力值、适配器列读注册表**——同一行出现「部分支持 + 没有可用适配器」这种自相矛盾。修法：**两列都由适配器注册表驱动**，措辞在构造上不可能再冲突。
+  - **顺带挖出更严重的问题**：`isTestableCmsSource` 要求 `capability === "supported"`，而**存储的 capability 是导入时写入、之后永不更新**的。实测用户库里 **355 条中有 93 条 capability 已过期**，其中 **60 条适配器可用却因旧 capability 被判为不可测试**（55 条 xbpq + 5 条 csp-xyqhiker，都是现在已支持的声明式配置）。这 60 条**同时被错误地挡在影视库外**——用户明明开着它们。
+  - **修法：让适配器注册表成为「能不能跑」的唯一权威**（`isTestableSource` 只看 adapter execution），**只有 `invalid`（记录缺字段、连请求都构造不出来）是硬性拦截**。实测该规则下：**会变成可测试的 +69 条、会失去可测试性的 0 条**，影视库 22 → 37 条。**零回退**是这次敢改的前提。
+  - **遗留值在读取时归一化**（`migrateSources`）：`partial → needs-adapter`，无法识别的值 → `invalid`（诚实说明记录不可信，而不是猜一个好听的词）。`sources` 与 `configDocumentCache` 里的每套文档列表都要迁移。未变化的对象**返回原引用**，否则每次按键渲染都会换 identity。
+  - **措辞同时纠正**：`supported` 的能力徽章从「可用」改为「**可执行**」——它说的是 Moseek 能不能跑这个源，不是这个源好不好用；后者只有测试之后才知道。测试状态里 `empty`（无内容）借用警告色，不再借用一个模型里已不存在的状态。
+  - **一个测试夹具本身就在说谎**：`config-center.test.tsx` 里的「不可用的源」夹具用的是 `api: "csp_XBPQ"` + `siteProtocol: "xbpq"`——**正是 XBPQ 适配器能跑的那种源**。改契约后它一次性导致 **11 个测试失败**，因为它一直在断言「可跑的源是不可用的」。换成真正不可跑的（裸 spider + 远程 JAR）后全绿。**夹具必须能被现实中的同一条规则解释，否则它测的是夹具自己的假设。**
+  - **mutation 验证**：5 处改动逐一还原后新测试**全部变红**（`isTestableCmsSource`/`isTestableLiveSource` 重新要求 supported、`partial` 直通、未知值猜测、状态列回退到 capability）。**第一版「状态列」测试是假通过**——夹具的能力值恰好和适配器一致，两条路径打印同一个词；补了一个**故意自相矛盾**的夹具（`capability: supported` + 不可跑的 adapter）才真正覆盖。
+  - **浏览器实测**（真实数据形状，含用户那 17 条原文）：`部分支持` 全站消失；七新/奈飞/fok（旧 partial + 真适配器）→「待测试 + 已有适配器 + 开关」；小胡/远程 JAR →「**已阻止 + 没有可用适配器 + 破折号**」（两列终于一致）；「已适配」筛选**包含**旧状态的 XBPQ 源、「未适配」**排除**它们；开关只出现在 4 个能跑的源上。
+- 本轮最终：前端 **419 项**、Rust 109 项、`clippy` 零警告、`pnpm build` 零警告。

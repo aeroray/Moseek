@@ -162,13 +162,16 @@ type ImportMode = "remote" | "local";
  */
 const TEST_CONCURRENCY = 4;
 
-function matchesSourceFilter(
-  capability: CapabilityStatus,
-  filter: SourceFilter,
-) {
+/**
+ * Whether a source falls on the "可用" or the "不可用" side of the filter.
+ *
+ * Driven by the adapter, matching the status column: a source is usable when Moseek has a code path
+ * for it. This used to read `capability === "supported" || capability === "partial"`, which put
+ * sources with no adapter on the usable side and gave the removed `partial` state a meaning here.
+ */
+function matchesSourceFilter(source: SourceRecord, filter: SourceFilter) {
   if (filter === "all") return true;
-  const usable = capability === "supported" || capability === "partial";
-  return filter === "available" ? usable : !usable;
+  return filter === "available" ? isTestableSource(source) : !isTestableSource(source);
 }
 
 export function ConfigCenter() {
@@ -314,7 +317,6 @@ export function ConfigCenter() {
   const adapterStateCounts = useMemo(() => {
     const counts: Record<AdapterExecution, number> = {
       enabled: 0,
-      partial: 0,
       "needs-adapter": 0,
       blocked: 0,
     };
@@ -555,7 +557,7 @@ export function ConfigCenter() {
   const filteredSources = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     return sources.filter((source) => {
-      const matchesFilter = matchesSourceFilter(source.capability, sourceFilter);
+      const matchesFilter = matchesSourceFilter(source, sourceFilter);
       const matchesQuery =
         !normalizedQuery ||
         [source.name, source.key, source.api].some((value) =>
@@ -1511,9 +1513,10 @@ export function ConfigCenter() {
                             >
                               {/* A switch that cannot change anything is worse than a disabled
                                   one: it invites a click and silently does nothing. Unusable
-                                  sources get a dash, which says "not applicable" honestly. */}
-                              {source.capability === "supported" ||
-                              source.capability === "partial" ? (
+                                  sources get a dash, which says "not applicable" honestly. The
+                                  test is the same predicate the status column uses, so a row can
+                                  never offer a switch while telling the user it cannot run. */}
+                              {isTestableSource(source) ? (
                                 <Switch
                                   checked={source.enabled}
                                   onCheckedChange={() =>
@@ -1945,7 +1948,7 @@ export function ConfigCenter() {
                               <ReportRow
                                 label="私有协议"
                                 value={`${reportCounts["needs-adapter"]} 个待适配`}
-                                tone="partial"
+                                tone="warning"
                               />
                               <ReportRow
                                 label="危险执行路径"
@@ -2634,8 +2637,6 @@ function AdapterStatusBadge({ execution }: { execution: AdapterExecution }) {
   const toneClass = {
     enabled:
       "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
-    partial:
-      "border-[color:var(--status-partial-border)] bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]",
     "needs-adapter":
       "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] text-[color:var(--status-adapter)]",
     blocked:
@@ -2725,10 +2726,16 @@ function AdapterPresenceBadge({ source }: { source: SourceRecord }) {
 }
 
 function SourceStatusBadge({ source }: { source: SourceRecord }) {
-  // A source with no working adapter cannot be tested at all, so the adapter verdict is the
-  // final word and there is nothing further to say.
+  // The status column answers "where does this source stand". For a source with no runnable
+  // adapter the answer is the adapter's own verdict, not the capability the parser recorded at
+  // import time: those are two different questions, and asking the wrong one is what produced a row
+  // reading 部分支持 beside an adapter badge reading 没有可用适配器. `AdapterStatusBadge` renders
+  // 待适配 / 已阻止, which is the same word the adapter column uses, so the two can never disagree.
   if (!isTestableSource(source)) {
-    return <CapabilityBadge status={source.capability} />;
+    if (source.capability === "invalid") {
+      return <CapabilityBadge status="invalid" />;
+    }
+    return <AdapterStatusBadge execution={getAdapterProfile(source).execution} />;
   }
   // The adapter being able to run is a statement about our code, not about the source. Showing
   // 可用 before anything has been fetched told the user the resource works when all we knew was
@@ -2740,7 +2747,9 @@ function SourceStatusBadge({ source }: { source: SourceRecord }) {
   > = {
     untested: { label: "待测试", tone: "needs-adapter" },
     passed: { label: "可用", tone: "supported" },
-    empty: { label: "无内容", tone: "partial" },
+    // An empty result is not a capability state, so it borrows the warning colour rather than
+    // claiming a status the model no longer has.
+    empty: { label: "无内容", tone: "needs-adapter" },
     failed: { label: "测试失败", tone: "blocked" },
     blocked: { label: "不可用", tone: "blocked" },
   };
@@ -2962,7 +2971,7 @@ function ReportRow({
 }: {
   label: string;
   value: string;
-  tone?: "supported" | "partial" | "blocked";
+  tone?: "supported" | "warning" | "blocked";
 }) {
   return (
     <div className="flex items-baseline justify-between gap-4 px-4 py-2.5">
@@ -2971,7 +2980,7 @@ function ReportRow({
         className={cn(
           "text-sm font-medium tabular-nums",
           tone === "supported" && "text-[color:var(--status-supported)]",
-          tone === "partial" && "text-[color:var(--status-partial)]",
+          tone === "warning" && "text-[color:var(--status-partial)]",
           tone === "blocked" && "text-[color:var(--status-blocked)]",
           !tone && "text-foreground",
         )}

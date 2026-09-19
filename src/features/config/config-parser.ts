@@ -42,7 +42,6 @@ export interface ConfigTextTransformResult {
 
 const emptyCounts = {
   supported: 0,
-  partial: 0,
   "needs-adapter": 0,
   blocked: 0,
   invalid: 0,

@@ -1,6 +1,5 @@
 import {
   Ban,
-  CircleAlert,
   CircleCheck,
   CircleHelp,
   PlugZap,
@@ -11,21 +10,26 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type { CapabilityStatus } from "@/types/moseek";
 
+/**
+ * The words for each capability.
+ *
+ * There is no 部分支持 entry because there is no `partial` status: nothing in the codebase could
+ * assign it, and it only ever reached the screen from stale stored data, where it sat next to an
+ * adapter badge saying 没有可用适配器.
+ *
+ * "supported" reads 可执行 rather than 可用. It describes what Moseek can do — run the source — not
+ * whether the source works, which is only known after a test. Calling it 可用 claimed the resource
+ * was healthy when all we knew was that we had a way to ask.
+ */
 const capabilityConfig: Record<
   CapabilityStatus,
   { label: string; icon: LucideIcon; className: string }
 > = {
   supported: {
-    label: "可用",
+    label: "可执行",
     icon: CircleCheck,
     className:
       "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
-  },
-  partial: {
-    label: "部分支持",
-    icon: CircleAlert,
-    className:
-      "border-[color:var(--status-partial-border)] bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]",
   },
   "needs-adapter": {
     label: "需要适配",

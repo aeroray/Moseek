@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -83,14 +83,18 @@ function source(overrides: Partial<SourceRecord>): SourceRecord {
 }
 
 const supported = source({ key: "ok", name: "可用的源" });
+// Genuinely unrunnable: a bare `type: 3` spider that ships a remote JAR, which is the case the
+// adapter registry reports as blocked. The fixture used to be `csp_XBPQ` with an `xbpq` protocol —
+// a source the XBPQ adapter *does* handle — so it asserted that a runnable source was unusable.
 const blocked = source({
   key: "no",
   name: "不可用的源",
   capability: "blocked",
-  capabilityNote: "检测到远程脚本，默认阻止。",
+  capabilityNote: "检测到远程 JAR 依赖，Moseek 只记录和展示，不会下载或执行。",
   enabled: false,
-  api: "csp_XBPQ",
-  siteProtocol: "xbpq",
+  api: "https://blocked.example/spider",
+  siteProtocol: "spider",
+  jar: "https://blocked.example/1.jar",
 });
 const needsAdapter = source({
   key: "wait",
@@ -585,6 +589,143 @@ describe("config center", () => {
 
     expect(screen.getByText("没有匹配的适配器")).toBeInTheDocument();
     expect(screen.getByText(/换个关键词/)).toBeInTheDocument();
+  });
+
+  it("never shows 部分支持, which no code path could produce", () => {
+    // The state was removed from the model: the parser assigns only supported / needs-adapter /
+    // blocked / invalid, and no adapter profile claims partial execution. It survived in stored
+    // data from an older version, where the list rendered 部分支持 beside an adapter badge reading
+    // 没有可用适配器 — a row that said both "partly works" and "nothing can run it".
+    //
+    // The value is injected as unmigrated data on purpose: the store rewrites it on load, and the
+    // component must not resurrect the wording if one ever reaches it another way.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        sources: [
+          source({
+            key: "legacy",
+            name: "旧状态源",
+            capability: "partial" as never,
+            api: "proxy://legacy",
+          }),
+        ],
+      });
+    });
+    chooseFilter("未适配");
+
+    expect(screen.queryByText("部分支持")).not.toBeInTheDocument();
+    // It falls back to the adapter's verdict, which is a word the model still has.
+    expect(screen.getByText("待适配")).toBeInTheDocument();
+  });
+
+  it("lets the adapter, not a stale capability, word the status column", () => {
+    // A source whose stored capability claims more than its adapter can do. The status column used
+    // to render the capability, so this row read 可执行 next to an adapter badge saying 已阻止.
+    // The fixture is deliberately contradictory: that is the whole point.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        sources: [
+          source({
+            key: "overstated",
+            name: "状态虚高的源",
+            capability: "supported",
+            api: "https://overstated.example/spider",
+            siteProtocol: "spider",
+            jar: "https://overstated.example/1.jar",
+          }),
+        ],
+      });
+    });
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("状态虚高的源"));
+    expect(row).toBeTruthy();
+    const text = (row as HTMLElement).textContent ?? "";
+    // Both columns agree the adapter cannot run it.
+    expect(text).toContain("已阻止");
+    expect(text).not.toContain("可执行");
+  });
+
+  it("says the same thing in the status and adapter columns", () => {
+    // The two columns answer two questions, but they must never contradict: a row cannot claim a
+    // capability while the adapter beside it says there is nothing to run. Both are now driven by
+    // the adapter registry, so the wording agrees by construction.
+    renderCenter();
+    chooseFilter("未适配");
+
+    const rowFor = (name: string) => {
+      const cell = screen
+        .getAllByRole("row")
+        .find((row) => row.textContent?.includes(name));
+      expect(cell).toBeTruthy();
+      return (cell as HTMLElement).textContent ?? "";
+    };
+
+    // A source with no runnable adapter reads 已阻止 in both columns.
+    const blockedRow = rowFor("不可用的源");
+    expect(blockedRow).toContain("已阻止");
+    expect(blockedRow).not.toContain("可执行");
+    // And the state that used to appear here is gone for good.
+    expect(blockedRow).not.toContain("部分支持");
+
+    // A runnable one reads 已有适配器 in the adapter column while the status column reports the
+    // test, which is a different question and is allowed to say 待测试. The adapter cell leads with
+    // an icon whose accessible name carries the verdict, so that is what is asserted.
+    chooseFilter("已适配");
+    const supportedRow = rowFor("可用的源");
+    expect(supportedRow).toContain("已有适配器");
+    expect(supportedRow).toContain("待测试");
+    expect(supportedRow).not.toContain("部分支持");
+  });
+
+  it("offers the enable switch only where the adapter can run the source", () => {
+    // A switch on a row the page itself calls unrunnable invites a click that does nothing. This
+    // reads the same predicate the status column does, so the two cannot drift apart.
+    useAppStore.setState({
+      sources: [supported, blocked],
+      rawConfig: JSON.stringify({ sites: [] }),
+    });
+    renderCenter();
+
+    expect(
+      screen.getByRole("switch", { name: "启用 可用的源" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("switch", { name: "启用 不可用的源" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("treats a source with a working adapter as usable despite a stale capability", () => {
+    // The stored capability records what the parser concluded at import time and is never
+    // revisited; the adapter registry describes the code that exists now. Measured on the author's
+    // database, 60 sources with a working XBPQ adapter were untestable and missing from the movie
+    // library purely because their stored capability predated that support.
+    const stale = source({
+      key: "stale",
+      name: "状态过期的源",
+      capability: "blocked",
+      capabilityNote: "旧版本写入的状态。",
+      api: "csp_XBPQ",
+      siteProtocol: "xbpq",
+    });
+    // The state is set before rendering: `renderCenter` seeds the store, and a `setState` afterwards
+    // would not reach the already-mounted component.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [stale] });
+    });
+
+    // It appears in the usable list, which is the behaviour that was broken: the stale capability
+    // kept it out even though the adapter registry can run it.
+    expect(screen.getByText("状态过期的源")).toBeInTheDocument();
+    // And it is offered a switch, so the user can act on it.
+    expect(
+      screen.getByRole("switch", { name: "启用 状态过期的源" }),
+    ).toBeInTheDocument();
   });
 
   it("offers a shorter adapter filter without the state nothing maps to", () => {

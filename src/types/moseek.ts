@@ -1,6 +1,15 @@
+/**
+ * How far Moseek can go with a source.
+ *
+ * There is deliberately no "partial". It used to exist and was removed because nothing could ever
+ * produce it: the parser assigns only these four, and no adapter profile claims partial execution.
+ * It survived only in stored data written by an older version, where the config centre rendered it
+ * as 部分支持 next to an adapter badge reading 没有可用适配器 — a row that said both "partly works"
+ * and "there is nothing to run it". A status the code cannot produce is a status the user cannot
+ * act on, so the state was deleted rather than reworded.
+ */
 export type CapabilityStatus =
   | "supported"
-  | "partial"
   | "needs-adapter"
   | "blocked"
   | "invalid";

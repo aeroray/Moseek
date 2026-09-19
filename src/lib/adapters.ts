@@ -2,7 +2,6 @@ import type { SourceRecord, SourceType } from "@/types/moseek";
 
 export type AdapterExecution =
   | "enabled"
-  | "partial"
   | "needs-adapter"
   | "blocked";
 
@@ -239,7 +238,6 @@ export function adapterStatusLabel(execution: AdapterExecution) {
   // clicks "可执行 3 个源" then has to find those three rows, so the badge cannot say 已启用.
   return {
     enabled: "可执行",
-    partial: "部分支持",
     "needs-adapter": "待适配",
     blocked: "已阻止",
   }[execution];
@@ -249,6 +247,23 @@ function createProfile(id: AdapterId, sourceType: SourceType): AdapterProfile {
   return { id, sourceType, ...profiles[id] };
 }
 
+/**
+ * Whether Moseek has a code path that can actually run this source.
+ *
+ * **The adapter registry is the authority here, not the stored capability.** These are two answers
+ * to two different questions, and asking the wrong one produced a contradiction the user could see:
+ * a row reading 部分支持 in the status column while the adapter column said 没有可用适配器. The stored
+ * capability records what the parser concluded at import time and is never revisited; the adapter
+ * registry is derived from the source as it is now. When they disagree, the live derivation is the
+ * one describing the code that would run.
+ *
+ * Measured on the author's database, 93 of 355 stored capabilities were stale, and 60 sources with a
+ * working adapter were untestable purely because their stored capability predated the XBPQ support
+ * that now handles them. Those 60 were also missing from the movie library while switched on.
+ *
+ * `invalid` remains a hard stop: it means the record is missing the fields needed to build a
+ * request at all, so no adapter can help.
+ */
 export function isTestableCmsSource(source: SourceRecord) {
   if (source.sourceType !== "cms" || source.capability === "invalid") {
     return false;
@@ -257,11 +272,11 @@ export function isTestableCmsSource(source: SourceRecord) {
   if (source.scriptArchiveId !== null && source.scriptArchiveId !== undefined) {
     return profile.id === "local-script";
   }
-  return source.capability === "supported" && profile.execution === "enabled";
+  return profile.execution === "enabled";
 }
 
 export function isTestableLiveSource(source: SourceRecord) {
-  if (source.sourceType !== "live" || source.capability !== "supported") {
+  if (source.sourceType !== "live" || source.capability === "invalid") {
     return false;
   }
   return getAdapterProfile(source).execution === "enabled";

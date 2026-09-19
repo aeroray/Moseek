@@ -9,6 +9,7 @@ import {
 } from "@/lib/tauri";
 import { favoriteKey } from "@/lib/favorite-key";
 import type {
+  CapabilityStatus,
   FavoriteProgress,
   FootprintKind,
   FootprintRecord,
@@ -23,6 +24,46 @@ import type {
   VodFootprint,
   VodItem,
 } from "@/types/moseek";
+
+/**
+ * Rewrites a stored source whose capability the current code can no longer produce.
+ *
+ * "partial" was removed from `CapabilityStatus` because nothing could assign it — no parser branch
+ * and no adapter profile. Documents written by an older version still carry it, and rendering those
+ * literally is what put 部分支持 on rows that also said 没有可用适配器.
+ *
+ * The mapping is not a guess: `needs-adapter` was the closest surviving state, and the value only
+ * reaches the screen for sources that have no adapter, where the status column is already showing a
+ * capability badge rather than a test result. Anything unrecognised folds to `invalid`, which is the
+ * honest reading of a record the current model cannot interpret.
+ */
+function normalizeCapability(value: unknown): CapabilityStatus {
+  switch (value) {
+    case "supported":
+    case "needs-adapter":
+    case "blocked":
+    case "invalid":
+      return value;
+    case "partial":
+      return "needs-adapter";
+    default:
+      return "invalid";
+  }
+}
+
+/**
+ * Applies `normalizeCapability` across a stored source list.
+ *
+ * Exported for its own tests: this runs on data read back from disk, which is the one input that
+ * cannot be fixed by changing the code that writes it.
+ */
+export function migrateSources(sources: SourceRecord[] | undefined): SourceRecord[] {
+  if (!Array.isArray(sources)) return [];
+  return sources.map((source) => {
+    const capability = normalizeCapability(source.capability);
+    return capability === source.capability ? source : { ...source, capability };
+  });
+}
 
 const sourceToggleQueues = new Map<string, Promise<void>>();
 
@@ -532,13 +573,19 @@ export const useAppStore = create<AppStore>()(
           autoEpgEnabled:
             persisted?.autoEpgEnabled ?? currentState.autoEpgEnabled,
           configDocuments: persisted?.configDocuments ?? [],
-          configDocumentCache: persisted?.configDocumentCache ?? {},
+          // The cache holds each document's own source list, which carries the same legacy values.
+          configDocumentCache: Object.fromEntries(
+            Object.entries(persisted?.configDocumentCache ?? {}).map(([id, document]) => [
+              id,
+              { ...document, sources: migrateSources(document?.sources) },
+            ]),
+          ),
           activeConfigId: persisted?.activeConfigId ?? null,
           activeView:
             persistedActiveView === "home"
               ? "browse"
               : (persisted?.activeView ?? currentState.activeView),
-          sources: keepUserContent ? (persisted?.sources ?? []) : [],
+          sources: keepUserContent ? migrateSources(persisted?.sources) : [],
           history: keepUserContent ? migrateHistory(persisted?.history) : [],
           favorites: keepUserContent
             ? migrateFavorites(persisted?.favorites)

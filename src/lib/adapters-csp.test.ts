@@ -31,7 +31,7 @@ describe("CSP family identification", () => {
         key: "fok",
         api: "csp_XBPQ",
         siteProtocol: "spider",
-        capability: "partial",
+        capability: "blocked",
         jar: "https://example.com/1.jar",
       }),
     );
@@ -48,7 +48,7 @@ describe("CSP family identification", () => {
     ];
     for (const [key, api] of cases) {
       const profile = getAdapterProfile(
-        source({ key, api, siteProtocol: "spider", capability: "partial" }),
+        source({ key, api, siteProtocol: "spider", capability: "blocked" }),
       );
       expect(profile.id, `${api} with key "${key}"`).not.toBe("remote-jar");
       expect(profile.id, `${api} with key "${key}"`).not.toBe("spider-runtime");
