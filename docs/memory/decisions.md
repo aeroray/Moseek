@@ -501,3 +501,18 @@
   - **新增 `src/lib/font-stacks.test.ts`（4 项）**：jsdom 不会解析字体兜底，所以**钉的是契约**（sans 链在 monospace 之前、栈仍以 monospace 结尾、mono 字体仍在最前、token 已在 theme 块注册）。**4 个 mutation（含复现原始 bug）全部如期失败。**
   - **一个差点被放过的细节**：测试里 `const sans = ...` 未被使用被 eslint 抓出——**说明那条断言比我以为的弱**，补成「整条链是 `var(--font-sans)` 整段拼接，而不是照抄一份」（照抄会漂移，漂移正是这个 bug 回来的路径）。
 - 本轮最终：前端 **361 项**（新增 font-stacks 4 项）、Rust 107 项、`clippy` 零警告、`pnpm build` 零警告。
+- **配置模型从「多套配置」改为「单一中心配置」**（用户要求：每次导入都与现有配置合并去重，用户只维护一套，导出方便）：新增 `src/features/config/config-merge.ts` + `config-merge.test.ts`（30 项），Rust 新增 `replace_all_config_documents` 命令。导入路径不再新建文档，而是**合并进唯一那份**。
+  - **身份判定是这次改动最危险的一处，结论来自实测用户真实的三套配置（364 条源）**：
+    - **不能用 `key`**：有 **26 个 key 在多套配置里指向完全不同的源**（`Bili` 在一套是 `csp_Bili`、另一套是 `...Guard` 地址；`live-1` 是三个互不相干的直播地址）。按 key 去重会**静默删掉 26 个真源**。
+    - **也不能只用 `api`**：`csp_XBPQ` 被 **58 个不同站点**共用、`csp_Bili` 约 20 个，全靠 `ext` 区分。按 api 去重会把 **192 条源塌缩掉**。
+    - **最终用 `api + ext`**：364 → 350，**只去掉真正重复的，实测 0 条丢失、0 组误合并**（实测 `type` 加不加结果完全一样：都是 335 个不同站点、0 次直播/非直播误并，所以去掉了它）。
+    - **`type` 缺省必须折成 `1` 而不是空串**：TVBox 把没有 type 的站点当 type-1 JSON 源（解析器同样如此），拿 `""` 和 `"1"` 比会把同一个源当成两个——**而这正是同一站点从两份不同配置进来的常见形态**。
+  - **`sourceIdentity` 一度包含 `sourceType`，这是个会丢用户数据的真 bug**：库里存的快照写的是 `"parser"`，而现在的解析器对同一个源产出 `"cms"`——**包含它会让所有旧快照都匹配不上，升级后第一次导入就把用户的启用开关和测速结果全丢掉**。实测发现后去掉，并用 mutation 钉住。
+  - **合并必须在「原始配置文本」上做，而不是在解析后的源列表上**：解析模型不覆盖 TVBox 的全部字段，实测用户配置里有 **192 处只存在于原始文本的字段**（`changeable` ×128、`timeout` ×31、`categories` ×23、`playUrl`、`indexs`、`header`…）。**从解析结果重新生成配置会把这些全部静默丢弃**。改为逐集合做无损并集（sites/lives/parses/flags/doh/rules/ads/ijk），实测**字段种类 0 丢失**。
+  - **但源列表反过来不能用「合并后重新解析」得到**：解析器会把没有 scheme 的值按 base URL 解析，`csp_DouDouGuard` 会变成 `https://szyyds.cn/tv/csp_DouDouGuard`。**用一套配置的 base 去解析合并后的文本，会把另一套配置的相对路径改指到错误的服务器**（用户 doc2 有 51 条 `./libs/...`）。改为**直接合并快照列表**（`mergeSourceLists`），每条源保持原样。
+  - **冲突规则**（用户选择）：**新导入的内容为准，但保留本地开关与测速结果**；被降级为不支持的源强制关闭（`enabled` 在别处含义是「可安全使用」）。
+  - **旧数据库的迁移**：`configDocuments.length > 1` 时自动合并为「中心配置」并写回一条。**实测在一个真实数据库副本上跑完整流程**：3 套 → 1 套、5 条快照 → 4 条（跨套重复的那条被去重）、**0 条源丢失、0 个字段种类丢失、开关状态逐条比对 0 处不一致**、`active_config_document_id` 指向真实存在的行。
+  - **迁移里一个靠浏览器实测才发现的真 bug**：`setConfigDocument` 会把激活的文档**移到 `configDocuments` 数组最前面**，而 effect 依赖该数组——**重排导致 effect 重跑、cleanup 把 `cancelled` 置真，合并就在写入前被取消**（实测 `activateCalls: 3` 但 `replaceCalls: null`）。改为依赖**文档数量**、并在开始时一次性读取 id。**顺带修掉了我自己写的静默 `catch {}`**：它把这个错误完全吞掉，页面上什么提示都没有。
+  - **验证方法**：浏览器实测（3 套 → 1 套、`switchedOffPreserved: ['a']`、只存在于某套的 `ads`/`flags`/`wallpaper` 均保留、`hasSwitcher: false`）；mutation 测试 9 项（身份、ext、合并优先、本地状态、不支持源、集合保留、标量、相对路径）+ 3 项迁移（含上面那个重排 bug）**全部如期失败**。
+  - **一处差点放过的弱断言**：mutation 显示「本地状态」那条测试覆盖不到 `mergeSourceLists`（导入实际走的是它），补了一条针对它的测试后 mutation 才变红。
+- 本轮最终：前端 **398 项**（新增 config-merge 30 项、config-center 7 项）、Rust **109 项**、`clippy` 零警告、`pnpm build` 零警告。

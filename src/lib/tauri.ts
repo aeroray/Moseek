@@ -162,6 +162,19 @@ export async function saveConfigDocument(input: SaveConfigDocumentInput) {
 }
 
 /**
+ * Replaces every stored configuration with one merged document.
+ *
+ * Moseek keeps a single 中心配置, so the first launch after that became true collapses whatever
+ * the user already had into one row. The merging itself happens in `config-merge.ts`, beside the
+ * parser; this only performs the swap.
+ */
+export async function replaceAllConfigDocuments(input: SaveConfigDocumentInput) {
+  return invokeCommand<StoredConfigDocument>("replace_all_config_documents", {
+    input,
+  });
+}
+
+/**
  * Looks for an existing document that the configuration about to be imported resembles, so
  * the import can offer the user a choice instead of silently creating a near-duplicate.
  * Returns null when nothing similar is stored, and also in browser preview.

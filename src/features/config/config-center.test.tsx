@@ -4,7 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ToastHost } from "@/components/toast-host";
 import { ToastProvider } from "@/components/ui/toast";
 import { ConfigCenter } from "@/features/config/config-center";
-import { testSource as testSourceCommand } from "@/lib/tauri";
+import {
+  activateConfigDocument,
+  fetchConfigUrl,
+  replaceAllConfigDocuments,
+  saveConfigDocument,
+  testSource as testSourceCommand,
+} from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
 import type { SourceRecord, SourceTestResult } from "@/types/moseek";
 
@@ -23,6 +29,17 @@ vi.mock("@/lib/tauri", () => ({
   activateConfigDocument: vi.fn(),
   deleteConfigDocument: vi.fn(),
   saveConfigDocument: vi.fn(),
+  replaceAllConfigDocuments: vi.fn(async (input) => ({
+    id: 1,
+    name: input.name,
+    rawConfig: input.rawConfig,
+    normalizedConfig: input.normalizedConfig,
+    sources: input.sources,
+    sourceCount: input.sources.length,
+    liveCount: input.liveCount,
+    importedAt: "刚刚",
+    sourceBaseUrl: input.sourceBaseUrl ?? null,
+  })),
   setConfigSourceBaseUrl: vi.fn(),
   setSourceScriptArchive: vi.fn(),
   findConfigDuplicate: vi.fn(async () => null),
@@ -165,6 +182,29 @@ function adapterCard() {
   return card as HTMLElement;
 }
 
+/**
+ * Opens the import dialog, loads configuration text through the remote-fetch control and confirms
+ * the merge.
+ *
+ * The dialog's text editor is CodeMirror, which `fireEvent.change` cannot drive, so the test uses
+ * the remote path: a real input whose fetch is mocked. That is also the path a user takes when
+ * importing by URL, so the test still exercises the real controls rather than component internals.
+ */
+async function importConfigText(text: string, baseUrl = "https://imported.example/config.json") {
+  vi.mocked(fetchConfigUrl).mockResolvedValue(text);
+  fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+  const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+  fireEvent.change(input, { target: { value: baseUrl } });
+  fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
+  await waitFor(() => {
+    expect(screen.getByLabelText("配置文本")).toBeInTheDocument();
+  });
+  fireEvent.click(screen.getByRole("button", { name: /合并进中心配置/ }));
+  await waitFor(() => {
+    expect(replaceAllConfigDocuments).toHaveBeenCalled();
+  });
+}
+
 describe("config center", () => {
   afterEach(cleanup);
 
@@ -181,12 +221,13 @@ describe("config center", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps the archive to a single switcher row", () => {
-    // The archive used to be a five-column table with per-row buttons, which is more ceremony
-    // than picking a configuration deserves.
+  it("states the single centre configuration instead of offering a switcher", () => {
+    // The switcher existed because every import made a new document. Imports now merge, so there is
+    // nothing to switch between; the row only reports what the configuration currently is.
     renderCenter();
 
-    expect(screen.getByLabelText("切换配置")).toBeInTheDocument();
+    expect(screen.getByText("中心配置")).toBeInTheDocument();
+    expect(screen.queryByLabelText("切换配置")).not.toBeInTheDocument();
     expect(screen.queryByText("配置档案库")).not.toBeInTheDocument();
     expect(screen.queryByText("导入时间")).not.toBeInTheDocument();
     expect(screen.queryByText("当前使用")).not.toBeInTheDocument();
@@ -1066,5 +1107,208 @@ describe("config center", () => {
     expect(screen.getByText("没有需要阻止的内容")).toBeInTheDocument();
     expect(screen.queryByText("远程依赖")).not.toBeInTheDocument();
     expect(screen.queryByText("危险执行路径")).not.toBeInTheDocument();
+  });
+
+  it("merges an imported configuration into the centre configuration", async () => {
+    // The point of the feature: the user maintains one configuration, so an import adds to what is
+    // there instead of becoming a second document to keep track of.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [
+          { key: "新源", name: "新源", type: 1, api: "https://new.example/api.php/provide/vod" },
+        ],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    expect(saved).toBeTruthy();
+    const parsed = JSON.parse(saved!.rawConfig) as { sites: { key: string }[] };
+    const keys = parsed.sites.map((site) => site.key);
+    // The existing source is still there and the imported one joined it.
+    expect(keys).toContain("ok");
+    expect(keys).toContain("新源");
+  });
+
+  it("does not create a second document when importing", async () => {
+    // A regression here would quietly rebuild the pile of documents this replaced.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [{ key: "x", name: "x", type: 1, api: "https://x.example/api.php/provide/vod" }],
+      }),
+    );
+
+    expect(replaceAllConfigDocuments).toHaveBeenCalled();
+    expect(saveConfigDocument).not.toHaveBeenCalled();
+  });
+
+  it("reports what the merge changed", async () => {
+    // A merge that silently altered the source list would leave the user unsure whether their
+    // configuration had been replaced. The summary is on the page, not in the dialog, so it is
+    // still there after the dialog closes.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [
+          { key: "新源", name: "新源", type: 1, api: "https://new.example/api.php/provide/vod" },
+        ],
+      }),
+    );
+
+    expect(await screen.findByText(/已合并进/)).toBeInTheDocument();
+    expect(screen.getByText(/新增 1 个源/)).toBeInTheDocument();
+  });
+
+  it("deduplicates a source the import repeats under a different key", async () => {
+    // This is the case that makes merging worth having: the same site arrives again from another
+    // configuration under a different label, and the user should end up with one row, not two.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [
+          {
+            key: "别的名字",
+            name: "别的名字",
+            type: 1,
+            api: supported.api,
+          },
+        ],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const parsed = JSON.parse(saved!.rawConfig) as { sites: { key: string }[] };
+    // The fixture's raw config holds two sites; the import repeats one of them, so a third entry
+    // would mean the duplicate was appended instead of matched.
+    expect(parsed.sites).toHaveLength(2);
+    // The repeated site kept its position but took the incoming definition.
+    expect(parsed.sites[0].key).toBe("别的名字");
+
+    // The source list is unchanged in size for the same reason: nothing was appended.
+    expect(saved!.sources).toHaveLength(3);
+    const identities = saved!.sources.map((s) => `${s.api}|${s.ext ?? ""}`);
+    expect(new Set(identities).size).toBe(identities.length);
+  });
+
+  it("keeps the user's own switch when the same source is imported again", async () => {
+    // Whether a source is switched on is the user's choice; an import has no business resetting it.
+    renderCenter();
+    useAppStore.setState({
+      sources: [{ ...supported, enabled: false }],
+    });
+
+    await importConfigText(
+      JSON.stringify({
+        sites: [{ key: "ok", name: "可用的源", type: 1, api: supported.api }],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    expect(saved!.sources[0].enabled).toBe(false);
+  });
+
+  it("collapses a database that still holds several configurations", async () => {
+    // Moseek keeps one configuration now, so the first launch after upgrading has to merge the
+    // documents an older version left behind.
+    const documents = [
+      { id: 1, name: "第一套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      { id: 2, name: "第二套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-02T00:00:00.000Z" },
+    ];
+    const rawFor = (key: string, api: string) =>
+      JSON.stringify({ sites: [{ key, name: key, type: 1, api }] });
+
+    useAppStore.setState({
+      sources: [supported],
+      rawConfig: rawFor("first", "https://first.example/api.php/provide/vod"),
+      normalizedConfig: "{}",
+      configDocuments: documents,
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    vi.mocked(activateConfigDocument).mockImplementation(async (id: number) => ({
+      id,
+      name: id === 1 ? "第一套" : "第二套",
+      rawConfig:
+        id === 1
+          ? rawFor("first", "https://first.example/api.php/provide/vod")
+          : rawFor("second", "https://second.example/api.php/provide/vod"),
+      normalizedConfig: "{}",
+      sources: [supported],
+      sourceCount: 1,
+      liveCount: 0,
+      importedAt: "2026-01-01T00:00:00.000Z",
+      sourceBaseUrl: null,
+    }));
+
+    renderPage(<ConfigCenter />);
+
+    await waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalled();
+    });
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const sites = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites;
+    // Both configurations contributed a source.
+    expect(sites.map((s) => s.key).sort()).toEqual(["first", "second"]);
+    // And the store is left holding exactly one document.
+    await waitFor(() => {
+      expect(useAppStore.getState().configDocuments).toHaveLength(1);
+    });
+  });
+
+  it("survives the active document being reordered mid-collapse", async () => {
+    // `setConfigDocument` moves the activated document to the front of `configDocuments`. When the
+    // collapse effect depended on that array, the reorder re-ran the effect and its cleanup
+    // cancelled the collapse before it wrote anything — the migration silently did nothing.
+    const documents = [
+      { id: 1, name: "第一套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      { id: 2, name: "第二套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-02T00:00:00.000Z" },
+      { id: 3, name: "第三套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-03T00:00:00.000Z" },
+    ];
+    const rawFor = (key: string) =>
+      JSON.stringify({
+        sites: [{ key, name: key, type: 1, api: `https://${key}.example/api.php/provide/vod` }],
+      });
+
+    useAppStore.setState({
+      sources: [supported],
+      rawConfig: rawFor("one"),
+      normalizedConfig: "{}",
+      configDocuments: documents,
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    vi.mocked(activateConfigDocument).mockImplementation(async (id: number) => {
+      const key = ["one", "two", "three"][id - 1] ?? "x";
+      // Reordering the store here is what used to break the collapse.
+      useAppStore.setState((state) => ({
+        configDocuments: [
+          ...state.configDocuments.filter((d) => d.id === id),
+          ...state.configDocuments.filter((d) => d.id !== id),
+        ],
+      }));
+      return {
+        id,
+        name: `第 ${id} 套`,
+        rawConfig: rawFor(key),
+        normalizedConfig: "{}",
+        sources: [supported],
+        sourceCount: 1,
+        liveCount: 0,
+        importedAt: "2026-01-01T00:00:00.000Z",
+        sourceBaseUrl: null,
+      };
+    });
+
+    renderPage(<ConfigCenter />);
+
+    await waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalled();
+    });
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const sites = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites;
+    expect(sites).toHaveLength(3);
   });
 });

@@ -38,6 +38,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             healthcheck,
             config::commands::save_config_document,
+            config::commands::replace_all_config_documents,
             config::commands::load_active_config,
             config::commands::list_config_documents,
             config::commands::find_config_duplicate,

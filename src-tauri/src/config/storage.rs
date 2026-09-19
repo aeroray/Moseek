@@ -938,9 +938,98 @@ mod tests {
                    source_base_url TEXT,
                    live_count INTEGER NOT NULL DEFAULT 0,
                    imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                 );
+                 CREATE TABLE app_settings (
+                   key TEXT PRIMARY KEY,
+                   value TEXT NOT NULL,
+                   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                  );",
             )
             .unwrap();
+    }
+
+    /// The body of `replace_all_config_documents`, without the Tauri `State` wrapper, so the swap
+    /// itself can be tested directly.
+    fn replace_all_in_connection(
+        connection: &mut Connection,
+        name: &str,
+        raw_config: &str,
+        sources: &[SourceRecord],
+    ) -> ConfigDocument {
+        let sources_json = serialize_sources(sources).unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute("DELETE FROM config_documents", []).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, source_base_url, live_count) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
+                params![name, raw_config, "{}", sources_json],
+            )
+            .unwrap();
+        let id = transaction.last_insert_rowid();
+        transaction
+            .execute(
+                "INSERT INTO app_settings (key, value) VALUES ('active_config_document_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![id.to_string()],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
+        load_config_document(connection, id).unwrap().unwrap()
+    }
+
+    #[test]
+    fn collapsing_leaves_exactly_one_document() {
+        // The single-configuration model depends on this: after the collapse the user must be
+        // looking at one configuration, not at one plus the ghosts of the old ones.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(&connection, "第一套", "{}", &["a"], None);
+        insert_document_with_sources(&connection, "第二套", "{}", &["b"], None);
+        insert_document_with_sources(&connection, "第三套", "{}", &["c"], None);
+
+        let merged = replace_all_in_connection(
+            &mut connection,
+            "中心配置",
+            r#"{"sites":[]}"#,
+            &[test_source_with_key("a", true), test_source_with_key("b", true)],
+        );
+
+        let remaining: i64 = connection
+            .query_row("SELECT COUNT(*) FROM config_documents", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(merged.name, "中心配置");
+        assert_eq!(merged.sources.len(), 2);
+        // The merged document is the active one, or the app would load nothing on next launch.
+        assert_eq!(active_config_id(&connection).unwrap(), Some(merged.id));
+    }
+
+    #[test]
+    fn collapsing_keeps_the_merged_source_state() {
+        // The merge is the point of the operation, so the stored snapshot must be the merged one
+        // rather than any single original.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        insert_document_with_sources(&connection, "旧", "{}", &["old"], None);
+
+        let mut off = test_source_with_key("kept-off", true);
+        off.enabled = false;
+        let merged = replace_all_in_connection(
+            &mut connection,
+            "中心配置",
+            r#"{"sites":[]}"#,
+            &[test_source_with_key("new", true), off],
+        );
+
+        let by_key = |key: &str| {
+            merged
+                .sources
+                .iter()
+                .find(|source| source.key == key)
+                .unwrap_or_else(|| panic!("{key} missing from the merged document"))
+        };
+        assert!(by_key("new").enabled);
+        // The user's own switch must survive the collapse.
+        assert!(!by_key("kept-off").enabled);
     }
 
     fn test_source(enabled: bool) -> SourceRecord {

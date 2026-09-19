@@ -258,6 +258,27 @@ export function parseParseServices(configText: string): ParseServiceRecord[] {
   }
 }
 
+/**
+ * Reads configuration text into a plain object, for merging.
+ *
+ * Returns null when the text is not an object. Merging has to work on the same parse the rest of
+ * the parser uses, or the two would disagree about what a configuration contains; JSON5 rather than
+ * JSON because published configurations routinely carry comments and trailing commas.
+ */
+export function parseRawObject(
+  text: string,
+): Record<string, unknown> | null {
+  if (!text.trim()) return null;
+  try {
+    const parsed = JSON5.parse(text) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function formatConfigText(rawText: string): ConfigTextTransformResult {
   const sizeIssue = createSizeIssue(rawText);
   if (sizeIssue) {

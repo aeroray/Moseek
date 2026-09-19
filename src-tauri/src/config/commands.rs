@@ -321,3 +321,64 @@ pub async fn fetch_config_url(url: String) -> Result<String, String> {
     let parsed_url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
     policy::fetch_text(parsed_url, 10 * 1024 * 1024, "配置响应").await
 }
+
+/// Replaces every stored configuration with one merged document.
+///
+/// Moseek keeps a single 中心配置, so the first launch after this became true collapses whatever
+/// the user already had into one row. The merging itself happens in TypeScript, next to the parser
+/// that produced the documents, because the merge has to agree with the parser about what a source
+/// is; this command only performs the swap atomically.
+///
+/// The old rows are deleted rather than kept: leaving them behind would leave the user looking at
+/// configurations that no longer appear anywhere, and the whole point is that there is one.
+#[tauri::command]
+pub fn replace_all_config_documents(
+    input: SaveConfigDocumentInput,
+    state: State<'_, AppDatabase>,
+) -> Result<ConfigDocument, String> {
+    let name = if input.name.trim().is_empty() {
+        "中心配置".to_string()
+    } else {
+        input.name.trim().to_string()
+    };
+    let sources_json = storage::serialize_sources(&input.sources)?;
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    // `sources` rows reference config_documents with ON DELETE CASCADE, but the table is only
+    // written by older versions; deleting explicitly keeps a stale database from keeping orphans.
+    transaction
+        .execute("DELETE FROM sources", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM config_documents", [])
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute(
+            "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, source_base_url, live_count) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                name,
+                input.raw_config,
+                input.normalized_config,
+                sources_json,
+                input.source_base_url,
+                input.live_count
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    let document_id = transaction.last_insert_rowid();
+
+    transaction
+        .execute(
+            "INSERT INTO app_settings (key, value) VALUES ('active_config_document_id', ?1) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+            params![document_id.to_string()],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction.commit().map_err(|error| error.to_string())?;
+    storage::load_config_document(&connection, document_id)?
+        .ok_or_else(|| "中心配置保存后无法读取".to_string())
+}
