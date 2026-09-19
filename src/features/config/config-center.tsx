@@ -133,6 +133,7 @@ import {
 import { useAppStore } from "@/stores/app-store";
 import type {
   CapabilityStatus,
+  SourceDialect,
   SourceOperationStatus,
   ScriptArchiveSummary,
   SourceRecord,
@@ -2332,9 +2333,9 @@ export function ConfigCenter() {
                 <SheetTitle className="mt-2 text-base font-bold tracking-tight">
                   {inspectedSource.name}
                 </SheetTitle>
-                {inspectedSource.capabilityNote && (
+                {describeSourceSituation(inspectedSource) && (
                   <SheetDescription className="mt-0.5 text-xs leading-5 text-muted-foreground">
-                    {inspectedSource.capabilityNote}
+                    {describeSourceSituation(inspectedSource)}
                   </SheetDescription>
                 )}
               </SheetHeader>
@@ -2343,16 +2344,8 @@ export function ConfigCenter() {
                 <div className="flex flex-col gap-5 px-6 py-5">
                   <DetailSection title="基本信息">
                     <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
-                      <DetailRow
-                        label="类型"
-                        value={
-                          inspectedSource.sourceType === "cms"
-                            ? "普通 CMS"
-                            : inspectedSource.sourceType === "live"
-                              ? "直播源"
-                              : "解析服务"
-                        }
-                      />
+                      {/* No 类型 row: the header badge above the title already states it, from the
+                          same expression, so it was the same words twice in one sheet. */}
                       <DetailRow label="标识" value={inspectedSource.key} mono />
                       <DetailRow
                         label="解析格式"
@@ -2364,10 +2357,12 @@ export function ConfigCenter() {
                           value={inspectedSource.description}
                         />
                       )}
-                      <DetailRow
-                        label="配置声明可用"
-                        value={inspectedSource.status === false ? "否" : "是"}
-                      />
+                      {/* Only shown when the configuration actually switched the source off.
+                          It read 是 for all 355 sources in the author's database, so the row was
+                          a constant that told the reader nothing. */}
+                      {inspectedSource.status === false && (
+                        <DetailRow label="配置声明可用" value="否" />
+                      )}
                       <DetailRow
                         label="支持搜索"
                         value={inspectedSource.searchable ? "是" : "否"}
@@ -2505,9 +2500,12 @@ export function ConfigCenter() {
                     {inspectedSource.testOperations &&
                       inspectedSource.testOperations.length > 0 && (
                         <div className="mt-2.5 rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
-                          {inspectedSource.testOperations.map((operation) => (
+                          {inspectedSource.testOperations.map((operation, index) => (
                             <div
-                              key={`${operation.operation}-${operation.message}`}
+                              // Keyed by position as well: the same operation can appear twice with
+                              // the same message — a retry that failed identically — and a duplicate
+                              // key makes React reuse the wrong row.
+                              key={`${operation.operation}-${index}`}
                               className="flex items-start justify-between gap-3 p-3 text-xs"
                             >
                               <div className="min-w-0">
@@ -2535,9 +2533,19 @@ export function ConfigCenter() {
 
                   <DetailSection title="接口地址">
                     <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
-                      <DetailRow label="接口地址" value={inspectedSource.api} mono />
+                      {/* No 接口地址 row: the section heading already says it, and a heading
+                          immediately followed by a row of the same words reads as a mistake. */}
+                      <DetailRow
+                        label="地址"
+                        value={inspectedSource.api}
+                        mono
+                      />
                       {inspectedSource.ext && (
-                        <DetailRow label="扩展参数" value={inspectedSource.ext} mono />
+                        <DetailRow
+                          label="扩展参数"
+                          value={formatExt(inspectedSource.ext)}
+                          mono
+                        />
                       )}
                       {inspectedSource.jar && (
                         <DetailRow
@@ -2545,6 +2553,22 @@ export function ConfigCenter() {
                           value={inspectedSource.jar}
                           mono
                           danger
+                        />
+                      )}
+                      {/* Live sources carry these and the sheet showed neither, so a channel
+                          list's guide and logo addresses were only visible in the raw text. */}
+                      {inspectedSource.epg && (
+                        <DetailRow
+                          label="节目单"
+                          value={inspectedSource.epg}
+                          mono
+                        />
+                      )}
+                      {inspectedSource.logo && (
+                        <DetailRow
+                          label="台标"
+                          value={inspectedSource.logo}
+                          mono
                         />
                       )}
                     </div>
@@ -2601,16 +2625,27 @@ export function ConfigCenter() {
                         测试
                       </Button>
                     )}
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      onClick={() =>
-                        void handleToggleSource(inspectedSource.key)
-                      }
-                    >
-                      {inspectedSource.enabled ? "停用此源" : "启用此源"}
-                    </Button>
+                    {/* The switch is offered on the same condition as the list's, which draws a
+                        dash for a source that cannot run. Offering 启用此源 here flipped a flag
+                        nothing reads — `enabled` only gates the movie library, and an unrunnable
+                        source is excluded from it either way — so the two surfaces disagreed
+                        about whether the control existed. */}
+                    {isTestableSource(inspectedSource) ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() =>
+                          void handleToggleSource(inspectedSource.key)
+                        }
+                      >
+                        {inspectedSource.enabled ? "停用此源" : "启用此源"}
+                      </Button>
+                    ) : (
+                      <span className="text-xs text-muted-foreground/70">
+                        该源没有可用适配器，无法启用
+                      </span>
+                    )}
                   </div>
                 </div>
               </SheetFooter>
@@ -2664,6 +2699,45 @@ function DetailSection({
       {children}
     </section>
   );
+}
+
+/**
+ * The one-line explanation shown under a source's name, or null when it would repeat the sheet.
+ *
+ * Derived from the adapter rather than from `capabilityNote`. That note is written by the parser at
+ * import time and never refreshed, exactly like `capability`, so it drifts the moment support is
+ * added: in the author's database 101 of 355 notes no longer matched what the code does, and 69 of
+ * those told the reader the source was blocked while its adapter runs it — one of them still reading
+ * "API 部分可用" for the XBPQ source this whole status cleanup was about.
+ *
+ * The adapter's reason is also printed in 适配器边界, directly below, so it is returned here only
+ * when it would say something that section does not: a malformed record, whose real problem is the
+ * missing fields the adapter knows nothing about. Returning null in the ordinary case keeps the
+ * sheet from stating the same paragraph twice.
+ */
+function describeSourceSituation(source: SourceRecord): string | null {
+  if (source.capability === "invalid") return source.capabilityNote;
+  return null;
+}
+
+/**
+ * Renders `ext` for display.
+ *
+ * It is stored as a string, but for XBPQ/Panda sources that string is a JSON blob of URL templates
+ * and text markers — up to 514 characters in the author's database. Dumped raw into a 460px sheet it
+ * is an unreadable wall of escaped quotes, so the JSON is re-indented when it parses. The JSON5-ish
+ * `key:value,key:value` form some packs use is left alone, because reformatting it would change the
+ * text the user might compare against their configuration.
+ */
+function formatExt(ext: string): string {
+  const trimmed = ext.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return ext;
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    // Not JSON after all; show it as stored rather than mangling it.
+    return ext;
+  }
 }
 
 function AdapterDetail({ source }: { source: SourceRecord }) {
@@ -2812,17 +2886,25 @@ function operationLabel(operation: string) {
   );
 }
 
-/** Describes how the source is parsed, in plain language. */
-function describeSourceDialect(dialect: string | null | undefined) {
+/**
+ * Describes how the source is parsed, in plain language.
+ *
+ * The map's keys have to be the members of `SourceDialect`, which are `tvbox`, `kitty` and `mixed`.
+ * It previously listed `json-http`, `http-extension` and `js-extension` — all `SiteProtocol` values
+ * that can never arrive here — and omitted `kitty`, so a CatVod source displayed the raw English
+ * identifier "kitty" in an otherwise Chinese sheet. The return type is now the union itself, so a
+ * member without a word for it is a compile error rather than something a user discovers.
+ */
+function describeSourceDialect(
+  dialect: SourceDialect | null | undefined,
+): string {
   if (!dialect) return "未知";
-  return (
-    {
-      tvbox: "TVBox 格式",
-      "json-http": "JSON 接口",
-      "http-extension": "HTTP 扩展",
-      "js-extension": "JavaScript 扩展",
-    }[dialect] ?? dialect
-  );
+  const labels: Record<SourceDialect, string> = {
+    tvbox: "TVBox 格式",
+    kitty: "小猫格式",
+    mixed: "混合格式",
+  };
+  return labels[dialect];
 }
 
 function testStatusLabel(source: SourceRecord) {

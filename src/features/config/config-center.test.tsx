@@ -450,6 +450,218 @@ describe("config center", () => {
     expect(screen.getByText(/适配器边界/)).toBeInTheDocument();
   });
 
+  it("names the parse dialect in Chinese rather than printing the raw value", () => {
+    // The map listed `json-http`, `http-extension` and `js-extension` — all SiteProtocol values that
+    // can never reach it — and omitted `kitty`, which is a real member of SourceDialect. A CatVod
+    // source therefore printed the bare English word "kitty" in an otherwise Chinese sheet.
+    const kitty = source({
+      key: "kitty1",
+      name: "小猫源",
+      sourceDialect: "kitty",
+      api: "https://kitty.example/api",
+    });
+    const mixed = source({
+      key: "mixed1",
+      name: "混合源",
+      sourceDialect: "mixed",
+      api: "https://mixed.example/api",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [kitty, mixed] });
+    });
+
+    for (const name of ["小猫源", "混合源"]) {
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes(name));
+      fireEvent.click(row as HTMLElement);
+
+      const sheet = screen.getByRole("dialog");
+      expect(within(sheet).getByText("解析格式")).toBeInTheDocument();
+      // The internal identifier is not what a user should read.
+      expect(within(sheet).queryByText("kitty")).not.toBeInTheDocument();
+      expect(within(sheet).queryByText("mixed")).not.toBeInTheDocument();
+
+      fireEvent.keyDown(document, { key: "Escape" });
+    }
+  });
+
+  it("does not repeat the source type inside the sheet", () => {
+    // The header badge already states it, from the same expression, so the sheet said 普通 CMS
+    // twice — once as a badge and once as a 基本信息 row.
+    renderCenter();
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("不可用的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).queryByText("类型")).not.toBeInTheDocument();
+    // The badge that legitimately carries it is still there.
+    expect(within(sheet).getAllByText("普通 CMS")).toHaveLength(1);
+  });
+
+  it("does not repeat the API label as both a heading and a row", () => {
+    // `<DetailSection title="接口地址">` immediately followed by `<DetailRow label="接口地址">`
+    // read as a mistake.
+    renderCenter();
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("不可用的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).getByText("接口地址")).toBeInTheDocument();
+    expect(within(sheet).getByText("地址")).toBeInTheDocument();
+  });
+
+  it("shows a live source's guide and logo addresses", () => {
+    // Both are parsed and stored, and the sheet showed neither, so they were only reachable by
+    // reading the raw configuration text.
+    const live = source({
+      key: "live-1",
+      name: "直播源",
+      sourceType: "live",
+      api: "https://live.example/tv.txt",
+      epg: "https://epg.example/?ch={name}&date={date}",
+      logo: "https://epg.example/logo/{name}.png",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [live] });
+    });
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("直播源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    // 节目单 also names an adapter operation, so the label is looked up inside the address list.
+    expect(
+      within(sheet).getByText("https://epg.example/?ch={name}&date={date}"),
+    ).toBeInTheDocument();
+    expect(
+      within(sheet).getByText("https://epg.example/logo/{name}.png"),
+    ).toBeInTheDocument();
+  });
+
+  it("hides 配置声明可用 when the configuration did not switch the source off", () => {
+    // It read 是 for all 355 sources in the author's database, so the row was a constant.
+    renderCenter();
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("不可用的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).queryByText("配置声明可用")).not.toBeInTheDocument();
+  });
+
+  it("does not offer to enable a source the list says cannot run", () => {
+    // The list draws a dash for such a row. The footer offered 启用此源 anyway, flipping a flag
+    // nothing reads — `enabled` only gates the movie library, and an unrunnable source is excluded
+    // from it either way — so the two surfaces disagreed about whether the control existed.
+    renderCenter();
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("不可用的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(
+      within(sheet).queryByRole("button", { name: /启用此源|停用此源/ }),
+    ).not.toBeInTheDocument();
+    expect(within(sheet).getByText(/无法启用/)).toBeInTheDocument();
+    // And no test button either, since there is nothing to test with.
+    expect(
+      within(sheet).queryByRole("button", { name: "测试" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("still offers the switch for a source that can run", () => {
+    // The counterpart, so the guard above cannot be satisfied by removing the control everywhere.
+    renderCenter();
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("可用的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(
+      within(sheet).getByRole("button", { name: /停用此源|启用此源/ }),
+    ).toBeInTheDocument();
+    expect(within(sheet).getByRole("button", { name: "测试" })).toBeInTheDocument();
+  });
+
+  it("does not print a stale stored note under the source name", () => {
+    // `capabilityNote` is written at import and never refreshed. Measured on the author's database,
+    // 101 of 355 notes no longer matched the code, and 69 of those told the reader the source was
+    // blocked while its adapter runs it.
+    const stale = source({
+      key: "stale",
+      name: "状态过期的源",
+      capability: "blocked",
+      capabilityNote: "API 部分可用；存在远程 JAR 依赖，Moseek 不会下载或执行。",
+      api: "csp_XBPQ",
+      siteProtocol: "xbpq",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [stale] });
+    });
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("状态过期的源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(
+      within(sheet).queryByText(/API 部分可用/),
+    ).not.toBeInTheDocument();
+    // The adapter's own explanation still appears, in 适配器边界 — and only once, since printing it
+    // under the title as well said the same paragraph twice in one sheet.
+    expect(
+      within(sheet).getAllByText(/按 URL 模板与文本标记读取页面/),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the parser's note for a record that cannot be parsed", () => {
+    // The adapter says nothing about missing fields, which is the actual problem, so the parser's
+    // note is the only one that explains it.
+    const broken = source({
+      key: "broken",
+      name: "无效源",
+      capability: "invalid",
+      capabilityNote: "缺少 key、name 或 api 必填字段，无法建立安全的源记录。",
+      api: "",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [broken] });
+    });
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("无效源"));
+    fireEvent.click(row as HTMLElement);
+
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).getByText(/缺少 key、name 或 api/)).toBeInTheDocument();
+  });
+
   it("keeps the page itself from scrolling and gives the list the scrollbar", () => {
     // The list is the tallest thing here; letting the page scroll as a whole pushed the controls
     // out of view. jsdom cannot measure overflow, so the class contract is what is pinned.
