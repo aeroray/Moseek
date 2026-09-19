@@ -77,6 +77,44 @@ pub struct SourceTestResult {
     pub operations: Vec<SourceOperationResult>,
 }
 
+/// Whether a failed test actually reached the server.
+///
+/// A transport failure — a connection reset, a DNS lookup that did not resolve, a TLS handshake the
+/// peer abandoned — says nothing about whether the source works. Switching a source off on one of
+/// those discards it on the strength of the local network or the remote host's momentary state, and
+/// nothing ever switches it back on: the author's database held 14 sources disabled that way, and 4
+/// more that had since passed a test while remaining off. Only an answer the server actually gave
+/// — an HTTP status, a body that is not the expected shape — is a verdict about the source.
+///
+/// The markers are the ones `policy::describe_http_error` and the fetch layer produce. A message
+/// that matches none of them is treated as an answer, which is the conservative direction: it keeps
+/// the existing behaviour for anything unrecognised rather than silently never disabling again.
+pub(crate) fn is_transport_failure(message: &str) -> bool {
+    const TRANSPORT_MARKERS: [&str; 14] = [
+        // reqwest's own chain, as `describe_http_error` renders it.
+        "error sending request",
+        "client error (Connect)",
+        "connection closed before message completed",
+        // The OS-level causes, in the wording the platform gives.
+        "os error 10054",
+        "os error 10053",
+        "os error 10060",
+        "os error 11001",
+        "远程主机强迫关闭",
+        "不知道这样的主机",
+        "无法解析远程主机",
+        "域名解析",
+        "连接被拒绝",
+        "拒绝连接",
+        // Our own timeout wrapper.
+        "测试超时",
+    ];
+    let lowered = message.to_ascii_lowercase();
+    TRANSPORT_MARKERS.iter().any(|marker| {
+        lowered.contains(&marker.to_ascii_lowercase())
+    })
+}
+
 #[tauri::command]
 pub async fn browse_source(
     source: SourceRecord,

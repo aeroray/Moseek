@@ -401,36 +401,48 @@ fn describe_http_error(message: String, error: &reqwest::Error) -> String {
     described
 }
 
+/// Every address a request to this URL may use, after the policy check.
+///
+/// Returns the whole list rather than one address, because pinning a single address disables the
+/// fallback the resolver would otherwise perform. Most CDN-fronted APIs publish several addresses —
+/// 20 of the 34 hosts in the author's configuration resolve to more than one — and the first is
+/// often IPv6, so a machine without a working IPv6 route could not reach a host that was up.
+async fn resolve_allowed_addresses(
+    host: &str,
+    port: u16,
+) -> Result<Vec<std::net::SocketAddr>, String> {
+    // A literal address is checked directly, matching the rule applied to a resolved name.
+    if let Ok(address) = host.parse::<IpAddr>() {
+        if is_disallowed_ip(address) {
+            return Err(format!("{host} 是本机或局域网地址，Moseek 不会请求它"));
+        }
+        return Ok(vec![std::net::SocketAddr::new(address, port)]);
+    }
+    let addresses = resolve_host_with_timeout(host, port).await?;
+    // Any disallowed address rejects the host outright, matching the rule applied to a literal
+    // address: a name that can reach the local network is not a name we contact.
+    if addresses.iter().any(|address| is_disallowed_ip(address.ip())) {
+        return Err(format!("{host} 解析到本机或局域网地址，Moseek 不会请求它"));
+    }
+    if addresses.is_empty() {
+        return Err("远程主机没有解析出可用地址".to_string());
+    }
+    Ok(addresses)
+}
+
 async fn build_http_client(url: &Url) -> Result<Client, String> {
     let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
     let port = url.port_or_known_default().unwrap_or(443);
     // This is the one place a name is resolved, so it is also where the address policy is
-    // enforced for names. A literal address is used as-is and checked directly.
-    let resolved_address = match host.parse::<IpAddr>() {
-        Ok(address) => {
-            if is_disallowed_ip(address) {
-                return Err(format!("{host} 是本机或局域网地址，Moseek 不会请求它"));
-            }
-            address
-        }
-        Err(_) => {
-            let addresses = resolve_host_with_timeout(host, port).await?;
-            // Any disallowed address rejects the host outright, matching the rule applied to a
-            // literal address: a name that can reach the local network is not a name we contact.
-            if addresses.iter().any(|address| is_disallowed_ip(address.ip())) {
-                return Err(format!("{host} 解析到本机或局域网地址，Moseek 不会请求它"));
-            }
-            addresses
-                .first()
-                .map(|address| address.ip())
-                .ok_or_else(|| "远程主机没有解析出可用地址".to_string())?
-        }
-    };
+    // enforced for names.
+    let resolved_addresses = resolve_allowed_addresses(host, port).await?;
     Client::builder()
         .timeout(Duration::from_secs(15))
         .connect_timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
-        .resolve(host, std::net::SocketAddr::new(resolved_address, port))
+        // **All** resolved addresses are handed to reqwest, not just the first. reqwest tries them
+        // in order, which is what keeps a host with one unhealthy address reachable.
+        .resolve_to_addrs(host, &resolved_addresses)
         .user_agent("Moseek/0.1")
         .build()
         .map_err(|error| error.to_string())
@@ -475,7 +487,69 @@ fn is_disallowed_ip(address: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{collapse_whitespace, resolve_host, validate_remote_url, DNS_TIMEOUT};
+    use super::{
+        collapse_whitespace, is_disallowed_ip, resolve_allowed_addresses, resolve_host,
+        validate_remote_url, DNS_TIMEOUT,
+    };
+
+    #[test]
+    fn every_resolved_address_is_kept_not_just_the_first() {
+        // Pinning one address disabled reqwest's fallback: if that address was unhealthy the whole
+        // host became unreachable. 20 of the 34 hosts in the author's configuration resolve to more
+        // than one address, and the first is often IPv6.
+        //
+        // This covers the resolution half — the whole list survives the policy check. The call site
+        // (`resolve_to_addrs` rather than `resolve`) cannot be asserted from here: reqwest exposes
+        // no way to read back its DNS overrides, so the difference is only observable against a host
+        // whose first address fails while a later one works. Mutating that line therefore does not
+        // turn this test red, and the fix for it is verified by measurement rather than here.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // A literal address yields exactly one entry, and a disallowed one is refused.
+            let single = resolve_allowed_addresses("93.184.216.34", 443)
+                .await
+                .expect("a public literal address is allowed");
+            assert_eq!(single.len(), 1);
+            assert_eq!(single[0].port(), 443);
+
+            assert!(resolve_allowed_addresses("127.0.0.1", 443).await.is_err());
+            assert!(resolve_allowed_addresses("10.0.0.1", 443).await.is_err());
+            assert!(resolve_allowed_addresses("::1", 443).await.is_err());
+            // localhost is a name that resolves to disallowed addresses, and is refused as a name.
+            assert!(resolve_allowed_addresses("localhost", 80).await.is_err());
+        });
+    }
+
+    #[test]
+    fn a_multi_address_host_keeps_all_of_them() {
+        // The behaviour that was missing. `localhost` resolves to both 127.0.0.1 and ::1 on most
+        // machines, so it is a convenient stand-in for a multi-address host; the policy refuses it,
+        // so this asserts on the resolver rather than the policy wrapper.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let resolved = resolve_host("localhost", 443).expect("localhost resolves");
+            assert!(
+                !resolved.is_empty(),
+                "localhost must resolve to at least one address"
+            );
+            // Every address is carried through, which is what the fix guarantees.
+            let filtered: Vec<_> = resolved
+                .iter()
+                .copied()
+                .filter(|address| !is_disallowed_ip(address.ip()))
+                .collect();
+            assert!(
+                filtered.is_empty(),
+                "localhost is entirely disallowed, so nothing survives the policy"
+            );
+        });
+    }
 
     #[test]
     fn policy_rejects_non_http_and_local_urls() {

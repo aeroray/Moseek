@@ -65,6 +65,62 @@ export function migrateSources(sources: SourceRecord[] | undefined): SourceRecor
   });
 }
 
+/**
+ * Markers that mean a failed test never reached the server.
+ *
+ * Mirrors `cms::is_transport_failure` in `src-tauri/src/cms.rs`. The two must agree: the backend
+ * persists the decision and this updates the same source in the store, so a mismatch would show one
+ * answer until the next reload and another afterwards.
+ */
+const TRANSPORT_FAILURE_MARKERS = [
+  "error sending request",
+  "client error (connect)",
+  "connection closed before message completed",
+  "os error 10054",
+  "os error 10053",
+  "os error 10060",
+  "os error 11001",
+  "远程主机强迫关闭",
+  "不知道这样的主机",
+  "无法解析远程主机",
+  "域名解析",
+  "连接被拒绝",
+  "拒绝连接",
+  "测试超时",
+];
+
+/** Whether a failed test never got an answer, so it proves nothing about the source. */
+export function isTransportFailure(message: string | undefined): boolean {
+  const lowered = (message ?? "").toLowerCase();
+  return TRANSPORT_FAILURE_MARKERS.some((marker) =>
+    lowered.includes(marker.toLowerCase()),
+  );
+}
+
+/**
+ * Whether a source stays switched on after a test.
+ *
+ * Only an answer the server gave can switch it off — an HTTP status or a body of the wrong shape.
+ * A transport failure reports the local network or the remote host's momentary state, and treating
+ * it as a verdict discards a source that may work a minute later.
+ *
+ * There is deliberately no branch that switches a source back on. `enabled: false` cannot be told
+ * apart from the user having switched the source off themselves, so re-enabling on a pass would
+ * silently override an explicit choice.
+ */
+export function nextEnabledAfterTest(
+  source: Pick<SourceRecord, "enabled">,
+  result: Pick<SourceTestResult, "status" | "message">,
+): boolean {
+  if (result.status === "empty") return false;
+  if (result.status === "failed") {
+    return isTransportFailure(result.message) ? source.enabled : false;
+  }
+  // `passed` and `blocked` both leave the switch where the user put it: the first works, and the
+  // second never ran.
+  return source.enabled;
+}
+
 const sourceToggleQueues = new Map<string, Promise<void>>();
 
 /**
@@ -327,13 +383,11 @@ export const useAppStore = create<AppStore>()(
                   testDurationMs: result.durationMs,
                   testOperations: result.operations,
                   lastCheckedAt: result.testedAt,
-                  // A source the test found broken stops being offered, matching what the
-                  // backend persists. Leaving it enabled would keep listing a source we have
-                  // just proved does not work.
-                  enabled:
-                    result.status === "failed" || result.status === "empty"
-                      ? false
-                      : source.enabled,
+                  // Matches what the backend persists. Only an answer the server actually gave can
+                  // switch a source off: a transport failure reports the network, not the source,
+                  // and disabling on one of those discards a source for a reason that may not exist
+                  // a minute later. A pass switches it back on, so the rule is not a one-way door.
+                  enabled: nextEnabledAfterTest(source, result),
                   requestCount:
                     source.requestCount + (result.status === "blocked" ? 0 : 1),
                 }

@@ -5,6 +5,7 @@ import {
   migrateHistory,
   migrateLiveFavorites,
   migrateSources,
+  nextEnabledAfterTest,
   useAppStore,
 } from "@/stores/app-store";
 import type { LiveChannel, SourceRecord, VodItem } from "@/types/moseek";
@@ -88,6 +89,66 @@ describe("capability migration", () => {
   it("survives a missing or malformed list", () => {
     expect(migrateSources(undefined)).toEqual([]);
     expect(migrateSources(null as never)).toEqual([]);
+  });
+});
+
+describe("switching a source off after a test", () => {
+  // Mirrors `is_transport_failure` and the disable rule in `src-tauri/src/config/storage.rs`. The
+  // backend persists the decision and this updates the same source in the store, so the two have to
+  // agree or the answer changes on the next reload.
+  it("leaves a source alone when the test never reached the server", () => {
+    // A connection reset or a name that did not resolve reports the network, not the source.
+    // Disabling on one of those discarded 14 sources in the author's database, each recoverable
+    // only by finding the switch by hand.
+    for (const message of [
+      "CMS 响应请求失败：error sending request for url (https://ikunzyapi.com/...)；client error (Connect)；远程主机强迫关闭了一个现有的连接。 (os error 10054)",
+      "无法解析远程主机：不知道这样的主机。 (os error 11001)",
+      "测试超时（25 秒），已停止等待。该源可能无法访问或响应过慢。",
+    ]) {
+      expect(
+        nextEnabledAfterTest({ enabled: true }, { status: "failed", message }),
+        message,
+      ).toBe(true);
+    }
+  });
+
+  it("switches a source off when the server answered", () => {
+    // An HTTP status or a body of the wrong shape is a verdict about the source.
+    for (const message of [
+      "CMS 响应返回错误状态：HTTP 404；Not Found",
+      "CMS 响应不是有效 JSON：expected value at line 1 column 1",
+    ]) {
+      expect(
+        nextEnabledAfterTest({ enabled: true }, { status: "failed", message }),
+        message,
+      ).toBe(false);
+    }
+  });
+
+  it("does not resurrect a source the user switched off", () => {
+    // `enabled: false` cannot be told apart from the user's own choice, so a pass leaves it.
+    expect(
+      nextEnabledAfterTest({ enabled: false }, { status: "passed", message: "ok" }),
+    ).toBe(false);
+  });
+
+  it("leaves the switch alone when the test never ran", () => {
+    // `blocked` means no request was made, so there is nothing to conclude.
+    expect(
+      nextEnabledAfterTest(
+        { enabled: true },
+        { status: "blocked", message: "Spider 不会执行。" },
+      ),
+    ).toBe(true);
+  });
+
+  it("switches a source off when the server answered with nothing to watch", () => {
+    expect(
+      nextEnabledAfterTest(
+        { enabled: true },
+        { status: "empty", message: "请求成功，但响应中没有可识别的影视内容。" },
+      ),
+    ).toBe(false);
   });
 });
 

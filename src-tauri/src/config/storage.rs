@@ -743,9 +743,22 @@ pub(super) fn set_source_test_in_connection(
         // library and in live. Leaving it enabled would keep offering a source we have just
         // proved does not work. `passed` and `blocked` are left alone: the first works, and the
         // second was never enabled by a test in the first place.
-        if result.status == "failed" || result.status == "empty" {
+        //
+        // **Only an answer the server actually gave counts as proof.** A transport failure — a
+        // connection reset, a name that did not resolve, a timeout — says nothing about the source;
+        // it reports the local network or the remote host's momentary state. Switching a source off
+        // on one of those discards it for a reason that may not exist a minute later, and nothing
+        // ever switches it back on, which is how the author ended up with 14 sources disabled by
+        // DNS and connection failures and 4 more that had since passed while remaining off.
+        if (result.status == "failed" && !cms::is_transport_failure(&result.message))
+            || result.status == "empty"
+        {
             source.enabled = false;
         }
+        // Deliberately no branch that switches a source back on. `enabled: false` with `status:
+        // true` cannot be told apart from the user having switched the source off themselves, so
+        // re-enabling on a pass would silently override an explicit choice. The transport rule
+        // above is what keeps a source from being disabled for a reason that is not about it.
         source.request_count
     };
     let sources_json = serialize_sources(&sources)?;
@@ -1359,6 +1372,80 @@ mod tests {
                 .unwrap();
 
         assert!(updated.sources[0].enabled);
+    }
+
+    #[test]
+    fn a_transport_failure_does_not_switch_the_source_off() {
+        // A connection reset or a name that did not resolve says nothing about the source. Treating
+        // it as proof discarded sources on the strength of the local network: the author's database
+        // held 14 disabled this way, each recoverable only by finding the switch by hand.
+        for message in [
+            "CMS 响应请求失败：error sending request for url (https://ikunzyapi.com/...)；client error (Connect)；远程主机强迫关闭了一个现有的连接。 (os error 10054)",
+            "无法解析远程主机：不知道这样的主机。 (os error 11001)",
+            "测试超时（25 秒），已停止等待。该源可能无法访问或响应过慢。",
+        ] {
+            let mut connection = Connection::open_in_memory().unwrap();
+            create_test_schema(&connection);
+            let document_id = insert_test_document(&connection, "配置", true);
+
+            let result = cms::SourceTestResult {
+                source_key: "shared-key".to_string(),
+                status: "failed".to_string(),
+                adapter_id: "builtin-cms".to_string(),
+                message: message.to_string(),
+                item_count: 0,
+                category_count: 0,
+                duration_ms: 30,
+                tested_at: "2025-01-01T00:00:00Z".to_string(),
+                operations: Vec::new(),
+            };
+
+            let updated =
+                set_source_test_in_connection(&mut connection, document_id, "shared-key", &result)
+                    .unwrap();
+
+            assert!(
+                updated.sources[0].enabled,
+                "a transport failure must leave the source switched on: {message}"
+            );
+            // The failure is still recorded, so the user can see what happened.
+            assert_eq!(updated.sources[0].test_status.as_deref(), Some("failed"));
+        }
+    }
+
+    #[test]
+    fn an_answered_failure_still_switches_the_source_off() {
+        // The counterpart: when the server answered, the verdict is about the source and stands.
+        for message in [
+            "CMS 响应返回错误状态：HTTP 404；Not Found",
+            "CMS 响应不是有效 JSON：expected value at line 1 column 1",
+            "d.kstore.space 解析到本机或局域网地址，Moseek 不会请求它",
+        ] {
+            let mut connection = Connection::open_in_memory().unwrap();
+            create_test_schema(&connection);
+            let document_id = insert_test_document(&connection, "配置", true);
+
+            let result = cms::SourceTestResult {
+                source_key: "shared-key".to_string(),
+                status: "failed".to_string(),
+                adapter_id: "builtin-cms".to_string(),
+                message: message.to_string(),
+                item_count: 0,
+                category_count: 0,
+                duration_ms: 30,
+                tested_at: "2025-01-01T00:00:00Z".to_string(),
+                operations: Vec::new(),
+            };
+
+            let updated =
+                set_source_test_in_connection(&mut connection, document_id, "shared-key", &result)
+                    .unwrap();
+
+            assert!(
+                !updated.sources[0].enabled,
+                "an answered failure must switch the source off: {message}"
+            );
+        }
     }
 
     #[test]
