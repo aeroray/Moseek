@@ -381,125 +381,137 @@ export function ConfigCenter() {
    * several. Merging them is the same operation the import path performs, run over what is already
    * stored, and it is deliberately one-shot: it only fires while more than one document exists.
    *
-   * The effect keys off the document count, not the array: `setConfigDocument` reorders
-   * `configDocuments` when it activates a document, so depending on the array would re-run this
-   * effect mid-flight, and its cleanup would cancel the collapse before it wrote anything.
+   * Two details make this work at all, and both were learned the hard way:
+   *
+   * - **The work is not cancelled when the component re-renders.** It is a database migration, not a
+   *   render, so it has to run to completion regardless of what React does to this component. The
+   *   in-flight promise is held in a ref and a second run joins it rather than starting again.
+   * - **The guard records success, not an attempt.** Marking "attempted" before the work began meant
+   *   that under `<StrictMode>` — which mounts, cleans up, then mounts again — the first run's
+   *   cleanup cancelled the work and the second run refused to start, so the collapse silently never
+   *   happened and the page kept showing one of the old documents.
+   *
+   * The effect keys off the document count rather than the array: `setConfigDocument` reorders
+   * The guard is set **synchronously**, before any await, so `<StrictMode>`'s immediate second mount
+   * sees it and does not start a second collapse. It is cleared only when the attempt fails, so a
+   * transient error can be retried on the next render while a success is never repeated.
    */
-  const collapseAttempted = useRef(false);
+  const collapseStarted = useRef(false);
   const configDocumentCount = configDocuments.length;
   useEffect(() => {
-    if (!isTauriRuntime() || collapseAttempted.current) return;
+    if (!isTauriRuntime()) return;
     if (configDocumentCount <= 1) return;
-    collapseAttempted.current = true;
-    let cancelled = false;
-    void (async () => {
-      try {
-        // The ids are read once, so reordering the array afterwards cannot change what is merged.
-        const ids = useAppStore.getState().configDocuments.map((item) => item.id);
-        const loaded = (
-          await Promise.all(
-            ids.map((id) => activateConfigDocument(id).catch(() => null)),
-          )
-        ).filter((document): document is StoredConfigDocument =>
-          Boolean(document),
+    if (collapseStarted.current) return;
+    collapseStarted.current = true;
+
+    const run = async () => {
+      // The ids are read once, so reordering the array afterwards cannot change what is merged.
+      const ids = useAppStore.getState().configDocuments.map((item) => item.id);
+      const loaded = (
+        await Promise.all(
+          ids.map((id) => activateConfigDocument(id).catch(() => null)),
+        )
+      ).filter((document): document is StoredConfigDocument =>
+        Boolean(document),
+      );
+      if (loaded.length <= 1) return;
+
+      // Oldest first, so the configuration the user had longest keeps its position at the top of
+      // the merged list and the newer ones append.
+      const ordered = [...loaded].sort((a, b) => a.id - b.id);
+      let raw = parseRawObject(ordered[0].rawConfig) ?? {};
+      let sourceBaseUrl = ordered[0].sourceBaseUrl ?? null;
+      let mergedCount = { added: 0, updated: 0, unchanged: 0 };
+
+      for (const document of ordered.slice(1)) {
+        // A relative path only means something with the base URL it was imported with, so it is
+        // resolved before the two configurations meet.
+        const incoming = absolutizeRelativeSites(
+          parseRawObject(document.rawConfig) ?? {},
+          document.sourceBaseUrl ?? null,
         );
-        if (cancelled || loaded.length <= 1) return;
+        const result = mergeRawConfigs(raw, incoming);
+        raw = result.raw;
+        mergedCount = {
+          added: mergedCount.added + result.report.sites.added,
+          updated: mergedCount.updated + result.report.sites.updated,
+          unchanged: mergedCount.unchanged + result.report.sites.unchanged,
+        };
+        // The merged configuration has to keep one base URL, and a document that carries one is
+        // the more useful choice: it is what relative paths in that document were written against.
+        sourceBaseUrl = sourceBaseUrl ?? document.sourceBaseUrl ?? null;
+      }
 
-        // Oldest first, so the configuration the user had longest keeps its position at the top of
-        // the merged list and the newer ones append.
-        const ordered = [...loaded].sort((a, b) => a.id - b.id);
-        let raw = parseRawObject(ordered[0].rawConfig) ?? {};
-        let sourceBaseUrl = ordered[0].sourceBaseUrl ?? null;
-        let mergedCount = { added: 0, updated: 0, unchanged: 0 };
-
-        for (const document of ordered.slice(1)) {
-          // A relative path only means something with the base URL it was imported with, so it is
-          // resolved before the two configurations meet.
-          const incoming = absolutizeRelativeSites(
-            parseRawObject(document.rawConfig) ?? {},
-            document.sourceBaseUrl ?? null,
-          );
-          const result = mergeRawConfigs(raw, incoming);
-          raw = result.raw;
-          mergedCount = {
-            added: mergedCount.added + result.report.sites.added,
-            updated: mergedCount.updated + result.report.sites.updated,
-            unchanged: mergedCount.unchanged + result.report.sites.unchanged,
-          };
-          // The merged configuration has to keep one base URL, and a document that carries one is
-          // the more useful choice: it is what relative paths in that document were written against.
-          sourceBaseUrl = sourceBaseUrl ?? document.sourceBaseUrl ?? null;
-        }
-
-        const mergedText = JSON.stringify(raw, null, 2);
-        const parsed = parseConfigText(mergedText, sourceBaseUrl ?? undefined);
-        if (!parsed.ok) {
-          // Surface rather than swallow: silently declining to collapse would leave the user with
-          // several documents and no explanation.
-          setParseState({
-            type: "error",
-            title: "合并配置失败",
-            message: `合并后的配置无法解析：${parsed.issues[0]?.message ?? "未知解析错误"}。原有配置保持不变。`,
-          });
-          return;
-        }
-
-        // The source list is merged from the stored snapshots rather than taken from the re-parse.
-        // Re-parsing is not identity-preserving: the parser resolves a schemeless value against the
-        // document's base URL, so parsing the merged text with one document's base rewrites the
-        // other documents' relative paths and changes enough identities to drop the user's
-        // switches. Merging the snapshots keeps every source exactly as it was stored.
-        let mergedSources = ordered[0].sources;
-        for (const document of ordered.slice(1)) {
-          mergedSources = mergeSourceLists(mergedSources, document.sources).sources;
-        }
-
-        const saved = await replaceAllConfigDocuments({
-          name: "中心配置",
-          rawConfig: mergedText,
-          normalizedConfig: parsed.normalizedConfig,
-          sources: mergedSources,
-          liveCount: parsed.liveCount,
-          sourceBaseUrl,
-        });
-        if (cancelled || !saved) return;
-        setConfigDocument(saved);
-        setConfigDocuments([
-          {
-            id: saved.id,
-            name: saved.name,
-            sourceCount: saved.sources.length,
-            liveCount: saved.liveCount,
-            importedAt: saved.importedAt,
-          },
-        ]);
-        setLastMergeSummary({
-          added: mergedCount.added,
-          updated: mergedCount.updated,
-          unchanged: mergedCount.unchanged,
-          keptLocalState: saved.sources.filter((source) => !source.enabled).length,
-          total: saved.sources.length,
-        });
-        setParseState({
-          type: "success",
-          title: "已合并为一套配置",
-          message: `原来的 ${ordered.length} 套配置已合并为「中心配置」：新增 ${mergedCount.added} 个源，去重 ${mergedCount.unchanged} 个，当前共 ${saved.sources.length} 个源。以后导入会继续合并进这一套。`,
-        });
-      } catch (error) {
-        // A failed collapse must not block the page — the existing documents stay usable and the
-        // next launch tries again — but it must not be silent either. Swallowing the error left the
-        // user with several documents and nothing to explain why.
-        collapseAttempted.current = false;
+      const mergedText = JSON.stringify(raw, null, 2);
+      const parsed = parseConfigText(mergedText, sourceBaseUrl ?? undefined);
+      if (!parsed.ok) {
+        // Surface rather than swallow: silently declining to collapse would leave the user with
+        // several documents and no explanation.
         setParseState({
           type: "error",
           title: "合并配置失败",
-          message: `${error instanceof Error ? error.message : "未知错误"}。原有配置保持不变。`,
+          message: `合并后的配置无法解析：${parsed.issues[0]?.message ?? "未知解析错误"}。原有配置保持不变。`,
         });
+        return;
       }
-    })();
-    return () => {
-      cancelled = true;
+
+      // The source list is merged from the stored snapshots rather than taken from the re-parse.
+      // Re-parsing is not identity-preserving: the parser resolves a schemeless value against the
+      // document's base URL, so parsing the merged text with one document's base rewrites the
+      // other documents' relative paths and changes enough identities to drop the user's
+      // switches. Merging the snapshots keeps every source exactly as it was stored.
+      let mergedSources = ordered[0].sources;
+      for (const document of ordered.slice(1)) {
+        mergedSources = mergeSourceLists(mergedSources, document.sources).sources;
+      }
+
+      const saved = await replaceAllConfigDocuments({
+        name: "中心配置",
+        rawConfig: mergedText,
+        normalizedConfig: parsed.normalizedConfig,
+        sources: mergedSources,
+        liveCount: parsed.liveCount,
+        sourceBaseUrl,
+      });
+      if (!saved) return;
+      setConfigDocument(saved);
+      setConfigDocuments([
+        {
+          id: saved.id,
+          name: saved.name,
+          sourceCount: saved.sources.length,
+          liveCount: saved.liveCount,
+          importedAt: saved.importedAt,
+        },
+      ]);
+      setLastMergeSummary({
+        added: mergedCount.added,
+        updated: mergedCount.updated,
+        unchanged: mergedCount.unchanged,
+        keptLocalState: saved.sources.filter((source) => !source.enabled).length,
+        total: saved.sources.length,
+      });
+      setParseState({
+        type: "success",
+        title: "已合并为一套配置",
+        message: `原来的 ${ordered.length} 套配置已合并为「中心配置」：新增 ${mergedCount.added} 个源，去重 ${mergedCount.unchanged} 个，当前共 ${saved.sources.length} 个源。以后导入会继续合并进这一套。`,
+      });
     };
+
+    void run().catch((error) => {
+      // A failed collapse must not block the page — the existing documents stay usable and the
+      // next launch tries again — but it must not be silent either. Swallowing the error left the
+      // user with several documents and nothing to explain why. The guard is released so the retry
+      // can actually happen.
+      collapseStarted.current = false;
+      setParseState({
+        type: "error",
+        title: "合并配置失败",
+        message: `${error instanceof Error ? error.message : "未知错误"}。原有配置保持不变。`,
+      });
+    });
+    // No cleanup cancels the work: it is a database migration, and abandoning it half-way would
+    // leave the database in whatever state the interrupt found.
   }, [configDocumentCount, setConfigDocument, setConfigDocuments]);
 
   useEffect(() => {

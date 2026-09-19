@@ -527,3 +527,11 @@
 - **足迹支持分别清空**（用户要求）：原来只能一键全清，想整理影视就得连直播一起丢。改为**弹窗选择**：影视足迹 / 电视直播足迹 / 全部清空，并**显示各自条数**、**没有内容的那类置灰**。顺带补上了原本缺失的**确认**（清空不可恢复）。store 的 `clearHistory` 接受可选的 `FootprintKind`，只清对应类型的 `playbackProgress`（进度按 history id 索引，清哪类就丢哪类）。
   - **实测发现一个真崩溃（既有 bug，非本轮引入）**：`record.item.playLines.find(...)` 在足迹记录缺 `playLines` 时抛 `Cannot read properties of undefined`，**整页被错误边界接管成「界面错误」**。足迹是从 localStorage 读回来的，可能由旧版本写入或字段不全。改为可选链，并补了会红的测试。
 - 本轮最终：前端 **408 项**、Rust 109 项、`clippy` 零警告、`pnpm build` 零警告。
+- **配置中心「源数量每次进去都变，55/72/237」（用户报的真 bug，根因是我上一轮的迁移从未执行）**：这三个数字正是三套文档各自的源数——**页面每次显示的是不同的那一套**。实测用户数据库仍是 3 套文档、`active_config_document_id` 从 1 变成了 2，**说明 `activate_config_document` 跑了、但 `replace_all_config_documents` 一次都没跑**。
+  - **根因：`<StrictMode>` 的双挂载把迁移守卫骗过去了。** React 19 在 StrictMode 下会「执行 effect → 执行 cleanup → 再执行 effect」。我的守卫是**在开工前**就把 `collapseAttempted` 置为 true，于是：第一次挂载置 true 并开始异步工作 → cleanup 把 `cancelled` 置 true → 第二次挂载看到 ref 已为 true 直接 return。**结果迁移一次都没跑完，而第一次挂载的 `activate` 写入已经生效**（所以 active 指针被改动了）。
+  - **修法：两处都要改**。① **守卫必须是同步置位的**（在任何 await 之前），否则 StrictMode 的第二次挂载会在第一次赋值之前就溜进来——我第一版把 ref 放在 `run()` 之后赋值，实测被调用 **7 次**。② **迁移不设 cleanup 取消**：它是数据库迁移而不是渲染副作用，中途放弃只会把数据库留在半截状态。失败时释放守卫以便重试，成功则永不重复。
+  - **为什么之前所有测试都没发现**：`config-center.test.tsx` 全部用 `render()` **不带 StrictMode**，而 `main.tsx` 里是 `<StrictMode>` 包裹的。**测试环境必须和真实挂载方式一致，否则这类 bug 永远测不出来**——新增 `renderPageStrict()` 并补了一条 StrictMode 下的迁移测试。
+  - **验证**：把守卫改回「开工前置位 + cleanup 取消」后，新测试报 **`replaceAllConfigDocuments` 被调用 0 次**——和线上症状完全一致；修好后为 1 次。**浏览器实测**（StrictMode 真实生效）：`replaceCalls: 1`、`documentsLeft: 1`、5+9+3 条（含 1 条重复）合并为 **16 条**、只存在于某套的 `flags`/`ads` 保留、**连续三次进出页面计数都是 16（`stable: true`）**、`finalReplaceCalls: 1`（不会每次访问都重跑）。
+  - **顺带排查**：`liveRecoveryAttempts` 用的是同类 ref 守卫，但它**在 await 之前同步 add、且没有 cleanup 取消**，所以 StrictMode 下是正确的（第二次挂载跳过、第一次的 promise 照常完成）。其余 `useRef(false)` 都是事件处理器标志位，与 effect 生命周期无关。
+  - **测试隔离的一个坑**：mutation 时发现 mock 调用次数会跨用例累积（`toHaveBeenCalledTimes` 读到 7），在 `beforeEach` 里补了 `mockClear`/`mockReset`。
+- 本轮最终：前端 **409 项**、Rust 109 项、`clippy` 零警告、`pnpm build` 零警告。

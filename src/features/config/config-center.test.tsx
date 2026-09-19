@@ -1,4 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ToastHost } from "@/components/toast-host";
@@ -112,6 +113,23 @@ function renderPage(ui: React.ReactElement) {
   );
 }
 
+/**
+ * Renders the page the way the application actually mounts it.
+ *
+ * `src/main.tsx` wraps everything in `<StrictMode>`, which runs an effect, its cleanup, then the
+ * effect again. A migration guarded by a ref set before the work began therefore never ran at all —
+ * and every test here rendered without StrictMode, so none of them could see it.
+ */
+function renderPageStrict(ui: React.ReactElement) {
+  return render(
+    <StrictMode>
+      <ToastProvider>
+        <ToastHost>{ui}</ToastHost>
+      </ToastProvider>
+    </StrictMode>,
+  );
+}
+
 function renderCenter() {
   const configText = JSON.stringify({
     sites: [
@@ -210,6 +228,10 @@ describe("config center", () => {
 
   beforeEach(() => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
+    // Call counts are asserted in a few tests, so the mocks must not carry over from earlier ones.
+    vi.mocked(replaceAllConfigDocuments).mockClear();
+    vi.mocked(activateConfigDocument).mockReset();
+    vi.mocked(activateConfigDocument).mockResolvedValue(null);
   });
 
   it("names itself 配置中心", () => {
@@ -1242,7 +1264,7 @@ describe("config center", () => {
       sourceBaseUrl: null,
     }));
 
-    renderPage(<ConfigCenter />);
+    renderPageStrict(<ConfigCenter />);
 
     await waitFor(() => {
       expect(replaceAllConfigDocuments).toHaveBeenCalled();
@@ -1252,6 +1274,56 @@ describe("config center", () => {
     // Both configurations contributed a source.
     expect(sites.map((s) => s.key).sort()).toEqual(["first", "second"]);
     // And the store is left holding exactly one document.
+    await waitFor(() => {
+      expect(useAppStore.getState().configDocuments).toHaveLength(1);
+    });
+  });
+
+  it("collapses even though StrictMode remounts the effect", async () => {
+    // The application mounts inside <StrictMode>, which runs an effect, its cleanup, then the effect
+    // again. The collapse used to mark itself "attempted" before doing anything, so the first run's
+    // cleanup cancelled the work and the second run refused to start: the database kept all three
+    // documents and the page showed a different one each visit. This is the test that would have
+    // caught it — every other test here renders without StrictMode.
+    const documents = [
+      { id: 1, name: "第一套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      { id: 2, name: "第二套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-02T00:00:00.000Z" },
+      { id: 3, name: "第三套", sourceCount: 1, liveCount: 0, importedAt: "2026-01-03T00:00:00.000Z" },
+    ];
+    const rawFor = (key: string) =>
+      JSON.stringify({
+        sites: [{ key, name: key, type: 1, api: `https://${key}.example/api.php/provide/vod` }],
+      });
+
+    useAppStore.setState({
+      sources: [supported],
+      rawConfig: rawFor("one"),
+      normalizedConfig: "{}",
+      configDocuments: documents,
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    vi.mocked(activateConfigDocument).mockImplementation(async (id: number) => ({
+      id,
+      name: `第 ${id} 套`,
+      rawConfig: rawFor(["one", "two", "three"][id - 1] ?? "x"),
+      normalizedConfig: "{}",
+      sources: [supported],
+      sourceCount: 1,
+      liveCount: 0,
+      importedAt: "2026-01-01T00:00:00.000Z",
+      sourceBaseUrl: null,
+    }));
+
+    renderPageStrict(<ConfigCenter />);
+
+    await waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+    });
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const sites = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites;
+    expect(sites).toHaveLength(3);
     await waitFor(() => {
       expect(useAppStore.getState().configDocuments).toHaveLength(1);
     });
