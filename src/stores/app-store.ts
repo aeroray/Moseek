@@ -7,7 +7,12 @@ import {
   type ConfigDocumentSummary,
   type StoredConfigDocument,
 } from "@/lib/tauri";
+import { adapterRegistry } from "@/lib/adapters";
 import { favoriteKey } from "@/lib/favorite-key";
+import {
+  defaultSourceFilter,
+  type SourceFilterState,
+} from "@/features/config/source-filter";
 import type {
   CapabilityStatus,
   FavoriteProgress,
@@ -121,6 +126,55 @@ export function nextEnabledAfterTest(
   return source.enabled;
 }
 
+/**
+ * Validates a stored source filter.
+ *
+ * A persisted shape is input from an older version of the application, so it cannot be trusted: an
+ * unrecognised value in a group would match no source and empty the list with no visible cause. Each
+ * group is filtered down to the values the current module knows, and anything unusable falls back to
+ * the default rather than to "nothing selected" — a filter that silently shows everything is a
+ * smaller surprise than one that silently shows nothing.
+ */
+export function migrateSourceFilter(value: unknown): SourceFilterState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return defaultSourceFilter;
+  }
+  const stored = value as Partial<Record<keyof SourceFilterState, unknown>>;
+  const group = <T extends string>(raw: unknown, allowed: readonly T[]): T[] => {
+    if (!Array.isArray(raw)) return [];
+    const known = new Set<string>(allowed);
+    return raw.filter((item): item is T => typeof item === "string" && known.has(item));
+  };
+  const migrated: SourceFilterState = {
+    adapters: group(
+      stored.adapters,
+      adapterRegistry.map((profile) => profile.id),
+    ),
+    executions: group(stored.executions, [
+      "enabled",
+      "needs-adapter",
+      "blocked",
+    ] as const),
+    statuses: group(stored.statuses, [
+      "usable",
+      "untested",
+      "failed",
+      "empty",
+      "blocked",
+      "invalid",
+    ] as const),
+    enabled: group(stored.enabled, ["on", "off"] as const),
+  };
+  // A shape with nothing usable in it at all is not a filter the user set; it is a value this
+  // version cannot read, so the default is restored.
+  const recognised =
+    Array.isArray(stored.adapters) ||
+    Array.isArray(stored.executions) ||
+    Array.isArray(stored.statuses) ||
+    Array.isArray(stored.enabled);
+  return recognised ? migrated : defaultSourceFilter;
+}
+
 const sourceToggleQueues = new Map<string, Promise<void>>();
 
 /**
@@ -208,6 +262,20 @@ interface AppStore {
    * guide is used, so no third-party guide provider is contacted.
    */
   autoEpgEnabled: boolean;
+  /**
+   * The source list's filter, kept across restarts.
+   *
+   * It lives in the store rather than in the component's state because it is a preference, not a
+   * transient view: a user who narrows the list to the sources they are working on expects to find
+   * it that way next time, and re-applying it on every launch is work the application can do for
+   * them. Stored as the same shape the filter module uses, so there is no second vocabulary to keep
+   * in step.
+   */
+  sourceFilter: SourceFilterState;
+  setSourceFilter: (filter: SourceFilterState) => void;
+  /** Whether the filter panel was left expanded. */
+  isSourceFilterOpen: boolean;
+  setSourceFilterOpen: (open: boolean) => void;
   configDocuments: ConfigDocumentSummary[];
   configDocumentCache: Record<number, StoredConfigDocument>;
   activeConfigId: number | null;
@@ -263,6 +331,8 @@ export const useAppStore = create<AppStore>()(
       activeView: "browse",
       theme: "system",
       autoEpgEnabled: true,
+      sourceFilter: defaultSourceFilter,
+      isSourceFilterOpen: false,
       configDocuments: [],
       configDocumentCache: {},
       activeConfigId: null,
@@ -277,6 +347,8 @@ export const useAppStore = create<AppStore>()(
       setActiveView: (activeView) => set({ activeView }),
       setTheme: (theme) => set({ theme }),
       setAutoEpgEnabled: (autoEpgEnabled) => set({ autoEpgEnabled }),
+      setSourceFilter: (sourceFilter) => set({ sourceFilter }),
+      setSourceFilterOpen: (isSourceFilterOpen) => set({ isSourceFilterOpen }),
       /**
        * Removes sources from the active configuration. The keys are removed from the saved
        * document (both its snapshot and its raw text) and from the in-memory state, so the
@@ -626,6 +698,11 @@ export const useAppStore = create<AppStore>()(
           // Defaults to on for existing installs that predate the setting.
           autoEpgEnabled:
             persisted?.autoEpgEnabled ?? currentState.autoEpgEnabled,
+          // The stored filter is validated rather than trusted: it is a persisted shape that a
+          // newer version could have widened, and a value the filter module does not know would
+          // silently exclude every source. An unrecognised group folds back to the default instead.
+          sourceFilter: migrateSourceFilter(persisted?.sourceFilter),
+          isSourceFilterOpen: persisted?.isSourceFilterOpen ?? false,
           configDocuments: persisted?.configDocuments ?? [],
           // The cache holds each document's own source list, which carries the same legacy values.
           configDocumentCache: Object.fromEntries(
@@ -656,6 +733,8 @@ export const useAppStore = create<AppStore>()(
         activeView: state.activeView,
         theme: state.theme,
         autoEpgEnabled: state.autoEpgEnabled,
+        sourceFilter: state.sourceFilter,
+        isSourceFilterOpen: state.isSourceFilterOpen,
         configDocuments: state.configDocuments,
         configDocumentCache: state.configDocumentCache,
         activeConfigId: state.activeConfigId,

@@ -8,6 +8,7 @@ import {
 } from "react";
 import {
   AlertTriangle,
+  AlignLeft,
   Blocks,
   Braces,
   Check,
@@ -23,9 +24,12 @@ import {
   Info,
   Layers3,
   List,
+  ListTree,
   LoaderCircle,
   Search,
+  Save,
   ShieldAlert,
+  ShieldCheck,
   TestTube2,
   Trash2,
   Upload,
@@ -36,6 +40,8 @@ import {
 import { CapabilityBadge } from "@/components/capability-badge";
 import { useToast } from "@/components/toast-host";
 import { JsonEditor } from "@/components/json-editor";
+import { ConfigVisualEditor } from "@/features/config/config-visual-editor";
+import { canSaveVisualConfig } from "@/features/config/config-visual";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -101,6 +107,7 @@ import {
   parseConfigText,
   parseRawObject,
   repairConfigText,
+  type ParseIssue,
   type ParseResult,
 } from "@/features/config/config-parser";
 import {
@@ -109,10 +116,8 @@ import {
 } from "@/features/config/config-drafts";
 import {
   activeFilterGroupCount,
-  defaultSourceFilter,
   isFilterUnfiltered,
   matchesSourceFilterState,
-  type SourceFilterState,
 } from "@/features/config/source-filter";
 import {
   SourceFilterFacets,
@@ -162,6 +167,9 @@ import type {
  */
 type ImportMode = "remote" | "local";
 
+/** The two views of the configuration document. */
+type RawMode = "visual" | "code";
+
 /** The adapter tab's own filter, which narrows a table of adapters rather than of sources. */
 type AdapterFilter = "all" | AdapterExecution;
 
@@ -191,18 +199,17 @@ export function ConfigCenter() {
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
   const [query, setQuery] = useState("");
   /**
-   * The source list's filter.
+   * The source list's filter, held in the store so it survives a restart.
    *
-   * Opens on the sources that can actually run — `executions: ["enabled"]`, the default in
-   * `source-filter.ts` — because a configuration carries far more sources than a user can act on
-   * and the ones with no runnable adapter are what they may later prune, not what they came to look
-   * at. Unlike the previous default it is a visible, clearable choice in the panel rather than a
-   * hidden rule, so the list can be widened without discovering a second control.
+   * It used to be component state, which meant the list reopened on the default every launch and a
+   * user working through a narrow slice of a 355-source configuration re-applied the same choices
+   * each time. The default is still the opening state for a first run — see `source-filter.ts` — but
+   * from then on what the user chose is what they get.
    */
-  const [sourceFilter, setSourceFilter] =
-    useState<SourceFilterState>(defaultSourceFilter);
-  /** Whether the filter panel is expanded. Closed by default so the list keeps the height. */
-  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const sourceFilter = useAppStore((state) => state.sourceFilter);
+  const setSourceFilter = useAppStore((state) => state.setSourceFilter);
+  const isFilterOpen = useAppStore((state) => state.isSourceFilterOpen);
+  const setIsFilterOpen = useAppStore((state) => state.setSourceFilterOpen);
   const [adapterFilter, setAdapterFilter] = useState<AdapterFilter>("all");
   const [adapterQuery, setAdapterQuery] = useState("");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
@@ -212,6 +219,21 @@ export function ConfigCenter() {
   const [configName, setConfigName] = useState("");
   const [importText, setImportText] = useState("");
   const [rawDraft, setRawDraft] = useState<string | null>(null);
+  /**
+   * Which view the 原始配置 tab is in.
+   *
+   * Visual by default: most of what a user does to a configuration — rename a source, fix an
+   * address, drop one — does not need a text editor, and opening on 340 lines of JSON presents the
+   * hardest possible surface for the easiest task. The code view is one click away for the work that
+   * genuinely needs it.
+   */
+  const [rawMode, setRawMode] = useState<RawMode>("visual");
+  /** The result of the last format, validate or repair, shown under the editor. */
+  const [rawStatus, setRawStatus] = useState<{
+    tone: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
+  const [isSavingRaw, setIsSavingRaw] = useState(false);
   const [parseState, setParseState] = useState<{
     type: "idle" | "success" | "error";
     message: string;
@@ -1052,6 +1074,162 @@ export function ConfigCenter() {
       message: `${result.changes.join("、")}。请点击解析配置生成报告。`,
     });
   };
+
+  /**
+   * Writes an edit from either view into the raw draft.
+   *
+   * One path in and one place the draft changes, so the two views cannot disagree. It deliberately
+   * does **not** touch `importText`: that is the import dialog's own buffer, and feeding raw-tab
+   * edits into it would mean opening 导入配置 later showed — and could merge — text the user had
+   * already saved, rather than the text they are about to import.
+   */
+  const handleRawTextChange = (value: string) => {
+    setRawDraft(value);
+  };
+
+  /** Turns a parse issue into a message that names where it is. */
+  const describeRawIssue = (prefix: string, issue: ParseIssue | null | undefined) => {
+    const position = issue?.line
+      ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
+      : "";
+    return `${prefix}${position}：${issue?.message ?? "未知解析错误"}`;
+  };
+
+  /**
+   * Re-indents the configuration.
+   *
+   * The same operation the import dialog offers, applied to the open document rather than to text
+   * being imported. It is the first thing to try on a file that has been pasted together by hand,
+   * and it is also what makes the code view readable again after a visual edit.
+   */
+  const handleFormatRaw = () => {
+    const result = formatConfigText(editorText);
+    if (!result.ok) {
+      setRawStatus({ tone: "error", message: describeRawIssue("格式化失败", result.issue) });
+      return;
+    }
+    handleRawTextChange(result.text);
+    setRawStatus({ tone: "success", message: "已重新排版。" });
+  };
+
+  /**
+   * Checks the configuration without changing it.
+   *
+   * Formatting and repairing both rewrite the file, so a user who only wants to know whether it is
+   * valid had no way to ask. This reports what the parser sees — including how many sources it found
+   * and which ones are unusable — and leaves the text alone.
+   */
+  const handleValidateRaw = () => {
+    const result = parseConfigText(editorText, configBaseUrl);
+    if (!result.ok) {
+      setRawStatus({
+        tone: "error",
+        message: describeRawIssue("校验未通过", result.issues[0]),
+      });
+      return;
+    }
+    const unusable = result.sources.filter((source) => !isTestableSource(source)).length;
+    setRawStatus({
+      tone: "success",
+      message:
+        `校验通过：识别到 ${result.sources.length} 个源` +
+        (result.liveCount > 0 ? `（其中直播源 ${result.liveCount} 个）` : "") +
+        (unusable > 0 ? `，${unusable} 个没有可用适配器。` : "，全部有可用适配器。"),
+    });
+  };
+
+  /** Applies the automatic repairs the import path knows about. */
+  const handleRepairRaw = () => {
+    const result = repairConfigText(editorText);
+    if (!result.ok) {
+      setRawStatus({ tone: "error", message: describeRawIssue("修正失败", result.issue) });
+      return;
+    }
+    // `repairConfigText` reports "found nothing" as a change entry rather than as an empty list, so
+    // the check is on the text rather than on the list: writing an identical string back would
+    // re-serialise the document and drop comments for no reason.
+    if (result.text === editorText) {
+      setRawStatus({ tone: "info", message: "没有找到需要修正的地方。" });
+      return;
+    }
+    handleRawTextChange(result.text);
+    setRawStatus({ tone: "success", message: `${result.changes.join("、")}。` });
+  };
+
+  /**
+   * Saves the edited configuration as the current one.
+   *
+   * The raw tab previously had no save at all: edits went into a draft that only the import dialog
+   * read, so a change made in the visual editor — or in the code editor — was silently discarded
+   * unless the user happened to open 导入配置 and confirm. Managing a configuration means the change
+   * has to be able to land.
+   *
+   * The source list is merged from the *existing* records against the new parse rather than taken
+   * from the parse. That is what preserves the user's own switches: an edited entry keeps its
+   * `enabled` and test state because it is the same source by identity, while a deleted one simply
+   * has no counterpart and drops out. Taking the parse directly would reset every switch on the page
+   * each time a name was corrected.
+   */
+  const handleSaveRaw = async () => {
+    // The guard is a separate function so it can be tested: the editor that can produce invalid text
+    // is CodeMirror, which a jsdom test cannot type into, and this is the check that stops an
+    // unreadable file from replacing a working configuration.
+    const allowed = canSaveVisualConfig(editorText);
+    if (!allowed.ok) {
+      setRawStatus({ tone: "error", message: allowed.message });
+      return;
+    }
+    const result = parseConfigText(editorText, configBaseUrl);
+    if (!result.ok) {
+      setRawStatus({
+        tone: "error",
+        message: describeRawIssue("配置无法保存，请先修正", result.issues[0]),
+      });
+      return;
+    }
+    setIsSavingRaw(true);
+    try {
+      const merged = mergeSourceLists(sources, result.sources).sources;
+      const name = activeDocument?.name ?? "中心配置";
+      const saved = await replaceAllConfigDocuments({
+        name,
+        rawConfig: editorText,
+        normalizedConfig: result.normalizedConfig,
+        sources: merged,
+        liveCount: result.liveCount,
+        sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
+      });
+      const document: StoredConfigDocument = saved ?? {
+        id: activeConfigId ?? -Date.now(),
+        name,
+        rawConfig: editorText,
+        normalizedConfig: result.normalizedConfig,
+        sources: merged,
+        sourceCount: merged.length,
+        liveCount: result.liveCount,
+        importedAt: new Date().toISOString(),
+        sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
+      };
+      setConfigDocument(document);
+      // The draft is dropped so the editors read the saved document again; keeping it would leave
+      // the page showing text that no longer matches what is stored.
+      setRawDraft(null);
+      setRawStatus({
+        tone: "success",
+        message: `已保存：${merged.length} 个源。`,
+      });
+    } catch (error) {
+      setRawStatus({
+        tone: "error",
+        message: `保存失败：${error instanceof Error ? error.message : "未知错误"}`,
+      });
+    } finally {
+      setIsSavingRaw(false);
+    }
+  };
+
+  /** Whether the open document has unsaved edits, so the save button can say so. */
+  const hasRawChanges = rawDraft !== null && rawDraft !== rawConfig;
 
   const saveParseError = (error: unknown) => {
     const message =
@@ -1900,29 +2078,137 @@ export function ConfigCenter() {
           >
             <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
               <CardHeader className="shrink-0 border-b pb-4 pt-5">
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Code2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  原始配置文本
-                </CardTitle>
-                <CardDescription>
-                  可直接编辑原始配置；确认后使用导入流程解析并保存。
-                </CardDescription>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Code2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
+                      原始配置
+                    </CardTitle>
+                    <CardDescription>
+                      {rawMode === "visual"
+                        ? "以列表方式管理配置里的源与设置，改动会立刻写回配置文本。"
+                        : "直接编辑配置文本；改动会写回配置，切回可视化模式即可查看。"}
+                    </CardDescription>
+                  </div>
+                  {/* Two modes over one document rather than two editors: the text stays the
+                      source of truth, and switching views never copies or converts anything. */}
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Tabs
+                      value={rawMode}
+                      onValueChange={(value) => setRawMode(value as RawMode)}
+                    >
+                      <TabsList>
+                        <TabsTrigger value="visual" className="gap-1.5">
+                          <ListTree className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                          可视化
+                        </TabsTrigger>
+                        <TabsTrigger value="code" className="gap-1.5">
+                          <Braces className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                          代码
+                        </TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+                    {rawMode === "code" && (
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          disabled={!editorText.trim()}
+                          onClick={handleFormatRaw}
+                        >
+                          <AlignLeft className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                          格式化
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          disabled={!editorText.trim()}
+                          onClick={handleValidateRaw}
+                        >
+                          <ShieldCheck className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                          校验
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          disabled={!editorText.trim()}
+                          onClick={handleRepairRaw}
+                        >
+                          <WandSparkles className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                          自动修正
+                        </Button>
+                      </>
+                    )}
+                    {/* The save action is shared: a change made in either view is a change to the
+                        same document, and having it only in one would make the other look like it
+                        saved by itself. Disabled until there is something to save, so the button
+                        also answers "are my edits applied". */}
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="gap-1.5"
+                      disabled={!hasRawChanges || isSavingRaw}
+                      onClick={() => void handleSaveRaw()}
+                    >
+                      {isSavingRaw ? (
+                        <LoaderCircle className="size-3.5 animate-spin" data-icon="inline-start" aria-hidden="true" />
+                      ) : (
+                        <Save className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                      )}
+                      {hasRawChanges ? "保存改动" : "已保存"}
+                    </Button>
+                  </div>
+                </div>
               </CardHeader>
               {/* The editor takes the remaining height instead of a fixed 680px. A fixed height
                   made the card 938px tall in an 805px window, and since the page itself is
                   overflow-hidden the bottom of the editor — and the last lines of the
                   configuration — could not be reached at all. */}
               <CardContent className="flex min-h-0 flex-1 flex-col p-3 pt-4">
-                <JsonEditor
-                  value={editorText}
-                  onChange={(value) => {
-                    setRawDraft(value);
-                    setImportText(value);
-                  }}
-                  aria-label="原始配置文本"
-                  className="min-h-0 flex-1"
-                />
+                {rawMode === "visual" ? (
+                  <ConfigVisualEditor
+                    value={editorText}
+                    onChange={handleRawTextChange}
+                  />
+                ) : (
+                  <JsonEditor
+                    value={editorText}
+                    onChange={handleRawTextChange}
+                    aria-label="原始配置文本"
+                    className="min-h-0 flex-1"
+                  />
+                )}
               </CardContent>
+              {/* One report, shared by both modes: a parse failure is a property of the document,
+                  not of the view it was found in. */}
+              {rawStatus && (
+                <div className="shrink-0 border-t border-border/60 px-3 py-2.5">
+                  <div
+                    role="status"
+                    className={cn(
+                      "flex items-start gap-2 rounded-md p-2.5 text-xs leading-5",
+                      rawStatus.tone === "error"
+                        ? "border border-destructive/40 bg-destructive/10 text-destructive"
+                        : rawStatus.tone === "success"
+                          ? "border border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]"
+                          : "border border-border/60 bg-muted/30 text-muted-foreground",
+                    )}
+                  >
+                    {rawStatus.tone === "error" ? (
+                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+                    ) : (
+                      <Check className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+                    )}
+                    <span>{rawStatus.message}</span>
+                  </div>
+                </div>
+              )}
             </Card>
           </TabsContent>
 

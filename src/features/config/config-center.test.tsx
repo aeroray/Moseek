@@ -14,6 +14,7 @@ import {
   updateSourceTest as updateSourceTestCommand,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
+import { defaultSourceFilter } from "@/features/config/source-filter";
 import type { SourceRecord, SourceTestResult } from "@/types/moseek";
 
 // The page's job is to answer three questions in order: which configuration am I on, what is in
@@ -207,6 +208,13 @@ function openRawTab() {
   fireEvent.click(tab);
 }
 
+/** Switches the raw tab between its two views. Nested tabs need the same pointer sequence. */
+function chooseRawMode(name: "可视化" | "代码") {
+  const tab = screen.getByRole("tab", { name });
+  fireEvent.mouseDown(tab, { button: 0 });
+  fireEvent.click(tab);
+}
+
 /** Opens the 解析报告 tab. Radix switches tabs on pointer-down, not click. */
 function openReportTab() {
   const tab = screen.getByRole("tab", { name: "解析报告" });
@@ -264,6 +272,12 @@ describe("config center", () => {
     vi.mocked(replaceAllConfigDocuments).mockClear();
     vi.mocked(activateConfigDocument).mockReset();
     vi.mocked(activateConfigDocument).mockResolvedValue(null);
+    // The filter now lives in the store so it survives a restart, which means it also survives
+    // between tests. Reset it here, or a filter one test chose narrows the next test's list.
+    useAppStore.setState({
+      sourceFilter: defaultSourceFilter,
+      isSourceFilterOpen: false,
+    });
   });
 
   it("names itself 配置中心", () => {
@@ -912,9 +926,11 @@ describe("config center", () => {
     // unreachable. jsdom cannot measure this, so the contract that makes it fit is what is pinned.
     renderCenter();
     openRawTab();
+    // The code view is where the editor lives; the visual view is the default.
+    chooseRawMode("代码");
 
     const card = screen
-      .getAllByText("原始配置文本")
+      .getAllByText("原始配置")
       .map((node) => node.closest("[data-slot='card']"))
       .find(Boolean);
     expect(card?.className).toContain("min-h-0");
@@ -926,6 +942,309 @@ describe("config center", () => {
     // No viewport-derived height: that is what overflowed the window.
     expect(editor?.className).not.toMatch(/h-\[min\(/);
     expect(editor?.className).not.toContain("min-h-[520px]");
+  });
+
+  it("opens the raw tab in the visual view", () => {
+    // Most of what a user does — rename a source, fix an address, drop one — does not need a text
+    // editor, and 340 lines of JSON is the hardest possible surface for the easiest task.
+    renderCenter();
+    openRawTab();
+
+    expect(screen.getByRole("tab", { name: "可视化" })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    // The sections a configuration is made of, as lists rather than braces. The heading carries the
+    // count and the hint as part of its accessible name, which is what makes it readable on its own.
+    for (const [title, hint] of [
+      ["影视源", "点播接口"],
+      ["直播源", "频道列表"],
+      ["解析服务", "解析成可直接播放的地址"],
+    ] as const) {
+      expect(
+        screen.getByRole("button", { name: new RegExp(`^${title}.*${hint}`) }),
+      ).toBeInTheDocument();
+    }
+    // And the entries are rows, not braces.
+    expect(screen.getByRole("button", { name: "编辑 可用的源" })).toBeInTheDocument();
+  });
+
+  it("keeps one document across the two views", () => {
+    // Two views, one document: switching must not copy, convert or discard anything, and an edit
+    // made in the code view has to be what the visual view then shows.
+    renderCenter();
+    openRawTab();
+
+    const sites = screen.getByRole("button", { name: /^影视源/ });
+    expect(within(sites).getByText("2")).toBeInTheDocument();
+
+    chooseRawMode("代码");
+    // The visual view is gone and the editor is present.
+    expect(screen.queryByRole("button", { name: /^影视源/ })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("原始配置文本")).toBeInTheDocument();
+  });
+
+  it("offers the code view's helpers only in the code view", () => {
+    // Format, validate and repair act on text. Showing them over a form would suggest they apply
+    // to the form.
+    renderCenter();
+    openRawTab();
+
+    for (const name of ["格式化", "校验", "自动修正"]) {
+      expect(screen.queryByRole("button", { name }), name).not.toBeInTheDocument();
+    }
+
+    chooseRawMode("代码");
+    for (const name of ["格式化", "校验", "自动修正"]) {
+      expect(screen.getByRole("button", { name }), name).toBeInTheDocument();
+    }
+  });
+
+  it("reports what the configuration contains when asked to validate", () => {
+    // A user who only wants to know whether the file is valid had no way to ask: formatting and
+    // repairing both rewrite it. This reports without touching the text, which is asserted through
+    // the save button: an edit that reformatted would leave the document dirty and offer to save.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        // Deliberately unformatted, so a rewrite would be visible.
+        rawConfig: '{"sites":[{"key":"ok","name":"可用的源","api":"https://a.example/api"}]}',
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+    chooseRawMode("代码");
+
+    fireEvent.click(screen.getByRole("button", { name: "校验" }));
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("校验通过");
+    expect(status).toHaveTextContent(/识别到 \d+ 个源/);
+    // Nothing was edited, so there is nothing to save. A validate that quietly reformatted would
+    // leave the document dirty — which is the difference this asserts.
+    expect(screen.getByRole("button", { name: /已保存/ })).toBeDisabled();
+  });
+
+  it("says so when a check finds nothing to change", () => {
+    // "自动修正" that silently does nothing is indistinguishable from a broken button. It also must
+    // not write the text back: re-serialising an unchanged document would drop comments for nothing.
+    renderCenter();
+    openRawTab();
+    chooseRawMode("代码");
+
+    fireEvent.click(screen.getByRole("button", { name: "自动修正" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent("没有找到需要修正的地方");
+  });
+
+  it("applies a repair it can actually make, and names it", () => {
+    // The other branch: a file with something to fix is rewritten, and the message says what was
+    // done rather than only that something happened.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        // A Markdown fence around the JSON, which the repair path knows how to strip.
+        rawConfig: "```json\n{\"sites\":[]}\n```",
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+    chooseRawMode("代码");
+
+    fireEvent.click(screen.getByRole("button", { name: "自动修正" }));
+
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent("移除 Markdown 代码围栏");
+  });
+
+  it("saves an edit made in the visual view", async () => {
+    // The raw tab previously had no save at all: edits went into a draft that only the import
+    // dialog read, so a change was discarded unless the user happened to open 导入配置 and confirm.
+    // Managing a configuration means the change has to be able to land.
+    renderCenter();
+    openRawTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+    const nameField = screen.getByLabelText("name");
+    fireEvent.change(nameField, { target: { value: "改名后的源" } });
+    fireEvent.blur(nameField);
+
+    // The button reports that there is something to save, which is also how the user knows their
+    // edit is not already applied.
+    const save = screen.getByRole("button", { name: /保存改动/ });
+    expect(save).toBeEnabled();
+
+    vi.mocked(replaceAllConfigDocuments).mockClear();
+    fireEvent.click(save);
+
+    await waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+    });
+    const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
+    expect(written.rawConfig).toContain("改名后的源");
+    // And the button settles back to 已保存, so the state of the page matches the state of storage.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /已保存/ })).toBeDisabled();
+    });
+  });
+
+  it("keeps the user's switches when a name is corrected", async () => {
+    // The save merges the existing records against the new parse rather than taking the parse
+    // directly. Taking it would reset every switch on the page each time a name was corrected.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        sources: useAppStore.getState().sources.map((source) =>
+          source.key === "ok" ? { ...source, enabled: false, testStatus: "passed" as const } : source,
+        ),
+      });
+    });
+    openRawTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+    const nameField = screen.getByLabelText("name");
+    fireEvent.change(nameField, { target: { value: "改名的源" } });
+    fireEvent.blur(nameField);
+
+    vi.mocked(replaceAllConfigDocuments).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /保存改动/ }));
+
+    await waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+    });
+    const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
+    const kept = written.sources.find((source) => source.key === "ok");
+    expect(kept?.enabled).toBe(false);
+    expect(kept?.testStatus).toBe("passed");
+  });
+
+  it("refuses to save a configuration it cannot parse, and says where", async () => {
+    // Saving invalid text would replace a working configuration with one that cannot be read. The
+    // draft is what the save reads, and the visual view cannot be driven to produce invalid text,
+    // so the refusal is reached through the store's document instead.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ rawConfig: "{ sites: [", normalizedConfig: "{}" });
+    });
+    openRawTab();
+    vi.mocked(replaceAllConfigDocuments).mockClear();
+
+    // The visual view reports that it cannot read the file rather than showing it as empty.
+    expect(screen.getByText("无法以可视化方式打开")).toBeInTheDocument();
+    // And the code view offers the helpers, with the save disabled because nothing was edited.
+    chooseRawMode("代码");
+    expect(screen.getByRole("button", { name: /已保存/ })).toBeDisabled();
+    expect(replaceAllConfigDocuments).not.toHaveBeenCalled();
+  });
+
+  it("edits a source through the visual view and writes it back", () => {
+    // The point of the visual editor: changing a field is typing in a box, and the result reaches
+    // the save path. Asserted through the save, because a visual view that only updated its own
+    // state would still relabel the row and still enable the button.
+    renderCenter();
+    openRawTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+    const nameField = screen.getByLabelText("name");
+    fireEvent.change(nameField, { target: { value: "改名后的源" } });
+    fireEvent.blur(nameField);
+
+    // The row's label follows, which is the visual view reading its own document.
+    expect(screen.getByRole("button", { name: "编辑 改名后的源" })).toBeInTheDocument();
+    // The other entry is untouched.
+    expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
+
+    vi.mocked(replaceAllConfigDocuments).mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /保存改动/ }));
+    return waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+    }).then(() => {
+      const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
+      expect(written.rawConfig).toContain("改名后的源");
+      expect(written.rawConfig).toContain("不可用的源");
+    });
+  });
+
+  it("refuses to empty a required field, and says why", () => {
+    // Writing an empty address would leave an entry that cannot work, with the reason invisible.
+    renderCenter();
+    openRawTab();
+    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+
+    const apiField = screen.getByLabelText("api");
+    fireEvent.change(apiField, { target: { value: "" } });
+    fireEvent.blur(apiField);
+
+    expect(screen.getByText(/必填/)).toBeInTheDocument();
+    // The entry is still listed under its original name, so nothing was half-applied.
+    expect(screen.getByRole("button", { name: "编辑 可用的源" })).toBeInTheDocument();
+  });
+
+  it("removes a source from the configuration text", () => {
+    // The list removes a parsed source; this edits the file. Both are wanted, and they are
+    // different operations.
+    renderCenter();
+    openRawTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除 可用的源" }));
+
+    expect(screen.queryByRole("button", { name: "编辑 可用的源" })).not.toBeInTheDocument();
+    // The other entry is untouched.
+    expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
+  });
+
+  it("adds a source carrying the fields the section needs", () => {
+    renderCenter();
+    openRawTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "添加影视源" }));
+
+    // Three entries now: the two fixtures plus the new one, which is named by its position until
+    // it has a name.
+    const sites = screen.getByRole("button", { name: /^影视源/ });
+    expect(within(sites).getByText("3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑 第 3 项" })).toBeInTheDocument();
+  });
+
+  it("finds an entry by name or address", () => {
+    // With 340 entries the search is the difference between a usable list and a wall.
+    renderCenter();
+    openRawTab();
+
+    fireEvent.change(screen.getByLabelText("搜索配置项"), {
+      target: { value: "不可用" },
+    });
+
+    expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑 可用的源" })).not.toBeInTheDocument();
+  });
+
+  it("warns before a visual edit would drop comments", () => {
+    // Re-serialising normalises formatting and drops comments. Telling the user first is the
+    // difference between a considered choice and silent loss of text they wrote.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: "{\n  // 注释\n  sites: [],\n}",
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+
+    expect(screen.getByText(/可视化模式保存时会重新排版并去掉注释/)).toBeInTheDocument();
+  });
+
+  it("explains a configuration it cannot open visually", () => {
+    // "Nothing here" and "I cannot read this" need different actions, so the failure is stated
+    // rather than shown as an empty list.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ rawConfig: "{ sites: [", normalizedConfig: "{}" });
+    });
+    openRawTab();
+
+    expect(screen.getByText("无法以可视化方式打开")).toBeInTheDocument();
+    expect(screen.getByText(/切换到「代码模式」/)).toBeInTheDocument();
   });
 
   it("gives the adapter list the same toolbar as the source list", () => {
