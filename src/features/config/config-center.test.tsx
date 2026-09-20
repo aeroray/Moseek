@@ -1000,9 +1000,15 @@ describe("config center", () => {
       .map((node) => node.closest("[data-slot='card']"))
       .find(Boolean);
     expect(rawCard?.querySelector("[data-slot='card-content']")?.className).toContain("p-0");
-    // The visual editor supplies the inset for both of its views.
-    const visual = rawCard?.querySelector("[data-slot='card-content'] > div");
-    expect(visual?.className).toContain("px-4");
+    // The search box and the scroll area's content each carry the 16px, because the scroll area
+    // itself must span the full card width — that is what keeps the overlay scrollbar from moving
+    // the list. See the note on `makes the raw search box and the list below it the same width`.
+    const searchWrap = rawCard?.querySelector("[data-slot='card-content'] > div > div.relative");
+    expect(searchWrap?.className).toContain("px-4");
+    const scrollContent = rawCard?.querySelector(
+      "[data-slot='scroll-area-viewport'] > div > div",
+    );
+    expect(scrollContent?.className).toContain("px-4");
 
     openReportTab();
     const reportCard = screen
@@ -1011,13 +1017,31 @@ describe("config center", () => {
       .find(Boolean);
     expect(reportCard?.querySelector("[data-slot='card-content']")?.className).toContain("p-0");
     expect(
-      reportCard?.querySelector("[data-slot='card-content'] > div")?.className,
+      reportCard?.querySelector("[data-slot='scroll-area-viewport'] > div > div")?.className,
     ).toContain("px-4");
   });
 
+  it("keeps the top inset, which the split padding had dropped", () => {
+    // The wrapper carried `px-4 pb-4` with no `pt`, so the search box sat flush against the card
+    // header's border. The inset is now declared per element rather than split across two, so a
+    // half-applied padding is not expressible.
+    renderCenter();
+    openRawTab();
+
+    const rawCard = screen
+      .getAllByText("原始配置")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean);
+    const wrapper = rawCard?.querySelector("[data-slot='card-content'] > div");
+    expect(wrapper?.className).toContain("pt-4");
+  });
+
   it("makes the raw search box and the list below it the same width", () => {
-    // They are siblings in a column, so they must share an edge. The scroll container used to carry
-    // `pr-1` to keep the scrollbar clear, which made the list 4px narrower than the search box.
+    // They are siblings in a column, so they must share an edge. The list must use an overlay
+    // scrollbar: a native one is laid out inside its box and takes 6px of width from the content,
+    // which measured as a 1072px list under a 1078px search box and a section box 17px from the
+    // card's left edge but 23px from its right. jsdom cannot measure that, so what is pinned is
+    // that the list scrolls through an overlay `ScrollArea` rather than `overflow-y-auto`.
     renderCenter();
     openRawTab();
 
@@ -1026,11 +1050,16 @@ describe("config center", () => {
       .map((node) => node.closest("[data-slot='card']"))
       .find(Boolean)
       ?.querySelector("[data-slot='card-content']");
-    const scroller = content?.querySelector("div.overflow-y-auto");
+
+    const scroller = content?.querySelector("[data-slot='scroll-area']");
     expect(scroller).not.toBeNull();
-    // No asymmetric padding: any inset is on the shared parent, so both children match.
-    expect(scroller?.className).not.toMatch(/\bpr-\d/);
-    expect(scroller?.className).not.toMatch(/\bpl-\d/);
+    // No native scroller anywhere in this tab, and no asymmetric padding on the scroll content.
+    expect(content?.querySelector("div.overflow-y-auto")).toBeNull();
+    const scrollContent = content?.querySelector(
+      "[data-slot='scroll-area-viewport'] > div > div",
+    );
+    expect(scrollContent?.className).toContain("px-4");
+    expect(scrollContent?.className).not.toMatch(/\bpr-\d/);
   });
 
   it("gives 原始配置's rows the same padding as a table row", () => {

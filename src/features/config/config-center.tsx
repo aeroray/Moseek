@@ -2210,9 +2210,12 @@ export function ConfigCenter() {
                   按字段和执行边界整理的导入结果。
                 </CardDescription>
               </CardHeader>
-              {/* `p-0` and an inner `px-4`, matching 原始配置: the two content tabs must agree, and
-                  the arbitrary `p-5` here put the report's block edges 4px inside the header's. */}
-              <CardContent className="min-h-0 flex-1 overflow-y-auto p-0">
+              {/* The content carries no padding and does not scroll; the inner wrapper does both.
+                  That is the structure the table tabs use, and it is what keeps the scrollbar from
+                  shifting the content: the bar is drawn over the padding rather than taking width
+                  from it. A native `overflow-y-auto` on the content box itself cost 6px of width
+                  and made the block edges asymmetric — 16px on the left, 22px on the right. */}
+              <CardContent className="flex min-h-0 flex-1 flex-col p-0">
                 {report ? (
                   /* One verdict, then two groups of labelled rows.
                      The previous layout was eight equal-weight bordered cards, each an icon plus a
@@ -2221,7 +2224,8 @@ export function ConfigCenter() {
                      mattered. A verdict block answers "did it work" first, and the groups answer
                      "what came in" and "what is being refused" — the two questions the report
                      actually exists for. */
-                  <div className="flex flex-col gap-5 px-4 pb-4">
+                  <ScrollArea className="min-h-0 flex-1" viewportClassName="[&>div]:!block">
+                    <div className="flex flex-col gap-5 px-4 py-4">
                     <ReportVerdict
                       ok={report.ok}
                       sourceCount={report.sources.length}
@@ -2334,9 +2338,10 @@ export function ConfigCenter() {
                         </div>
                       </section>
                     )}
-                  </div>
+                    </div>
+                  </ScrollArea>
                 ) : (
-                  <div className="px-4 pb-4">
+                  <div className="px-4 py-4">
                     <Empty className="min-h-64 border border-dashed bg-card/40">
                       <EmptyHeader>
                         <EmptyMedia variant="icon">

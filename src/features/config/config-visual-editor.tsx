@@ -14,6 +14,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
   addVisualEntry,
@@ -99,23 +100,32 @@ export function ConfigVisualEditor({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4">
+    /* No padding on this wrapper. The inset lives on the two things that need it — the search box
+       and the scroll area's content — because the scroll area has to span the card's full width.
+       That is the structure the table tabs use, and it is what keeps the scrollbar from moving
+       anything: the bar is drawn over the padding rather than taking width from the list.
+
+       Measured before this: the list was 1072px against the search box's 1078px, and the section box
+       sat 17px from the card's left edge but 23px from its right. Both were the native scrollbar's
+       6px. My earlier measurement missed it because the fixture had three sources — nothing
+       overflowed — and because Chrome was started with `--hide-scrollbars`. */
+    <div className="flex min-h-0 flex-1 flex-col gap-3 pt-4">
       {hasComments && (
-        <div className="flex items-start gap-2 rounded-md border border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] p-2.5 text-xs leading-5 text-[color:var(--status-adapter)]">
+        <div className="mx-4 flex items-start gap-2 rounded-md border border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] p-2.5 text-xs leading-5 text-[color:var(--status-adapter)]">
           <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
           这份配置里有注释。可视化模式保存时会重新排版并去掉注释，需要保留请用「代码模式」。
         </div>
       )}
 
       {fieldError && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 p-2.5 text-xs text-destructive">
+        <div className="mx-4 rounded-md border border-destructive/40 bg-destructive/10 p-2.5 text-xs text-destructive">
           {fieldError}
         </div>
       )}
 
-      <div className="relative">
+      <div className="relative px-4">
         <Search
-          className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
+          className="absolute left-6 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
           aria-hidden="true"
         />
         <Input
@@ -128,39 +138,39 @@ export function ConfigVisualEditor({
         />
       </div>
 
-      {/* The scroll container reserves nothing on the right. It used to carry `pr-1` to keep the
-          scrollbar off the content, which made the list 4px narrower than the search box directly
-          above it — the two are siblings and must share an edge. The bar overlays the content
-          instead, as it does in the table tabs, where the rows run to the card's edge under it. */}
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
-        {model.sections.map((section) => (
-          <SectionBlock
-            key={section.key}
-            section={section}
-            query={normalizedQuery}
-            expanded={expandedSection === section.key}
-            onToggle={() =>
-              setExpandedSection(
-                expandedSection === section.key ? null : section.key,
-              )
-            }
-            editingIndex={editingIndex}
-            onEdit={setEditingIndex}
-            onApply={apply}
-            rawText={value}
-            testByKey={testByKey}
-          />
-        ))}
+      {/* The same `ScrollArea` the table tabs use, rather than a native `overflow-y-auto`: a native
+          bar is laid out inside the box and takes width from the content. */}
+      <ScrollArea className="min-h-0 flex-1" viewportClassName="[&>div]:!block">
+        <div className="flex flex-col gap-3 px-4 pb-4">
+          {model.sections.map((section) => (
+            <SectionBlock
+              key={section.key}
+              section={section}
+              query={normalizedQuery}
+              expanded={expandedSection === section.key}
+              onToggle={() =>
+                setExpandedSection(
+                  expandedSection === section.key ? null : section.key,
+                )
+              }
+              editingIndex={editingIndex}
+              onEdit={setEditingIndex}
+              onApply={apply}
+              rawText={value}
+              testByKey={testByKey}
+            />
+          ))}
 
-        {model.settings.length > 0 && (
-          <SettingsBlock
-            settings={model.settings}
-            rawText={value}
-            onApply={apply}
-            query={normalizedQuery}
-          />
-        )}
-      </div>
+          {model.settings.length > 0 && (
+            <SettingsBlock
+              settings={model.settings}
+              rawText={value}
+              onApply={apply}
+              query={normalizedQuery}
+            />
+          )}
+        </div>
+      </ScrollArea>
     </div>
   );
 }
