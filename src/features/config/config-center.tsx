@@ -139,12 +139,14 @@ import {
   isTauriRuntime,
   loadActiveConfig,
   listScriptArchives,
+  probeScriptAddress,
   recoverKnownLiveSources,
   replaceAllConfigDocuments,
   setConfigSourceBaseUrl,
   setSourceScriptArchive,
   testSource,
   updateSourceTest,
+  type ScriptAddressProbe,
   type StoredConfigDocument,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
@@ -3105,6 +3107,11 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
         <div className="p-3.5 text-xs leading-5 text-muted-foreground bg-muted/10">
           {adapter.reason}
         </div>
+        {/* Only where the script address is the thing in question. For a source blocked by a JAR or
+            by a spider runtime, checking a script address would answer a question nobody asked. */}
+        {(adapter.id === "drpy-js" || adapter.id === "js-extension") && (
+          <ScriptAddressCheck source={source} />
+        )}
         {adapter.operations.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 p-3 bg-muted/5">
             <span className="text-xs text-muted-foreground/70 mr-1">支持操作：</span>
@@ -3117,6 +3124,112 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
         )}
       </div>
     </DetailSection>
+  );
+}
+
+/**
+ * Checks whether this source's script address can actually be fetched.
+ *
+ * **This exists because "blocked" was hiding four different situations under one sentence.** A
+ * script that 404s, a host that refuses the request, one that exists but needs a host API layer the
+ * sandbox does not provide, and one that is not a script at all were all reported as a missing
+ * sandbox. Measured on the author's configuration, 9 of the 10 distinct addresses are unusable and
+ * 2 of those are a host refusing rather than a file missing — so the reader could not tell which of
+ * their sources were worth keeping.
+ *
+ * It runs on demand rather than automatically: it makes a request to a third-party host, which is
+ * not something to do behind the user's back while they scroll a list of 355 sources.
+ */
+function ScriptAddressCheck({ source }: { source: SourceRecord }) {
+  const [state, setState] = useState<
+    | { kind: "idle" }
+    | { kind: "checking" }
+    | { kind: "done"; probe: ScriptAddressProbe }
+    | { kind: "failed"; message: string }
+  >({ kind: "idle" });
+
+  const run = async () => {
+    setState({ kind: "checking" });
+    try {
+      const probe = await probeScriptAddress(source.api);
+      if (!probe) {
+        // Browser preview: the command is not registered there, and saying so is better than
+        // showing a spinner that never resolves.
+        setState({
+          kind: "failed",
+          message: "浏览器预览不会请求外部地址，请在桌面应用中检测。",
+        });
+        return;
+      }
+      setState({ kind: "done", probe });
+    } catch (error) {
+      setState({
+        kind: "failed",
+        message: error instanceof Error ? error.message : "检测失败",
+      });
+    }
+  };
+
+  const tone =
+    state.kind === "done"
+      ? state.probe.verdict === "reachable"
+        ? "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]"
+        : "border-[color:var(--status-partial-border)] bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]"
+      : "border-border/60 bg-muted/20 text-muted-foreground";
+
+  return (
+    <div className="flex flex-col gap-2 p-3.5">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs text-muted-foreground/70">脚本地址</span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7 shrink-0 gap-1.5 px-2 text-xs"
+          disabled={state.kind === "checking" || !source.api.trim()}
+          onClick={() => void run()}
+        >
+          {state.kind === "checking" ? (
+            <LoaderCircle className="size-3 animate-spin" aria-hidden="true" />
+          ) : (
+            <Search className="size-3" aria-hidden="true" />
+          )}
+          检测脚本地址
+        </Button>
+      </div>
+
+      <p className="break-all font-mono text-[11px] leading-5 text-muted-foreground">
+        {source.api || "（未填写）"}
+      </p>
+
+      {state.kind === "done" && (
+        <div
+          role="status"
+          className={cn("rounded-md border p-2.5 text-xs leading-5", tone)}
+        >
+          <p>{state.probe.message}</p>
+          {/* The mirror is offered as an address to look at, not applied silently: rewriting a
+              third-party source's address is the user's decision, and the value is worth seeing. */}
+          {state.probe.mirrorUrl && (
+            <div className="mt-2 border-t border-current/20 pt-2">
+              <p>{state.probe.mirrorReason}</p>
+              <p className="mt-1 break-all font-mono text-[11px]">
+                {state.probe.mirrorUrl}
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {state.kind === "failed" && (
+        <div
+          role="status"
+          className="rounded-md border border-destructive/40 bg-destructive/10 p-2.5 text-xs leading-5 text-destructive"
+        >
+          {state.message}
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -8,6 +8,7 @@ import { ConfigCenter } from "@/features/config/config-center";
 import {
   activateConfigDocument,
   fetchConfigUrl,
+  probeScriptAddress,
   replaceAllConfigDocuments,
   saveConfigDocument,
   testSource as testSourceCommand,
@@ -47,6 +48,7 @@ vi.mock("@/lib/tauri", () => ({
   setSourceScriptArchive: vi.fn(),
   findConfigDuplicate: vi.fn(async () => null),
   fetchConfigUrl: vi.fn(),
+  probeScriptAddress: vi.fn(),
 }));
 
 function testResult(
@@ -907,6 +909,122 @@ describe("config center", () => {
     expect(
       within(sheet).getByText(/Spider、远程脚本或 JAR/),
     ).toBeInTheDocument();
+  });
+
+  it("offers to check the script address only for a source whose script is the question", () => {
+    // A drpy source is blocked because its script cannot run, so checking whether the address is
+    // even reachable answers the reader's actual question. For a source blocked by a JAR or a spider
+    // runtime, a script probe would answer a question nobody asked.
+    const drpy = source({
+      key: "drpy-one",
+      name: "drpy 源",
+      api: "https://example.com/lib/drpy2.min.js",
+      capability: "blocked",
+    });
+    const jarred = source({
+      key: "jarred",
+      name: "JAR 源",
+      api: "https://example.com/spider",
+      jar: "https://example.com/1.jar",
+      capability: "blocked",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [drpy, jarred] });
+    });
+    // Both are `blocked`, so the page's opening filter hides them.
+    chooseFilter("未适配");
+
+    const openDrawer = (name: string) => {
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes(name));
+      fireEvent.click(row as HTMLElement);
+      return screen.getByRole("dialog");
+    };
+
+    const drpySheet = openDrawer("drpy 源");
+    expect(
+      within(drpySheet).getByRole("button", { name: /检测脚本地址/ }),
+    ).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    // The JAR source gets no such control.
+    const jarSheet = openDrawer("JAR 源");
+    expect(
+      within(jarSheet).queryByRole("button", { name: /检测脚本地址/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reports what the script check found, including a usable mirror", async () => {
+    // The point of the check: 403 and 404 are different answers, and a mirror is a third. Before
+    // this, all three were reported as a missing sandbox.
+    const drpy = source({
+      key: "drpy-one",
+      name: "drpy 源",
+      api: "https://jihulab.com/yw88075/tvbox/-/raw/main/dr/lib/drpy2.min.js",
+      capability: "blocked",
+    });
+    vi.mocked(probeScriptAddress).mockResolvedValue({
+      url: drpy.api,
+      verdict: "reachable",
+      message: "脚本地址不存在（文件已被删除或改名）。；同一份文件在镜像地址上可以读取。",
+      mirrorUrl:
+        "https://raw.githubusercontent.com/yw88075/tvbox/main/dr/lib/drpy2.min.js",
+      mirrorReason: "jihulab.com 拒绝直接读取该文件，同一份文件在 raw.githubusercontent.com 上可以读取",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [drpy] });
+    });
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("drpy 源"));
+    fireEvent.click(row as HTMLElement);
+    const sheet = screen.getByRole("dialog");
+
+    fireEvent.click(within(sheet).getByRole("button", { name: /检测脚本地址/ }));
+
+    await waitFor(() => {
+      expect(probeScriptAddress).toHaveBeenCalledWith(drpy.api);
+    });
+    // The mirror is shown as an address rather than applied: rewriting a third-party source's
+    // address is the user's decision.
+    await waitFor(() => {
+      expect(
+        within(sheet).getByText(
+          "https://raw.githubusercontent.com/yw88075/tvbox/main/dr/lib/drpy2.min.js",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(within(sheet).getByText(/同一份文件在镜像地址上可以读取/)).toBeInTheDocument();
+  });
+
+  it("says a check failed rather than leaving a spinner", async () => {
+    const drpy = source({
+      key: "drpy-one",
+      name: "drpy 源",
+      api: "https://example.com/lib/drpy2.min.js",
+      capability: "blocked",
+    });
+    vi.mocked(probeScriptAddress).mockRejectedValue(new Error("网络不可用"));
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [drpy] });
+    });
+    chooseFilter("未适配");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("drpy 源"));
+    fireEvent.click(row as HTMLElement);
+    const sheet = screen.getByRole("dialog");
+    fireEvent.click(within(sheet).getByRole("button", { name: /检测脚本地址/ }));
+
+    await waitFor(() => {
+      expect(within(sheet).getByRole("status")).toHaveTextContent("网络不可用");
+    });
   });
 
   it("offers a test only where the backend would actually run one", () => {

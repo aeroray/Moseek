@@ -173,4 +173,28 @@ describe("adapter registry", () => {
     expect(adapterStatusLabel("needs-adapter")).toBe("无法适配");
     expect(adapterStatusLabel("blocked")).toBe("已阻止");
   });
+
+  it("does not blame a missing sandbox for a source blocked by something else", () => {
+    // The drpy reason said 未提供 JS 沙箱, which was false twice: a QuickJS sandbox has existed
+    // since the script-runtime sidecar was added, and it is not what stops these sources — measured,
+    // 9 of the 10 distinct script addresses are unusable, and running one would need a host API
+    // layer (`request`, `pdfa`/`pdfh`, `CryptoJS`) the sandbox does not provide. Telling the reader
+    // a sandbox is missing sends them looking for a switch that would change nothing.
+    const drpy = getAdapterProfile(
+      source({ key: "drpy-one", api: "https://example.com/lib/drpy2.min.js" }),
+    );
+    expect(drpy.id).toBe("drpy-js");
+    expect(drpy.reason).not.toContain("沙箱");
+    // It names what is actually required instead.
+    expect(drpy.reason).toContain("宿主 API");
+
+    // A CatVod JS source is blocked because no archive is bound to it, not because the sandbox is
+    // absent — binding one moves the source to `local-script`, which runs.
+    const jsExtension = getAdapterProfile(
+      source({ key: "kitty", siteProtocol: "js-extension" }),
+    );
+    expect(jsExtension.id).toBe("js-extension");
+    expect(jsExtension.reason).not.toContain("没有启用脚本沙箱");
+    expect(jsExtension.reason).toContain("绑定本地脚本档案");
+  });
 });

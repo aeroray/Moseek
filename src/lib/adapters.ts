@@ -61,7 +61,11 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     label: "JS 扩展源",
     execution: "blocked",
     operations: ["分类", "首页", "搜索", "详情", "iframe 解析"],
-    reason: "识别小猫/CatVod JS 源契约，但当前没有启用脚本沙箱。",
+    // Same correction as `drpy-js`: the sandbox exists, and the reason this source is blocked is
+    // that no archive is bound to it. A source the user binds an archive to moves to `local-script`
+    // and runs; this label is what an unbound one reads.
+    reason:
+      "小猫/CatVod JS 源需要绑定本地脚本档案后才能运行；未绑定时不执行任何远程代码。",
   },
   "local-script": {
     label: "本地脚本适配器",
@@ -86,7 +90,19 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     label: "Drpy JS 适配器",
     execution: "blocked",
     operations: [],
-    reason: "未提供 JS 沙箱，远程 JavaScript 默认禁止执行。",
+    // **The old reason said "未提供 JS 沙箱", which was false twice over.** A QuickJS sandbox has
+    // existed since the script-runtime sidecar was added, and it is not what is stopping these
+    // sources anyway: measured on the author's configuration, 9 of the 10 distinct script addresses
+    // are unusable — 404, a dead host, or a host that will not serve the file — and only one of the
+    // 56 sources has a script that can be fetched at all. Telling the reader a sandbox is missing
+    // sends them looking for a switch that would change nothing.
+    //
+    // What actually blocks a drpy source is that running it needs a host API layer the sandbox does
+    // not provide: `request`, `pdfa`/`pdfh`/`pd`/`jsp` (drpy's selector engine), `CryptoJS`,
+    // `getProxyUrl` and the `assets://` module scheme. The per-source truth — whether the script is
+    // even reachable — is what 检测脚本地址 reports.
+    reason:
+      "drpy 脚本需要 request、pdfa/pdfh、CryptoJS 等宿主 API 才能运行；此外脚本地址本身也常常已经失效，可点「检测脚本地址」确认。",
   },
   "spider-runtime": {
     label: "Spider 运行时",

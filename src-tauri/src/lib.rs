@@ -9,6 +9,7 @@ mod models;
 mod policy;
 mod resolver;
 mod script_runtime;
+mod script_source;
 mod xbpq;
 
 use tauri::Manager;
@@ -50,6 +51,7 @@ pub fn run() {
             config::commands::update_source_test,
             config::commands::export_config,
             config::commands::fetch_config_url,
+            config::commands::probe_script_address,
             config::commands::set_config_source_base_url,
             config::commands::recover_known_live_sources,
             cms::browse_source,

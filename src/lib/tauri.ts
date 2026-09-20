@@ -243,6 +243,28 @@ export async function fetchConfigUrl(url: string) {
   return invokeCommand<string>("fetch_config_url", { url });
 }
 
+/** What checking one script address found. */
+export interface ScriptAddressProbe {
+  url: string;
+  /** `reachable`, `refused`, `missing` or `unreachable`. */
+  verdict: string;
+  message: string;
+  /** A mirror address that serves the same file, when one works. */
+  mirrorUrl: string | null;
+  mirrorReason: string | null;
+}
+
+/**
+ * Checks whether a source's script address can actually be fetched.
+ *
+ * Returns null in browser preview, where the command is not registered. The probe distinguishes a
+ * host refusing from a file being gone, which is what lets the interface stop reporting both as a
+ * missing sandbox.
+ */
+export async function probeScriptAddress(url: string) {
+  return invokeCommand<ScriptAddressProbe>("probe_script_address", { url });
+}
+
 export async function setConfigSourceBaseUrl(
   documentId: number,
   sourceBaseUrl: string,

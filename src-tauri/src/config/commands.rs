@@ -322,6 +322,165 @@ pub async fn fetch_config_url(url: String) -> Result<String, String> {
     policy::fetch_text(parsed_url, 10 * 1024 * 1024, "配置响应").await
 }
 
+/// What checking one script address found.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScriptAddressProbe {
+    /// The address that was checked, as the configuration states it.
+    pub url: String,
+    /// `reachable`, `refused`, `missing` or `unreachable`.
+    pub verdict: String,
+    /// A sentence for the interface, naming what happened.
+    pub message: String,
+    /// A mirror address that serves the same file, when we know one and it works.
+    pub mirror_url: Option<String>,
+    /// Why the mirror was worth trying.
+    pub mirror_reason: Option<String>,
+}
+
+/// Checks whether a source's script address can actually be fetched.
+///
+/// **This exists because "blocked" was hiding four different situations.** A JS source whose script
+/// 404s, one whose host refuses the request, one that exists but needs a sandbox, and one that is
+/// simply not a script at all were all reported with the same sentence about a missing sandbox —
+/// which was false for the first two and useless for the reader. Measured on the author's
+/// configuration, 9 of the 10 distinct script addresses are unusable, and 2 of those are a host
+/// refusing rather than a file missing.
+///
+/// It fetches through `fetch_text_following_redirects`, so every existing policy applies: only
+/// http(s), no loopback or LAN addresses, bounded redirects and a bounded body. A probe is a request
+/// to a third-party host, which is exactly what that policy is for.
+#[tauri::command]
+pub async fn probe_script_address(url: String) -> Result<ScriptAddressProbe, String> {
+    let trimmed = url.trim().to_string();
+    if trimmed.is_empty() {
+        return Ok(ScriptAddressProbe {
+            url: trimmed,
+            verdict: "unreachable".to_string(),
+            message: "这条源没有填写脚本地址。".to_string(),
+            mirror_url: None,
+            mirror_reason: None,
+        });
+    }
+
+    let direct = probe_one(&trimmed).await;
+    // The mirror is tried whenever the configured address does not yield a script — not only when
+    // the host refuses. Measured, the second GitLab address answers 404 to Moseek's own
+    // User-Agent while the same repository path on GitHub serves 38 KiB: a file that has moved
+    // between the two hosts looks identical to one that never existed. Trying the mirror on every
+    // failure costs one request in the case that cannot be helped, and recovers the case that can.
+    let mirror = crate::script_source::mirror_candidate(&trimmed);
+    if should_try_mirror(direct.0) {
+        if let Some(candidate) = mirror {
+            let mirrored = probe_one(&candidate.url).await;
+            if mirrored.0 == crate::script_source::ProbeVerdict::Reachable {
+                return Ok(ScriptAddressProbe {
+                    url: trimmed,
+                    verdict: "reachable".to_string(),
+                    message: join_sentences(&direct.1, "同一份文件在镜像地址上可以读取。"),
+                    mirror_url: Some(candidate.url),
+                    mirror_reason: Some(candidate.reason),
+                });
+            }
+            return Ok(ScriptAddressProbe {
+                url: trimmed,
+                verdict: direct.0.as_str().to_string(),
+                message: join_sentences(&direct.1, "镜像地址同样不可用。"),
+                mirror_url: None,
+                mirror_reason: Some(candidate.reason),
+            });
+        }
+    }
+
+    Ok(ScriptAddressProbe {
+        url: trimmed,
+        verdict: direct.0.as_str().to_string(),
+        message: direct.1,
+        mirror_url: None,
+        mirror_reason: mirror.map(|candidate| candidate.reason),
+    })
+}
+
+/// Whether a failed direct check justifies asking the mirror.
+///
+/// **Every failure does, and that is a measured decision rather than a cautious one.** The obvious
+/// rule — retry only when the host *refuses*, since a 404 means the file is gone — was wrong: the
+/// second GitLab address answers 404 to Moseek's own User-Agent while the identical repository path
+/// on GitHub serves 38 KiB. A file that has moved between two hosts and a file that never existed
+/// are indistinguishable from the failing response alone, so the mirror is the only way to tell.
+///
+/// Extracted from the command so the rule is testable: the command itself needs the network, and a
+/// rule that can only be exercised by fetching a third-party host is a rule nothing verifies.
+fn should_try_mirror(verdict: crate::script_source::ProbeVerdict) -> bool {
+    verdict != crate::script_source::ProbeVerdict::Reachable
+}
+
+/// Joins two sentences without doubling the punctuation.
+///
+/// Each half already ends in a full stop, so the naive `format!("{a}；{b}")` produced
+/// `……改名）。；同一份文件……` — a semicolon stranded after a full stop, which the author saw in the
+/// drawer. Trimming the first half's terminator is the whole fix.
+fn join_sentences(first: &str, second: &str) -> String {
+    let first = first.trim_end_matches(['。', '.', '；', ';', ' ']);
+    format!("{first}；{second}")
+}
+
+/// Fetches one address and classifies the outcome.
+async fn probe_one(url: &str) -> (crate::script_source::ProbeVerdict, String) {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return (
+            crate::script_source::ProbeVerdict::Unreachable,
+            "脚本地址不是有效的网址。".to_string(),
+        );
+    };
+    match policy::fetch_text_following_redirects(parsed, 1024 * 1024, "脚本内容", 3).await {
+        Ok(body) => {
+            // A host that answers 200 with an HTML page is not serving a script; a login or
+            // error page is a refusal in disguise, and calling it reachable would send the reader
+            // looking for a sandbox problem that is not there.
+            let head = body.trim_start().to_ascii_lowercase();
+            if head.starts_with("<!doctype html") || head.starts_with("<html") {
+                (
+                    crate::script_source::ProbeVerdict::Refused,
+                    "该地址返回的是网页而不是脚本。".to_string(),
+                )
+            } else {
+                (
+                    crate::script_source::ProbeVerdict::Reachable,
+                    format!("脚本可以读取，约 {} KiB。", body.len() / 1024),
+                )
+            }
+        }
+        Err(error) => {
+            // The policy layer reports the status inside its message, so the verdict is derived
+            // from the same text the user will read rather than from a second request.
+            let status = status_from_message(&error);
+            let verdict = status
+                .map(crate::script_source::ProbeVerdict::from_status)
+                .unwrap_or(crate::script_source::ProbeVerdict::Unreachable);
+            let message = match verdict {
+                crate::script_source::ProbeVerdict::Refused => {
+                    "脚本地址拒绝访问（文件可能存在，但该主机不允许直接读取）。".to_string()
+                }
+                crate::script_source::ProbeVerdict::Missing => {
+                    "脚本地址不存在（文件已被删除或改名）。".to_string()
+                }
+                _ => format!("无法访问脚本地址：{error}"),
+            };
+            (verdict, message)
+        }
+    }
+}
+
+/// Pulls an HTTP status out of a policy error message, when it names one.
+fn status_from_message(message: &str) -> Option<u16> {
+    message
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| part.len() == 3)
+        .filter_map(|part| part.parse::<u16>().ok())
+        .find(|status| (100..=599).contains(status))
+}
+
 /// Replaces every stored configuration with one merged document.
 ///
 /// Moseek keeps a single 中心配置, so the first launch after this became true collapses whatever
@@ -381,4 +540,58 @@ pub fn replace_all_config_documents(
     transaction.commit().map_err(|error| error.to_string())?;
     storage::load_config_document(&connection, document_id)?
         .ok_or_else(|| "中心配置保存后无法读取".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{join_sentences, should_try_mirror, status_from_message};
+    use crate::script_source::ProbeVerdict;
+
+    #[test]
+    fn asks_the_mirror_about_every_failed_check() {
+        // Not only a refusal: measured, the second GitLab address 404s to Moseek's User-Agent while
+        // the identical GitHub path serves 38 KiB. A rule that retried only on `refused` would leave
+        // that source looking unsalvageable.
+        assert!(should_try_mirror(ProbeVerdict::Refused));
+        assert!(should_try_mirror(ProbeVerdict::Missing));
+        assert!(should_try_mirror(ProbeVerdict::Unreachable));
+        // A check that already succeeded has nothing to gain from a second host.
+        assert!(!should_try_mirror(ProbeVerdict::Reachable));
+    }
+
+    #[test]
+    fn joins_two_sentences_without_stranding_a_semicolon() {
+        // The author saw `……改名）。；同一份文件……` in the drawer: each half already ended in a full
+        // stop, so the separator landed after one.
+        assert_eq!(
+            join_sentences("脚本地址不存在（文件已被删除或改名）。", "同一份文件在镜像地址上可以读取。"),
+            "脚本地址不存在（文件已被删除或改名）；同一份文件在镜像地址上可以读取。"
+        );
+        // A half without a terminator is left alone, and trailing space is dropped.
+        assert_eq!(join_sentences("无法访问", "镜像也不可用。"), "无法访问；镜像也不可用。");
+        assert_eq!(join_sentences("说完了。  ", "接着说。"), "说完了；接着说。");
+        // A half that is only punctuation does not produce an empty clause with a leading separator.
+        assert_eq!(join_sentences("。", "下一句。"), "；下一句。");
+    }
+
+    #[test]
+    fn reads_a_status_out_of_a_policy_error_message() {
+        // The policy layer names the status inside its message, and the verdict is derived from the
+        // same text the user reads rather than from a second request.
+        assert_eq!(
+            status_from_message("脚本内容返回错误状态：HTTP 404；Not Found 404：页面未找到"),
+            Some(404)
+        );
+        assert_eq!(
+            status_from_message("脚本内容返回错误状态：HTTP 403；Forbidden"),
+            Some(403)
+        );
+        // A message with no status yields nothing, rather than a number that happens to be in it.
+        assert_eq!(status_from_message("连接超时"), None);
+        assert_eq!(status_from_message(""), None);
+        // A three-digit number that is not a status is not mistaken for one.
+        assert_eq!(status_from_message("耗时 999 毫秒"), None);
+        // And a plausible-looking status inside a longer run of digits is not picked up either.
+        assert_eq!(status_from_message("重定向 1302 次"), None);
+    }
 }
