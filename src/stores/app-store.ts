@@ -155,12 +155,14 @@ export function migrateSourceFilter(value: unknown): SourceFilterState {
       "needs-adapter",
       "blocked",
     ] as const),
+    // No "blocked": that facet was removed because the 适配器状态 group already offers exactly that
+    // set. A filter saved before the change simply loses the choice rather than emptying the list,
+    // which is what this validation exists for.
     statuses: group(stored.statuses, [
       "usable",
       "untested",
       "failed",
       "empty",
-      "blocked",
       "invalid",
     ] as const),
     enabled: group(stored.enabled, ["on", "off"] as const),

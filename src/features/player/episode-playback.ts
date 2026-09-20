@@ -1,5 +1,6 @@
 import { normalizeCatVodResult } from "@/features/script/catvod-normalizer";
 import { parseParseServices } from "@/features/config/config-parser";
+import { hasScriptArchive } from "@/lib/adapters";
 import { inferMediaKind } from "@/lib/media-kind";
 import {
   executeScriptArchive,
@@ -45,8 +46,7 @@ export async function resolveEpisodePlayback(
 
   if (
     source &&
-    source.scriptArchiveId !== null &&
-    source.scriptArchiveId !== undefined &&
+    hasScriptArchive(source) &&
     !/^https?:\/\//i.test(playbackUrl)
   ) {
     const scriptResult = await executeScriptArchive(

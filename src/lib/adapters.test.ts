@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  adapterStatusLabel,
   getAdapterProfile,
+  hasScriptArchive,
   isMovieLibrarySource,
   isTestableCmsSource,
   isTestableLiveSource,
@@ -154,5 +156,21 @@ describe("adapter registry", () => {
     // There is no second predicate any more: the fallback that used to exist ran the same
     // filter, so an untested enabled source is simply listed.
     expect(isMovieLibrarySource(source({ testStatus: "untested" }))).toBe(true);
+  });
+
+  it("treats a bound script archive as present only when it is a number", () => {
+    // `scriptArchiveId` is optional, so both `null` and `undefined` mean "not bound". The same
+    // two-part check was written out seven times across the codebase; this pins the one copy.
+    expect(hasScriptArchive(source({ scriptArchiveId: 7 }))).toBe(true);
+    expect(hasScriptArchive(source({ scriptArchiveId: 0 }))).toBe(true);
+    expect(hasScriptArchive(source({ scriptArchiveId: null }))).toBe(false);
+    expect(hasScriptArchive(source({ scriptArchiveId: undefined }))).toBe(false);
+  });
+
+  it("names the execution states the way the interface does", () => {
+    // One source, one word, whichever screen shows it.
+    expect(adapterStatusLabel("enabled")).toBe("可执行");
+    expect(adapterStatusLabel("needs-adapter")).toBe("无法适配");
+    expect(adapterStatusLabel("blocked")).toBe("已阻止");
   });
 });

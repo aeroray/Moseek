@@ -3,13 +3,17 @@ import { describe, expect, it } from "vitest";
 import {
   activeFilterGroupCount,
   defaultSourceFilter,
+  enabledFacetLabels,
+  executionFacetLabels,
   facetCounts,
   isFilterUnfiltered,
   matchesSourceFilterState,
   sourceStatusFacet,
+  statusFacetLabels,
   toggleFacet,
   type SourceFilterState,
 } from "@/features/config/source-filter";
+import { adapterStatusLabel } from "@/lib/adapters";
 import type { SourceRecord } from "@/types/moseek";
 
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
@@ -102,13 +106,50 @@ describe("the source filter's groups", () => {
     expect(sourceStatusFacet(source({ testStatus: "untested" }))).toBe("untested");
     expect(sourceStatusFacet(source({ testStatus: "failed" }))).toBe("failed");
     expect(sourceStatusFacet(source({ testStatus: "empty" }))).toBe("empty");
-    // No runnable adapter: there is no test outcome to report, so the row shows the capability.
+    // No runnable adapter: there is no test outcome to report, so the row shows the capability and
+    // there is no status facet. Measured, this set is exactly 适配器状态's 已阻止 + 无法适配, so
+    // offering it here as well was one choice under two headings.
     expect(
       sourceStatusFacet(
         source({ capability: "blocked", siteProtocol: "spider", jar: "https://x/1.jar" }),
       ),
-    ).toBe("blocked");
+    ).toBeNull();
+    // An invalid record is the exception: its adapter can still be runnable, so no execution choice
+    // reaches it and this facet has to stay.
     expect(sourceStatusFacet(source({ capability: "invalid", api: "" }))).toBe("invalid");
+  });
+
+  it("does not let a status choice match a source with no test outcome", () => {
+    // Otherwise ticking 可用 would also reveal rows whose 状态 column says 已阻止. Every choice is
+    // tried, not just the two that seemed likely: a mutation that gives such a source the `failed`
+    // facet passed when only 可用 and 待测试 were asserted.
+    const blockedSource = source({
+      capability: "blocked",
+      siteProtocol: "spider",
+      jar: "https://x/1.jar",
+    });
+    for (const choice of [
+      "usable",
+      "untested",
+      "failed",
+      "empty",
+      "invalid",
+    ] as const) {
+      expect(
+        matchesSourceFilterState(blockedSource, filter({ statuses: [choice] })),
+        `statuses: ["${choice}"] must not match a source with no test outcome`,
+      ).toBe(false);
+    }
+    // It is reachable through the group that owns its word.
+    expect(
+      matchesSourceFilterState(blockedSource, filter({ executions: ["blocked"] })),
+    ).toBe(true);
+    // And its count appears in that group, not in the status group's.
+    const counts = facetCounts([blockedSource], filter());
+    expect(counts.executions.get("blocked")).toBe(1);
+    for (const [, n] of counts.statuses) {
+      expect(n).toBe(0);
+    }
   });
 
   it("counts each choice against the other groups, not against itself", () => {
@@ -169,5 +210,60 @@ describe("the source filter's groups", () => {
     expect(isFilterUnfiltered(filter({ executions: ["enabled"] }))).toBe(false);
     // The default is a filter, not "everything", so a reset is offered on first open.
     expect(isFilterUnfiltered(defaultSourceFilter)).toBe(false);
+  });
+});
+
+describe("the vocabulary shared with the adapter registry", () => {
+  it("names each execution the same way the adapter column does", () => {
+    // These words were written out four times — in the registry, in the filter panel, in the adapter
+    // tab's dropdown and in capability-badge — so one source could be described three different ways
+    // depending on the screen. The panel and the badge now read the registry's function.
+    for (const execution of ["enabled", "needs-adapter", "blocked"] as const) {
+      expect(executionFacetLabels[execution]).toBe(adapterStatusLabel(execution));
+    }
+  });
+
+  it("says 无法适配 rather than 待适配", () => {
+    // 待适配 promised that support was coming. Measured against the author's configuration that was
+    // false for every source carrying it: the implementation is compiled into the TVBox client, the
+    // payload is encrypted with the key in a JAR, the config points at TVBox's own loopback server,
+    // or the address is dead. The word has to describe a state the user can act on.
+    expect(adapterStatusLabel("needs-adapter")).toBe("无法适配");
+    expect(executionFacetLabels["needs-adapter"]).toBe("无法适配");
+  });
+
+  it("gives no two choices the same word", () => {
+    // Two choices reading 已阻止 while selecting different sets is worse than either being wrong: the
+    // reader has no way to tell which one they want. This happened when the 测试状态 group kept a
+    // `blocked` facet that the 适配器状态 group already covered exactly.
+    const all = [
+      ...Object.values(executionFacetLabels),
+      ...Object.values(statusFacetLabels),
+      ...Object.values(enabledFacetLabels),
+    ];
+    expect(new Set(all).size).toBe(all.length);
+  });
+
+  it("keeps the two groups' sets disjoint", () => {
+    // The invariant behind the duplicate-word fix: a source with a test outcome is described by the
+    // 测试状态 group, and one without is described by the 适配器状态 group. No source is in both, so
+    // no source can be selected by a choice from each group at once — which is what made two choices
+    // both reading 已阻止 select different sets.
+    const withOutcome = source({ testStatus: "failed" });
+    const withOutcomeFacet = sourceStatusFacet(withOutcome);
+    expect(withOutcomeFacet).toBe("failed");
+    // Its word is in the status group and not in the execution group's vocabulary.
+    expect(Object.values(statusFacetLabels)).toContain(
+      statusFacetLabels[withOutcomeFacet as keyof typeof statusFacetLabels],
+    );
+    expect(Object.values(executionFacetLabels)).not.toContain("测试失败");
+
+    // A source with no outcome returns null, so no status choice can select it.
+    const noOutcome = source({
+      capability: "blocked",
+      siteProtocol: "spider",
+      jar: "https://x/1.jar",
+    });
+    expect(sourceStatusFacet(noOutcome)).toBeNull();
   });
 });

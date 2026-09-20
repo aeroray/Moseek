@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import { hasScriptArchive } from "@/lib/adapters";
 import type {
   CatalogPage,
   EpgCatalog,
@@ -279,7 +280,7 @@ export async function testSource(source: SourceRecord) {
   const command =
     source.sourceType === "live"
       ? "test_live_source"
-      : source.scriptArchiveId !== null && source.scriptArchiveId !== undefined
+      : hasScriptArchive(source)
         ? "test_script_source"
         : "test_source";
   return invokeCommand<SourceTestResult>(command, {

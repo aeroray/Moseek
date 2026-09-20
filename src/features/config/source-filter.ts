@@ -1,4 +1,10 @@
-import { getAdapterProfile, isTestableSource, type AdapterId } from "@/lib/adapters";
+import {
+  adapterStatusLabel,
+  getAdapterProfile,
+  isTestableSource,
+  type AdapterExecution,
+  type AdapterId,
+} from "@/lib/adapters";
 import type { SourceRecord, SourceTestStatus } from "@/types/moseek";
 
 /**
@@ -21,14 +27,29 @@ export type SourceFilterState = {
   enabled: SourceEnabledFacet[];
 };
 
-export type SourceExecutionFacet = "enabled" | "needs-adapter" | "blocked";
+/**
+ * The execution group's choices.
+ *
+ * An alias rather than a second union: it was written out as `"enabled" | "needs-adapter" |
+ * "blocked"` here while `AdapterExecution` in the adapter registry said exactly the same thing, so a
+ * new execution state could be added to one and silently missing from the other. The registry owns
+ * the vocabulary; the filter reuses it.
+ */
+export type SourceExecutionFacet = AdapterExecution;
 export type SourceEnabledFacet = "on" | "off";
+/**
+ * The test-status group's choices.
+ *
+ * No `blocked` member: that set is the 适配器状态 group's, exactly. See `sourceStatusFacet`.
+ *
+ * `invalid` stays. It is not covered by any execution choice — measured, the one invalid record in
+ * the author's configuration has a runnable adapter (`execution: enabled`), so it is refused for a
+ * reason the execution group cannot express. Dropping the choice would leave a row reading 配置无效
+ * with no way to filter to it.
+ */
 export type SourceStatusFacet =
+  | Exclude<SourceTestStatus, "passed" | "blocked">
   | "usable"
-  | "untested"
-  | "failed"
-  | "empty"
-  | "blocked"
   | "invalid";
 
 /**
@@ -79,30 +100,36 @@ export function activeFilterGroupCount(state: SourceFilterState): number {
 }
 
 /**
- * The status facet a source belongs to.
+ * The status facet a source belongs to, or null when it has no test outcome.
  *
- * Derived from the same two facts the 状态 column renders — whether an adapter can run, and what the
- * last test said — so the facet a user picks matches the word they can see on the row.
+ * Derived from the same fact the 状态 column renders, so the facet a user picks matches the word they
+ * can see on the row.
+ *
+ * **A source with no runnable adapter returns null rather than a facet.** Its 状态 column shows the
+ * adapter's verdict — 已阻止 or 无法适配 — and that set is exactly what the 适配器状态 group offers:
+ * measured, `execution: blocked` (226) plus `execution: needs-adapter` (13) is precisely the 239
+ * sources this used to select as one facet. Offering the same 239 rows under two headings meant two
+ * choices that both read 已阻止 while selecting different sets. The 测试状态 group is about test
+ * outcomes, and a source that cannot be tested has none.
  */
-export function sourceStatusFacet(source: SourceRecord): SourceStatusFacet {
+export function sourceStatusFacet(source: SourceRecord): SourceStatusFacet | null {
   if (!isTestableSource(source)) {
-    // Without a runnable adapter there is no test outcome to report; the row shows the capability.
-    return source.capability === "invalid" ? "invalid" : "blocked";
+    // The one case the execution group cannot express: a record the parser could not build still has
+    // a runnable adapter, so no execution choice reaches it. Everything else untestable is already
+    // selected by 已阻止 or 无法适配.
+    return source.capability === "invalid" ? "invalid" : null;
   }
   const status: SourceTestStatus = source.testStatus ?? "untested";
-  switch (status) {
-    case "passed":
-      return "usable";
-    case "empty":
-      return "empty";
-    case "failed":
-      return "failed";
-    case "blocked":
-      return "blocked";
-    case "untested":
-    default:
-      return "untested";
-  }
+  // The facet vocabulary is the test vocabulary with one rename: a passing test reads 可用 on the
+  // row, and `usable` is what the panel offers for it. This was a five-case switch whose four other
+  // arms each returned their own input, so it restated the type instead of mapping it.
+  if (status === "passed") return "usable";
+  // `blocked` cannot arrive here: the backend returns it when the adapter refuses to run, and
+  // `isTestableSource` has already answered false for exactly those sources. Returning null rather
+  // than inventing a facet keeps the group about test outcomes, and the compiler still sees every
+  // arm.
+  if (status === "blocked") return null;
+  return status;
 }
 
 /** Whether a source satisfies every group of the filter. */
@@ -122,11 +149,11 @@ export function matchesSourceFilterState(
   ) {
     return false;
   }
-  if (
-    state.statuses.length > 0 &&
-    !state.statuses.includes(sourceStatusFacet(source))
-  ) {
-    return false;
+  if (state.statuses.length > 0) {
+    // A source with no test outcome matches no status choice. It is reachable through the 适配器状态
+    // group instead, which is where its 状态 column's word is offered.
+    const facet = sourceStatusFacet(source);
+    if (facet === null || !state.statuses.includes(facet)) return false;
   }
   if (state.enabled.length > 0) {
     const facet: SourceEnabledFacet = source.enabled ? "on" : "off";
@@ -140,19 +167,33 @@ export function toggleFacet<T extends string>(group: T[], value: T): T[] {
   return group.includes(value) ? group.filter((item) => item !== value) : [...group, value];
 }
 
-/** The words each facet is offered under, in the order the panel lists them. */
+/**
+ * The words the execution group is offered under.
+ *
+ * Reuses `adapterStatusLabel` rather than repeating its three words. They were written out twice, so
+ * the panel's 待适配 and the adapter column's could drift apart while both claimed to describe the
+ * same source — and one of them was different again in `capability-badge.tsx`.
+ */
 export const executionFacetLabels: Record<SourceExecutionFacet, string> = {
-  enabled: "可执行",
-  "needs-adapter": "待适配",
-  blocked: "已阻止",
+  enabled: adapterStatusLabel("enabled"),
+  "needs-adapter": adapterStatusLabel("needs-adapter"),
+  blocked: adapterStatusLabel("blocked"),
 };
 
+/**
+ * The words each facet is offered under, in the order the panel lists them.
+ *
+ * **Every word here must be one a row actually shows**, because the choice is how a user finds those
+ * rows: they read 已阻止 on a row, then look for it in the panel. Measured against the author's
+ * configuration, `blocked` was offered as 未执行 while all 239 rows it reveals read 已阻止 (226) or
+ * 无法适配 (13) — a label matching nothing on screen. It is now 已阻止, the word 226 of them carry;
+ * the 13 无法适配 are a different condition and are offered by the 适配器状态 group instead.
+ */
 export const statusFacetLabels: Record<SourceStatusFacet, string> = {
   usable: "可用",
   untested: "待测试",
   failed: "测试失败",
   empty: "无内容",
-  blocked: "未执行",
   invalid: "配置无效",
 };
 
@@ -211,6 +252,9 @@ export function facetCounts(
   }
   for (const source of statusesScope) {
     const facet = sourceStatusFacet(source);
+    // Null means no test outcome, so no status choice would reveal this source and none should
+    // claim it in its count.
+    if (facet === null) continue;
     statuses.set(facet, (statuses.get(facet) ?? 0) + 1);
   }
   for (const source of enabledScope) {

@@ -100,7 +100,7 @@ const blocked = source({
 });
 const needsAdapter = source({
   key: "wait",
-  name: "待适配的源",
+  name: "无法适配的源",
   capability: "needs-adapter",
   capabilityNote: "需要单独适配器。",
   enabled: false,
@@ -161,7 +161,7 @@ function renderCenter() {
  * Sets the source list's filter from the old vocabulary.
  *
  * The panel replaced a single dropdown, so the tests keep their words. The old filter was binary —
- * 已适配 / 未适配 — while the panel splits the second into 已阻止 and 待适配, so 未适配 means both of
+ * 已适配 / 未适配 — while the panel splits the second into 已阻止 and 无法适配, so 未适配 means both of
  * the ways a source can lack a runnable adapter.
  */
 function chooseFilter(label: string) {
@@ -172,7 +172,7 @@ function chooseFilter(label: string) {
     fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
   } else if (label === "未适配") {
     fireEvent.click(screen.getByRole("checkbox", { name: "已阻止" }));
-    fireEvent.click(screen.getByRole("checkbox", { name: "待适配" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "无法适配" }));
   }
   // 全部 is the reset on its own: every group cleared.
 }
@@ -336,7 +336,7 @@ describe("config center", () => {
 
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
-    expect(screen.queryByText("待适配的源")).not.toBeInTheDocument();
+    expect(screen.queryByText("无法适配的源")).not.toBeInTheDocument();
   });
 
   it("offers four named groups rather than five parser states", () => {
@@ -352,7 +352,7 @@ describe("config center", () => {
     }
     // The states the parser produces are offered, and the removed one is not.
     expect(within(panel).getByRole("checkbox", { name: "可执行" })).toBeInTheDocument();
-    expect(within(panel).getByRole("checkbox", { name: "待适配" })).toBeInTheDocument();
+    expect(within(panel).getByRole("checkbox", { name: "无法适配" })).toBeInTheDocument();
     expect(within(panel).getByRole("checkbox", { name: "已阻止" })).toBeInTheDocument();
     expect(within(panel).getByRole("checkbox", { name: "配置无效" })).toBeInTheDocument();
     expect(within(panel).queryByRole("checkbox", { name: "部分支持" })).not.toBeInTheDocument();
@@ -384,7 +384,7 @@ describe("config center", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
-    expect(screen.queryByText("待适配的源")).not.toBeInTheDocument();
+    expect(screen.queryByText("无法适配的源")).not.toBeInTheDocument();
 
     // Adding the enabled group keeps it, because 可用的源 is enabled.
     fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
@@ -399,7 +399,7 @@ describe("config center", () => {
     // the filter's doing rather than an accident of the fixture.
     fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
     expect(screen.getByText("不可用的源")).toBeInTheDocument();
-    expect(screen.getByText("待适配的源")).toBeInTheDocument();
+    expect(screen.getByText("无法适配的源")).toBeInTheDocument();
   });
 
   it("disables a choice that would leave nothing, instead of hiding it", () => {
@@ -460,7 +460,7 @@ describe("config center", () => {
     // Nothing is selected, so every source is listed — including the ones the page does not open on.
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.getByText("不可用的源")).toBeInTheDocument();
-    expect(screen.getByText("待适配的源")).toBeInTheDocument();
+    expect(screen.getByText("无法适配的源")).toBeInTheDocument();
   });
 
   it("reports how many groups are narrowing, on the toolbar", () => {
@@ -496,7 +496,7 @@ describe("config center", () => {
     chooseFilter("未适配");
 
     expect(screen.getByText("不可用的源")).toBeInTheDocument();
-    expect(screen.getByText("待适配的源")).toBeInTheDocument();
+    expect(screen.getByText("无法适配的源")).toBeInTheDocument();
     expect(screen.queryByText("可用的源")).not.toBeInTheDocument();
   });
 
@@ -627,7 +627,7 @@ describe("config center", () => {
       screen.queryByRole("switch", { name: "启用 不可用的源" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", { name: "启用 待适配的源" }),
+      screen.queryByRole("switch", { name: "启用 无法适配的源" }),
     ).not.toBeInTheDocument();
   });
 
@@ -897,7 +897,11 @@ describe("config center", () => {
     fireEvent.click(row as HTMLElement);
 
     const sheet = screen.getByRole("dialog");
-    expect(within(sheet).getByText("未执行")).toBeInTheDocument();
+    // The word is 未执行 — what happened — in both the header badge and the test section, rather than
+    // 不可用 here and 已阻止 in the column beside it. Asserting only that 未执行 is present would also
+    // pass with the old wording still in place, so the wrong words are asserted absent too.
+    expect(within(sheet).getAllByText("未执行").length).toBeGreaterThan(0);
+    expect(within(sheet).queryByText("不可用")).not.toBeInTheDocument();
     expect(within(sheet).queryByText(/缺少适配器/)).not.toBeInTheDocument();
     // The reason is still stated, so removing the parenthetical loses nothing.
     expect(
@@ -1691,11 +1695,11 @@ describe("config center", () => {
 
     expect(screen.queryByText("部分支持")).not.toBeInTheDocument();
     // It falls back to the adapter's verdict, which is a word the model still has. Read from the
-    // row rather than the page: the filter panel also offers 待适配 as a choice.
+    // row rather than the page: the filter panel also offers 无法适配 as a choice.
     const row = screen
       .getAllByRole("row")
       .find((r) => r.textContent?.includes("旧状态源"));
-    expect(row?.textContent).toContain("待适配");
+    expect(row?.textContent).toContain("无法适配");
   });
 
   it("lets the adapter, not a stale capability, word the status column", () => {
@@ -1750,6 +1754,11 @@ describe("config center", () => {
     expect(blockedRow).not.toContain("可执行");
     // And the state that used to appear here is gone for good.
     expect(blockedRow).not.toContain("部分支持");
+    // The 连接测试 column says why there is no result rather than claiming a pending test. It used to
+    // read 未测试 for a row the column beside it had just called 已阻止, which implies the user simply
+    // has not got round to it.
+    expect(blockedRow).toContain("无法测试");
+    expect(blockedRow).not.toContain("未测试");
 
     // A runnable one reads 已有适配器 in the adapter column while the status column reports the
     // test, which is a different question and is allowed to say 待测试. The adapter cell leads with
@@ -1819,7 +1828,7 @@ describe("config center", () => {
 
     expect(screen.getByRole("option", { name: /全部适配器/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /可执行/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /待适配/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /无法适配/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /已阻止/ })).toBeInTheDocument();
     expect(
       screen.queryByRole("option", { name: /部分支持/ }),
@@ -2044,9 +2053,9 @@ describe("config center", () => {
     useAppStore.setState({ removeSources });
     renderCenter();
     chooseFilter("未适配");
-    // "待适配的源" is the needs-adapter fixture; "不可用的源" is the blocked one.
+    // "无法适配的源" is the needs-adapter fixture; "不可用的源" is the blocked one.
     fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
-      target: { value: "待适配" },
+      target: { value: "无法适配" },
     });
 
     const bulk = screen.getByRole("button", { name: /清理不可用/ });

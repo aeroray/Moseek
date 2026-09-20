@@ -106,12 +106,13 @@ export function SourceFilterFacets({
     "needs-adapter",
     "blocked",
   ];
+  // No "blocked" entry: a source with no runnable adapter has no test outcome, and the 适配器状态
+  // group offers exactly that set. See `sourceStatusFacet`.
   const statusOrder: SourceStatusFacet[] = [
     "usable",
     "untested",
     "failed",
     "empty",
-    "blocked",
     "invalid",
   ];
   const enabledOrder: SourceEnabledFacet[] = ["on", "off"];

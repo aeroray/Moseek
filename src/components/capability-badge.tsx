@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import { adapterStatusLabel } from "@/lib/adapters";
 import { cn } from "@/lib/utils";
 import type { CapabilityStatus } from "@/types/moseek";
 
@@ -17,28 +18,32 @@ import type { CapabilityStatus } from "@/types/moseek";
  * assign it, and it only ever reached the screen from stale stored data, where it sat next to an
  * adapter badge saying 没有可用适配器.
  *
- * "supported" reads 可执行 rather than 可用. It describes what Moseek can do — run the source — not
- * whether the source works, which is only known after a test. Calling it 可用 claimed the resource
- * was healthy when all we knew was that we had a way to ask.
+ * **`supported` and `blocked` take their words from the adapter registry** rather than restating
+ * them. They are the same two words the adapter column and the filter panel use, and writing them
+ * out again here is exactly how `needs-adapter` came to read 需要适配 on this badge and 待适配
+ * everywhere else — one source described two ways depending on the screen. A mutation that changed
+ * the word here passed every test, because the tests were checking the registry's copy.
+ *
+ * `invalid` is not an adapter execution state, so it keeps its own word.
  */
 const capabilityConfig: Record<
   CapabilityStatus,
   { label: string; icon: LucideIcon; className: string }
 > = {
   supported: {
-    label: "可执行",
+    label: adapterStatusLabel("enabled"),
     icon: CircleCheck,
     className:
       "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
   },
   "needs-adapter": {
-    label: "需要适配",
+    label: adapterStatusLabel("needs-adapter"),
     icon: PlugZap,
     className:
       "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] text-[color:var(--status-adapter)]",
   },
   blocked: {
-    label: "已阻止",
+    label: adapterStatusLabel("blocked"),
     icon: Ban,
     className:
       "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",

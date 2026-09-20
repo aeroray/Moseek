@@ -195,10 +195,7 @@ export function getAdapterProfile(
 
   if (source.sourceType === "live") {
     id = "builtin-live";
-  } else if (
-    source.scriptArchiveId !== null &&
-    source.scriptArchiveId !== undefined
-  ) {
+  } else if (hasScriptArchive(source)) {
     id = "local-script";
   } else if (source.siteProtocol === "http-extension") {
     id = "http-extension";
@@ -236,9 +233,16 @@ export function getAdapterProfile(
 export function adapterStatusLabel(execution: AdapterExecution) {
   // These must match the words the adapter tab uses for its counts and filter. A reader who
   // clicks "可执行 3 个源" then has to find those three rows, so the badge cannot say 已启用.
+  //
+  // `needs-adapter` reads 无法适配, not 待适配. The old word promised that support was coming, and
+  // measured against the author's configuration that promise was false for every source carrying it:
+  // the implementation is compiled into the TVBox client, the payload is encrypted with the key in a
+  // JAR, the config points at TVBox's own loopback server, or the address is simply dead. 待适配
+  // describes a queue the user is waiting in; 无法适配 describes a state they can act on — delete it,
+  // or find another source.
   return {
     enabled: "可执行",
-    "needs-adapter": "待适配",
+    "needs-adapter": "无法适配",
     blocked: "已阻止",
   }[execution];
 }
@@ -269,7 +273,7 @@ export function isTestableCmsSource(source: SourceRecord) {
     return false;
   }
   const profile = getAdapterProfile(source);
-  if (source.scriptArchiveId !== null && source.scriptArchiveId !== undefined) {
+  if (hasScriptArchive(source)) {
     return profile.id === "local-script";
   }
   return profile.execution === "enabled";
@@ -280,6 +284,20 @@ export function isTestableLiveSource(source: SourceRecord) {
     return false;
   }
   return getAdapterProfile(source).execution === "enabled";
+}
+
+/**
+ * Whether this source is bound to a local script archive.
+ *
+ * Extracted because the same two-part nullable check was written out seven times across the codebase
+ * — in the adapter registry, the CMS adapter, the player's episode lookup, the config centre and the
+ * Tauri bridge. Each copy is a place a future `undefined` handling change could be applied to six of
+ * them, and `scriptArchiveId` being optional makes both halves necessary.
+ */
+export function hasScriptArchive(
+  source: Pick<SourceRecord, "scriptArchiveId">,
+): source is Pick<SourceRecord, "scriptArchiveId"> & { scriptArchiveId: number } {
+  return source.scriptArchiveId !== null && source.scriptArchiveId !== undefined;
 }
 
 export function isTestableSource(source: SourceRecord) {

@@ -8,6 +8,7 @@ import {
   normalizeCatVodResult,
   type CatVodMethod,
 } from "@/features/script/catvod-normalizer";
+import { hasScriptArchive } from "@/lib/adapters";
 import type { CatalogPage, SourceRecord, VodItem } from "@/types/moseek";
 
 export interface AdapterResult<T> {
@@ -24,10 +25,7 @@ export async function searchVod(
   pageSize: number,
 ): Promise<AdapterResult<CatalogPage>> {
   try {
-    if (
-      source.scriptArchiveId !== null &&
-      source.scriptArchiveId !== undefined
-    ) {
+    if (hasScriptArchive(source)) {
       if (!isTauriRuntime()) {
         return {
           data: emptyCatalog(source.key, page, pageSize),
@@ -116,10 +114,7 @@ export async function getVodDetail(
   item: VodItem,
 ): Promise<AdapterResult<VodItem | null>> {
   try {
-    if (
-      source.scriptArchiveId !== null &&
-      source.scriptArchiveId !== undefined
-    ) {
+    if (hasScriptArchive(source)) {
       if (!isTauriRuntime()) {
         return {
           data: null,

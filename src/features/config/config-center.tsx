@@ -127,6 +127,7 @@ import {
   adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
+  hasScriptArchive,
   isTestableSource,
   type AdapterExecution,
 } from "@/lib/adapters";
@@ -1933,24 +1934,20 @@ export function ConfigCenter() {
                     <SelectContent>
                       <SelectGroup>
                         <SelectItem value="all">全部适配器</SelectItem>
-                        <SelectItem value="enabled">
-                          可执行
-                          <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
-                            {adapterStateCounts.enabled}
-                          </span>
-                        </SelectItem>
-                        <SelectItem value="needs-adapter">
-                          待适配
-                          <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
-                            {adapterStateCounts["needs-adapter"]}
-                          </span>
-                        </SelectItem>
-                        <SelectItem value="blocked">
-                          已阻止
-                          <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
-                            {adapterStateCounts.blocked}
-                          </span>
-                        </SelectItem>
+                        {/* The three words come from the registry rather than being typed here.
+                            They were written out a fourth time, which is how the panel, the adapter
+                            column and this dropdown could each say something different about one
+                            source. */}
+                        {(["enabled", "needs-adapter", "blocked"] as const).map(
+                          (execution) => (
+                            <SelectItem key={execution} value={execution}>
+                              {adapterStatusLabel(execution)}
+                              <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
+                                {adapterStateCounts[execution]}
+                              </span>
+                            </SelectItem>
+                          ),
+                        )}
                       </SelectGroup>
                     </SelectContent>
                   </Select>
@@ -2286,12 +2283,12 @@ export function ConfigCenter() {
                               />
                               <ReportRow
                                 label="私有协议"
-                                value={`${reportCounts["needs-adapter"]} 个待适配`}
+                                value={`${reportCounts["needs-adapter"]} 个${adapterStatusLabel("needs-adapter")}`}
                                 tone="warning"
                               />
                               <ReportRow
                                 label="危险执行路径"
-                                value={`${reportCounts.blocked} 个已阻止`}
+                                value={`${reportCounts.blocked} 个${adapterStatusLabel("blocked")}`}
                                 tone="blocked"
                               />
                             </>
@@ -2719,15 +2716,13 @@ export function ConfigCenter() {
 
                   {inspectedSource.sourceType === "cms" &&
                     (inspectedSource.siteProtocol === "js-extension" ||
-                      (inspectedSource.scriptArchiveId !== null &&
-                        inspectedSource.scriptArchiveId !== undefined)) && (
+                      hasScriptArchive(inspectedSource)) && (
                       <DetailSection title="本地脚本绑定">
                         <div className="rounded-lg border border-border/70 bg-card/40 p-3 text-xs leading-5 text-muted-foreground">
                           绑定后只会调用本地档案；远程 JS、JAR 和 Spider
                           仍不会自动执行。
                         </div>
-                        {inspectedSource.scriptArchiveId !== null &&
-                          inspectedSource.scriptArchiveId !== undefined && (
+                        {hasScriptArchive(inspectedSource) && (
                             <div className="flex items-start gap-3 rounded-lg border border-border/70 bg-card/40 p-3">
                               <Badge
                                 variant={
@@ -3193,7 +3188,7 @@ function SourceStatusBadge({ source }: { source: SourceRecord }) {
   // adapter the answer is the adapter's own verdict, not the capability the parser recorded at
   // import time: those are two different questions, and asking the wrong one is what produced a row
   // reading 部分支持 beside an adapter badge reading 没有可用适配器. `AdapterStatusBadge` renders
-  // 待适配 / 已阻止, which is the same word the adapter column uses, so the two can never disagree.
+  // 无法适配 / 已阻止, which is the same word the adapter column uses, so the two can never disagree.
   if (!isTestableSource(source)) {
     if (source.capability === "invalid") {
       return <CapabilityBadge status="invalid" />;
@@ -3214,13 +3209,30 @@ function SourceStatusBadge({ source }: { source: SourceRecord }) {
     // claiming a status the model no longer has.
     empty: { label: "无内容", tone: "needs-adapter" },
     failed: { label: "测试失败", tone: "blocked" },
-    blocked: { label: "不可用", tone: "blocked" },
+    // `blocked` means the test could not run, not that the source is bad — the backend returns it
+    // when the adapter refuses. It read 不可用 here while the 连接测试 column beside it read 已阻止,
+    // so one row described one state two ways. Both now say 未执行, which is what happened.
+    blocked: { label: "未执行", tone: "needs-adapter" },
   };
   const { label, tone } = display[status];
   return <CapabilityBadge status={tone} label={label} />;
 }
 
 function SourceTestBadge({ source }: { source: SourceRecord }) {
+  // A source with no runnable adapter cannot be tested at all, so 未测试 would imply the user has
+  // simply not got round to it. The visual editor already distinguishes the two — 配置无效 and
+  // 无法测试 — and this column was still claiming a pending test for a row the 状态 column beside it
+  // had just called 已阻止 or 无法适配.
+  if (!isTestableSource(source)) {
+    const invalid = source.capability === "invalid";
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <ShieldAlert className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+        <span>{invalid ? "配置无效" : "无法测试"}</span>
+      </div>
+    );
+  }
+
   const status: SourceTestStatus = source.testStatus ?? "untested";
   const isLiveSource = source.sourceType === "live";
   const config: Record<
@@ -3247,9 +3259,12 @@ function SourceTestBadge({ source }: { source: SourceRecord }) {
       className: "text-[color:var(--status-blocked)]",
       icon: CircleX,
     },
+    // Matches the 状态 column's word for the same state. It said 已阻止 here, which is also the
+    // adapter registry's word for a different thing (an adapter that refuses to run at all), so the
+    // same three characters named two unrelated conditions on one screen.
     blocked: {
-      label: "已阻止",
-      className: "text-[color:var(--status-blocked)]",
+      label: "未执行",
+      className: "text-[color:var(--status-partial)]",
       icon: ShieldAlert,
     },
   };
