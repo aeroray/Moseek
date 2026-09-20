@@ -39,8 +39,23 @@ export interface VisualEntry {
   index: number;
   /** What the entry is called. Falls back to the identity when a name is missing. */
   label: string;
-  /** A short line under the label: the address, usually. */
+  /**
+   * The entry's address, used for searching.
+   *
+   * No longer shown on the row — 340 lines of `https://…/api.php/provide/vod` distinguish nothing,
+   * and the row shows the test result instead — but it is still what a user types when they are
+   * looking for a particular source, so it stays searchable.
+   */
   summary: string;
+  /**
+   * The key the parser gives this entry, when the file states one.
+   *
+   * The join between a row and its parsed source: the editor edits text while test results live on
+   * parsed records, and the key is what both sides agree on. A live entry with no `key` is given one
+   * by the parser from its position, which the editor cannot know, so it stays null and the row
+   * simply shows no test result rather than guessing at one.
+   */
+  sourceKey: string | null;
   fields: VisualField[];
   /** Fields present in the file that the editor does not offer as rows. */
   extraFieldCount: number;
@@ -196,6 +211,10 @@ export function readVisualConfig(rawText: string): VisualConfigResult {
         index,
         label,
         summary: fieldText(record[summaryField[section.key]]),
+        // Only a key the file actually states. The parser invents one for a live entry without a
+        // `key` (from its position), and the editor cannot reproduce that rule, so a missing key
+        // stays null rather than being guessed at and matching the wrong row.
+        sourceKey: typeof record.key === "string" && record.key ? record.key : null,
         fields: fields.map((field) => {
           const kind = fieldKind(field.name, record[field.name]);
           return {

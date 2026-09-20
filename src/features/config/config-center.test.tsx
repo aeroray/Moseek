@@ -291,14 +291,19 @@ describe("config center", () => {
 
   it("states the single centre configuration instead of offering a switcher", () => {
     // The switcher existed because every import made a new document. Imports now merge, so there is
-    // nothing to switch between; the row only reports what the configuration currently is.
+    // nothing to switch between — and there is no card stating it either: the header already carries
+    // the count and the sentence, and the card only repeated both.
     renderCenter();
 
-    expect(screen.getByText("中心配置")).toBeInTheDocument();
     expect(screen.queryByLabelText("切换配置")).not.toBeInTheDocument();
     expect(screen.queryByText("配置档案库")).not.toBeInTheDocument();
     expect(screen.queryByText("导入时间")).not.toBeInTheDocument();
     expect(screen.queryByText("当前使用")).not.toBeInTheDocument();
+    // The sentence that said the same thing is still in the header, exactly once.
+    expect(
+      screen.getAllByText(/所有导入都合并进同一份配置/),
+    ).toHaveLength(1);
+    expect(screen.queryByText(/每次导入都会合并进来/)).not.toBeInTheDocument();
   });
 
   it("does not restate the source counts as a row of cards", () => {
@@ -498,7 +503,8 @@ describe("config center", () => {
   it("leads the adapter cell with an icon saying whether an adapter exists", () => {
     // The words 可执行 / 未适配 wrapped onto a second line and read as a status report. An icon
     // badge in front answers "is this handled at all?" first, which is the question that matters
-    // before the adapter's name.
+    // before the adapter's name. Its accessible name is the full explanation, since the icon itself
+    // carries no text.
     renderCenter();
     chooseFilter("未适配");
 
@@ -506,9 +512,8 @@ describe("config center", () => {
       .getAllByRole("row")
       .find((row) => row.textContent?.includes("不可用的源"));
     expect(blockedRow).toBeTruthy();
-    expect(
-      within(blockedRow as HTMLElement).getByText("没有可用适配器"),
-    ).toBeInTheDocument();
+    // A blocked source says there is no runnable adapter, and names the one that exists.
+    expect(blockedRow?.textContent).toContain("没有可运行的适配器");
     // The old wording is gone, so nothing wraps onto a second line.
     expect(
       within(blockedRow as HTMLElement).queryByText("未适配"),
@@ -518,12 +523,42 @@ describe("config center", () => {
     const okRow = screen
       .getAllByRole("row")
       .find((row) => row.textContent?.includes("可用的源"));
-    expect(
-      within(okRow as HTMLElement).getByText("已有适配器"),
-    ).toBeInTheDocument();
+    expect(okRow?.textContent).toContain("已有适配器，可以测试");
     expect(
       within(okRow as HTMLElement).queryByText("可执行"),
     ).not.toBeInTheDocument();
+  });
+
+  it("names the record, not the adapter, when a configuration is invalid", () => {
+    // The contradiction the user reported: a source with no usable address showed 配置无效 in the
+    // status column and a green tick in the adapter column, whose tooltip said 没有可用适配器 — so
+    // the reader was told at once that there is no adapter and that the reason is the record.
+    const broken = source({
+      key: "broken",
+      name: "缺少地址的源",
+      sourceType: "live",
+      capability: "invalid",
+      capabilityNote: "直播源缺少 name 或 url/api 字段。",
+      api: "",
+    });
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [broken] });
+    });
+    chooseFilter("全部");
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("缺少地址的源"));
+    expect(row).toBeTruthy();
+    const text = row?.textContent ?? "";
+    // The status column still says the record is unusable...
+    expect(text).toContain("配置无效");
+    // ...and the adapter column agrees, naming the real cause and acknowledging the adapter exists
+    // rather than claiming there is none.
+    expect(text).toContain("适配器可用");
+    expect(text).toContain("缺少必要字段");
+    expect(text).not.toContain("没有可用适配器");
   });
 
   it("keeps the table header in place while the list scrolls", () => {
@@ -942,6 +977,164 @@ describe("config center", () => {
     // No viewport-derived height: that is what overflowed the window.
     expect(editor?.className).not.toMatch(/h-\[min\(/);
     expect(editor?.className).not.toContain("min-h-[520px]");
+  });
+
+  it("shows each entry's test result instead of its address", () => {
+    // The address was the second half of every row and it is what a user cannot read: 340 lines of
+    // `https://…/api.php/provide/vod` distinguish nothing. What the space is worth is the answer to
+    // "does this one work", which the source list already knows.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [
+            { key: "ok", name: "可用的源", api: "https://example.com/api.php/provide/vod/" },
+            { key: "no", name: "不可用的源", api: "https://blocked.example/spider" },
+          ],
+        }),
+        sources: [
+          source({
+            key: "ok",
+            name: "可用的源",
+            api: "https://example.com/api.php/provide/vod/",
+            testStatus: "passed",
+            testItemCount: 20,
+          }),
+          source({
+            key: "no",
+            name: "不可用的源",
+            api: "https://blocked.example/spider",
+            testStatus: "failed",
+            testMessage: "请求失败。",
+          }),
+        ],
+      });
+    });
+    openRawTab();
+
+    const okRow = screen.getByRole("button", { name: "编辑 可用的源" }).closest("div");
+    // A passing test reports what it found, which is the useful fact.
+    expect(okRow?.textContent).toContain("20 条内容");
+    // The address is not in the row.
+    expect(okRow?.textContent).not.toContain("api.php/provide/vod");
+
+    const badRow = screen.getByRole("button", { name: "编辑 不可用的源" }).closest("div");
+    expect(badRow?.textContent).toContain("测试失败");
+    expect(badRow?.textContent).not.toContain("blocked.example");
+  });
+
+  it("says an entry cannot be tested rather than that it is untested", () => {
+    // 未测试 implies the user has not got round to it, which is exactly the judgement this badge
+    // exists to support. A record with no address can never be tested, and one with no runnable
+    // adapter has nothing to test with — both need saying.
+    renderCenter();
+    // The rows come from the configuration text and the badges from the parsed sources, so both
+    // sides have to carry the same keys.
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [
+            { key: "broken", name: "缺少地址的源", api: "" },
+            { key: "no", name: "不可用的源", api: "https://blocked.example/spider" },
+          ],
+        }),
+        sources: [
+          source({
+            key: "broken",
+            name: "缺少地址的源",
+            sourceType: "live",
+            capability: "invalid",
+            capabilityNote: "直播源缺少 name 或 url/api 字段。",
+            api: "",
+          }),
+          source({
+            key: "no",
+            name: "不可用的源",
+            api: "https://blocked.example/spider",
+            siteProtocol: "spider",
+            jar: "https://blocked.example/1.jar",
+            capability: "blocked",
+          }),
+        ],
+      });
+    });
+    openRawTab();
+
+    const brokenRow = screen.getByRole("button", { name: "编辑 缺少地址的源" }).closest("div");
+    expect(brokenRow?.textContent).toContain("配置无效");
+    expect(brokenRow?.textContent).not.toContain("未测试");
+
+    const blockedRow = screen.getByRole("button", { name: "编辑 不可用的源" }).closest("div");
+    expect(blockedRow?.textContent).toContain("无法测试");
+    expect(blockedRow?.textContent).not.toContain("未测试");
+  });
+
+  it("says nothing about a test for an entry with no parsed source", () => {
+    // A newly added entry has no parsed source yet, and no claim can be made about it.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({ sources: [] });
+    });
+    openRawTab();
+
+    const row = screen.getByRole("button", { name: "编辑 可用的源" }).closest("div");
+    expect(row?.textContent).not.toContain("未测试");
+    expect(row?.textContent).not.toContain("测试失败");
+    expect(row?.textContent).not.toContain("配置无效");
+  });
+
+  it("matches a test result by key, not by position", () => {
+    // The join between a row and its result is the key. Matching by position would attach one
+    // source's outcome to another's row as soon as the file was reordered.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [
+            { key: "no", name: "不可用的源", api: "https://blocked.example/spider" },
+            { key: "ok", name: "可用的源", api: "https://example.com/api.php/provide/vod/" },
+          ],
+        }),
+        sources: [
+          source({
+            key: "ok",
+            name: "可用的源",
+            api: "https://example.com/api.php/provide/vod/",
+            testStatus: "passed",
+            testItemCount: 20,
+          }),
+          source({
+            key: "no",
+            name: "不可用的源",
+            api: "https://blocked.example/spider",
+            testStatus: "failed",
+            testMessage: "请求失败。",
+          }),
+        ],
+      });
+    });
+    openRawTab();
+
+    // The rows are in the file's order; each carries its own result.
+    expect(
+      screen.getByRole("button", { name: "编辑 不可用的源" }).closest("div")?.textContent,
+    ).toContain("测试失败");
+    expect(
+      screen.getByRole("button", { name: "编辑 可用的源" }).closest("div")?.textContent,
+    ).toContain("20 条内容");
+  });
+
+  it("shows the address once the row is opened", () => {
+    // Hiding it from the summary is not hiding it from the user: it is one click away, in the field
+    // where it can also be corrected.
+    renderCenter();
+    openRawTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+
+    expect(screen.getByLabelText("api")).toHaveValue(
+      "https://example.com/api.php/provide/vod/",
+    );
   });
 
   it("opens the raw tab in the visual view", () => {

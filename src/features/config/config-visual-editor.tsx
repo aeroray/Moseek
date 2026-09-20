@@ -1,7 +1,10 @@
 import { useMemo, useState } from "react";
 import {
+  Check,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
+  CircleX,
   Info,
   Plus,
   Search,
@@ -24,6 +27,8 @@ import {
   type VisualSectionKey,
 } from "@/features/config/config-visual";
 import { cn } from "@/lib/utils";
+import { isTestableSource } from "@/lib/adapters";
+import type { SourceRecord, SourceTestStatus } from "@/types/moseek";
 
 /**
  * The visual editor for a configuration.
@@ -42,9 +47,12 @@ import { cn } from "@/lib/utils";
 export function ConfigVisualEditor({
   value,
   onChange,
+  sources,
 }: {
   value: string;
   onChange: (next: string) => void;
+  /** The parsed sources, so a row can show what testing it found. */
+  sources: SourceRecord[];
 }) {
   const model = useMemo(() => readVisualConfig(value), [value]);
   const [expandedSection, setExpandedSection] = useState<VisualSectionKey | null>(
@@ -53,6 +61,19 @@ export function ConfigVisualEditor({
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [fieldError, setFieldError] = useState<string | null>(null);
+
+  /**
+   * Test results by source key.
+   *
+   * The editor holds text and the results live on parsed records, so the key is the join. Built
+   * once per render from the source list rather than looked up per row, because a 340-row list
+   * would otherwise scan the whole array for each one.
+   */
+  const testByKey = useMemo(() => {
+    const map = new Map<string, SourceRecord>();
+    for (const source of sources) map.set(source.key, source);
+    return map;
+  }, [sources]);
 
   if (!model.ok) {
     return (
@@ -123,6 +144,7 @@ export function ConfigVisualEditor({
             onEdit={setEditingIndex}
             onApply={apply}
             rawText={value}
+            testByKey={testByKey}
           />
         ))}
 
@@ -149,6 +171,7 @@ function SectionBlock({
   onEdit,
   onApply,
   rawText,
+  testByKey,
 }: {
   section: VisualSection;
   query: string;
@@ -158,6 +181,7 @@ function SectionBlock({
   onEdit: (index: number | null) => void;
   onApply: (next: string, error: string | null) => void;
   rawText: string;
+  testByKey: Map<string, SourceRecord>;
 }) {
   const matching = query
     ? section.entries.filter(
@@ -210,6 +234,7 @@ function SectionBlock({
               <EntryRow
                 key={entry.index}
                 entry={entry}
+                source={entry.sourceKey ? testByKey.get(entry.sourceKey) : undefined}
                 section={section.key}
                 sectionTitle={section.title}
                 editing={editingIndex === entry.index}
@@ -243,6 +268,97 @@ function SectionBlock({
 }
 
 /**
+ * Whether this entry is any good, on the row itself.
+ *
+ * The point of the visual editor is to answer "is this configuration any good", and the answer for a
+ * specific entry comes from what the source list already knows. Showing it here means a user
+ * scanning 340 rows can see which ones work without opening each or going back to the list.
+ *
+ * The two states that are not test outcomes are reported first, because 未测试 would be misleading
+ * for them: a record the parser could not build can never be tested, and an entry with no runnable
+ * adapter has nothing to test with. Saying 未测试 for either implies the user simply has not got round
+ * to it — which is exactly the judgement this badge exists to support.
+ *
+ * An entry with no matching source shows nothing at all: it may be one the user has just added, and
+ * no claim can be made about it yet.
+ */
+function TestResultBadge({ source }: { source: SourceRecord | undefined }) {
+  if (!source) return null;
+
+  if (source.capability === "invalid") {
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 gap-1 border-destructive/40 bg-destructive/10 px-1.5 py-0 text-[10px] text-destructive"
+        title={source.capabilityNote || "这条配置缺少必要字段，无法使用。"}
+      >
+        <CircleAlert className="size-2.5" aria-hidden="true" />
+        配置无效
+      </Badge>
+    );
+  }
+
+  if (!isTestableSource(source)) {
+    return (
+      <Badge
+        variant="outline"
+        className="shrink-0 gap-1 border-border/70 bg-muted/40 px-1.5 py-0 text-[10px] text-muted-foreground"
+        title={source.capabilityNote || "没有可运行的适配器，无法测试。"}
+      >
+        <CircleAlert className="size-2.5" aria-hidden="true" />
+        无法测试
+      </Badge>
+    );
+  }
+
+  const status: SourceTestStatus = source.testStatus ?? "untested";
+  const isLive = source.sourceType === "live";
+
+  const config = {
+    passed: {
+      label: `${source.testItemCount ?? 0} ${isLive ? "个频道" : "条内容"}`,
+      Icon: Check,
+      className:
+        "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
+    },
+    failed: {
+      label: "测试失败",
+      Icon: CircleX,
+      className:
+        "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",
+    },
+    empty: {
+      label: isLive ? "无频道" : "无内容",
+      Icon: CircleAlert,
+      className:
+        "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] text-[color:var(--status-adapter)]",
+    },
+    blocked: {
+      label: "未执行",
+      Icon: CircleAlert,
+      className: "border-border/70 bg-muted/40 text-muted-foreground",
+    },
+    untested: {
+      label: "未测试",
+      Icon: CircleAlert,
+      className: "border-border/70 bg-muted/40 text-muted-foreground",
+    },
+  }[status];
+
+  return (
+    <Badge
+      variant="outline"
+      className={cn("shrink-0 gap-1 px-1.5 py-0 text-[10px]", config.className)}
+      // The message is the reason, and it is the one thing the badge cannot show in a 10px pill.
+      title={source.testMessage || config.label}
+    >
+      <config.Icon className="size-2.5" aria-hidden="true" />
+      {config.label}
+    </Badge>
+  );
+}
+
+/**
  * One entry.
  *
  * Collapsed it is a name and its address, which is what a user scans for. Expanded it is the fields
@@ -251,6 +367,7 @@ function SectionBlock({
  */
 function EntryRow({
   entry,
+  source,
   section,
   sectionTitle,
   editing,
@@ -259,6 +376,8 @@ function EntryRow({
   rawText,
 }: {
   entry: VisualEntry;
+  /** The parsed record for this entry, when one matches. */
+  source: SourceRecord | undefined;
   section: VisualSectionKey;
   sectionTitle: string;
   editing: boolean;
@@ -277,9 +396,11 @@ function EntryRow({
           onClick={onEdit}
         >
           <span className="shrink-0 text-sm text-foreground">{entry.label}</span>
-          <span className="min-w-0 truncate font-mono text-[11px] text-muted-foreground">
-            {entry.summary || "（未填写地址）"}
-          </span>
+          {/* No address here. It was the second half of every row and it is what a user cannot
+              read: 340 lines of `https://…/api.php/provide/vod` distinguish nothing, and the
+              address is one click away in the fields below. What the space is worth is the answer
+              to "does this one work", which is what a badge carries. */}
+          <TestResultBadge source={source} />
         </button>
         <Button
           type="button"

@@ -12,6 +12,7 @@ import {
   Blocks,
   Braces,
   Check,
+  CircleAlert,
   Code2,
   CircleCheck,
   CircleX,
@@ -22,7 +23,6 @@ import {
   Filter,
   Globe2,
   Info,
-  Layers3,
   List,
   ListTree,
   LoaderCircle,
@@ -1401,6 +1401,17 @@ export function ConfigCenter() {
               所有导入都合并进同一份配置，重复的源会自动去重
             </p>
           </div>
+          {/* The merge result lives here rather than in a banner of its own.
+              A whole card used to state "中心配置 · 355 个源 · 每次导入都会合并进来" above the tabs,
+              which repeated the header's count and the sentence directly above it, and whose only
+              other content was this summary. One line in the header says the same thing without a
+              second row of chrome between the title and the work. */}
+          {lastMergeSummary && (
+            <span className="shrink-0 text-xs text-muted-foreground">
+              上次合并：新增 {lastMergeSummary.added} · 更新 {lastMergeSummary.updated} · 已有{" "}
+              {lastMergeSummary.unchanged}
+            </span>
+          )}
         </section>
 
         {relativeLiveSources.length > 0 && !activeDocument?.sourceBaseUrl && (
@@ -1434,43 +1445,10 @@ export function ConfigCenter() {
           </Alert>
         )}
 
-        {/* One configuration, stated once. The switcher that used to live here existed because
-            every import made a new document; now an import merges, so there is nothing to switch
-            between and the row only reports what the configuration currently is. */}
-        <Card className="py-0">
-          <CardContent className="flex items-center gap-3 px-4 py-3">
-            <Layers3
-              className="size-4 shrink-0 text-primary"
-              data-icon="inline-start"
-              aria-hidden="true"
-            />
-            <span className="shrink-0 text-sm font-medium">中心配置</span>
-            <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-              {sources.length > 0
-                ? `${sources.length} 个源 · 每次导入都会合并进来`
-                : "还没有配置，导入一份即可开始"}
-            </span>
-            {lastMergeSummary && (
-              <span className="shrink-0 text-xs text-muted-foreground">
-                上次合并：新增 {lastMergeSummary.added} · 更新{" "}
-                {lastMergeSummary.updated} · 已有{" "}
-                {lastMergeSummary.unchanged}
-              </span>
-            )}
-            {sources.length === 0 && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="shrink-0 gap-1.5"
-                onClick={openImportDialog}
-              >
-                <Upload className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                导入配置
-              </Button>
-            )}
-          </CardContent>
-        </Card>
+        {/* One configuration, stated once — in the header above. The switcher that used to live
+            here existed because every import made a new document; now an import merges, so there is
+            nothing to switch between, and the card that replaced it only repeated the header's
+            count and its own sentence. */}
 
         <Tabs
           defaultValue="sources"
@@ -2175,6 +2153,7 @@ export function ConfigCenter() {
                   <ConfigVisualEditor
                     value={editorText}
                     onChange={handleRawTextChange}
+                    sources={sources}
                   />
                 ) : (
                   <JsonEditor
@@ -3133,28 +3112,64 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
 }
 
 /**
- * A small icon that says whether this source has a working adapter.
+ * A small icon that says whether this source can be run, and why not.
  *
- * It replaces the words 可执行 / 未适配, which wrapped onto a second line and read as a status
- * report rather than as a property of the source. The icon leads the adapter cell so the answer
- * to "is this handled at all?" is the first thing seen.
+ * It replaces the words 可执行 / 未适配, which wrapped onto a second line and read as a status report
+ * rather than as a property of the source.
+ *
+ * **The three states are not two.** The icon used to be a plain "adapter exists / does not", which
+ * contradicted the status column beside it: a source whose record is missing its address shows
+ * 配置无效 in one column and a green tick here, and hovering it says 没有可用适配器 — so the reader
+ * is told simultaneously that there is no adapter and that the reason is the record. Both are true,
+ * and neither is the whole answer. The third state names the actual cause: the adapter exists and
+ * the record is what is unusable.
  */
 function AdapterPresenceBadge({ source }: { source: SourceRecord }) {
-  const usable = isTestableSource(source);
-  const Icon = usable ? CircleCheck : CircleX;
+  const testable = isTestableSource(source);
+  // A record the parser could not build is rejected before the adapter is even consulted, so the
+  // adapter's existence is beside the point: no request can be constructed from it.
+  const recordUnusable = source.capability === "invalid";
+
+  const state = testable ? "ready" : recordUnusable ? "record" : "missing";
+  const config = {
+    ready: {
+      Icon: CircleCheck,
+      label: "已有适配器",
+      detail: "已有适配器，可以测试。",
+      className:
+        "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
+    },
+    record: {
+      Icon: CircleAlert,
+      label: "配置无效",
+      // The adapter's existence is stated as well, because that is the half the green tick was
+      // reporting: it is real, and it is not what is stopping this source.
+      detail: `适配器可用（${getAdapterProfile(source).label}），但这条配置缺少必要字段，无法构造请求。`,
+      className:
+        "border-destructive/40 bg-destructive/10 text-destructive",
+    },
+    missing: {
+      Icon: CircleX,
+      label: "没有可用适配器",
+      // "不可运行" rather than "没有可执行" — the latter contains the word the status column uses to
+      // mean the opposite, so a reader (and a test) could not tell which claim was being made.
+      detail: `该源没有可运行的适配器（${getAdapterProfile(source).label}）。`,
+      className:
+        "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",
+    },
+  }[state];
+
   return (
     <Badge
       variant="outline"
       className={cn(
         "size-5 shrink-0 justify-center rounded-full p-0",
-        usable
-          ? "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]"
-          : "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",
+        config.className,
       )}
-      title={usable ? "已有适配器" : "没有可用适配器"}
+      title={config.detail}
     >
-      <Icon className="size-3" aria-hidden="true" />
-      <span className="sr-only">{usable ? "已有适配器" : "没有可用适配器"}</span>
+      <config.Icon className="size-3" aria-hidden="true" />
+      <span className="sr-only">{config.detail}</span>
     </Badge>
   );
 }
