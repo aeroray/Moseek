@@ -2148,7 +2148,12 @@ export function ConfigCenter() {
                   made the card 938px tall in an 805px window, and since the page itself is
                   overflow-hidden the bottom of the editor — and the last lines of the
                   configuration — could not be reached at all. */}
-              <CardContent className="flex min-h-0 flex-1 flex-col p-3 pt-4">
+              {/* No padding of its own. Every tab's content is inset by the element that owns the
+                  inset, so the four tabs agree: controls and block edges at 16px (the card header's
+                  own `px-4`), and the text inside a bordered list row at 24px, which is where the
+                  table tabs' `pl-6` puts theirs. The arbitrary 12px here and 20px in 解析报告 were
+                  the whole of the inconsistency — measured, not guessed. */}
+              <CardContent className="flex min-h-0 flex-1 flex-col p-0">
                 {rawMode === "visual" ? (
                   <ConfigVisualEditor
                     value={editorText}
@@ -2205,7 +2210,9 @@ export function ConfigCenter() {
                   按字段和执行边界整理的导入结果。
                 </CardDescription>
               </CardHeader>
-              <CardContent className="min-h-0 flex-1 overflow-y-auto p-5">
+              {/* `p-0` and an inner `px-4`, matching 原始配置: the two content tabs must agree, and
+                  the arbitrary `p-5` here put the report's block edges 4px inside the header's. */}
+              <CardContent className="min-h-0 flex-1 overflow-y-auto p-0">
                 {report ? (
                   /* One verdict, then two groups of labelled rows.
                      The previous layout was eight equal-weight bordered cards, each an icon plus a
@@ -2214,7 +2221,7 @@ export function ConfigCenter() {
                      mattered. A verdict block answers "did it work" first, and the groups answer
                      "what came in" and "what is being refused" — the two questions the report
                      actually exists for. */
-                  <div className="flex flex-col gap-5">
+                  <div className="flex flex-col gap-5 px-4 pb-4">
                     <ReportVerdict
                       ok={report.ok}
                       sourceCount={report.sources.length}
@@ -2304,7 +2311,7 @@ export function ConfigCenter() {
                           {report.issues.slice(0, 5).map((issue) => (
                             <div
                               key={`${issue.path}-${issue.message}`}
-                              className="flex items-baseline gap-3 px-4 py-2.5"
+                              className="flex items-baseline gap-3 px-2 py-2.5"
                             >
                               <span className="shrink-0 font-mono text-xs text-foreground">
                                 {issue.path}
@@ -2320,7 +2327,7 @@ export function ConfigCenter() {
                             </div>
                           ))}
                           {report.issues.length > 5 && (
-                            <p className="px-4 py-2.5 text-xs text-muted-foreground">
+                            <p className="px-2 py-2.5 text-xs text-muted-foreground">
                               其余 {report.issues.length - 5} 处可在源详情中查看。
                             </p>
                           )}
@@ -2329,17 +2336,19 @@ export function ConfigCenter() {
                     )}
                   </div>
                 ) : (
-                  <Empty className="min-h-64 border border-dashed bg-card/40">
-                    <EmptyHeader>
-                      <EmptyMedia variant="icon">
-                        <FileJson data-icon="inline-start" aria-hidden="true" />
-                      </EmptyMedia>
-                      <EmptyTitle>还没有解析报告</EmptyTitle>
-                      <EmptyDescription>
-                        导入并解析配置后，这里会显示结构、能力和安全边界报告。
-                      </EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
+                  <div className="px-4 pb-4">
+                    <Empty className="min-h-64 border border-dashed bg-card/40">
+                      <EmptyHeader>
+                        <EmptyMedia variant="icon">
+                          <FileJson data-icon="inline-start" aria-hidden="true" />
+                        </EmptyMedia>
+                        <EmptyTitle>还没有解析报告</EmptyTitle>
+                        <EmptyDescription>
+                          导入并解析配置后，这里会显示结构、能力和安全边界报告。
+                        </EmptyDescription>
+                      </EmptyHeader>
+                    </Empty>
+                  </div>
                 )}
               </CardContent>
             </Card>
@@ -3439,8 +3448,11 @@ function ReportRow({
   value: string;
   tone?: "supported" | "warning" | "blocked";
 }) {
+  // `px-2 py-2.5`, matching the entry rows in 原始配置: the box sits 16px inside the card and the
+  // content 8px more, which is the same 25px the table tabs' `pl-6` produces. The old `px-4 py-2.5`
+  // landed the label at 34px — the widest inset of the four tabs.
   return (
-    <div className="flex items-baseline justify-between gap-4 px-4 py-2.5">
+    <div className="flex items-baseline justify-between gap-4 px-2 py-2.5">
       <span className="text-sm text-muted-foreground">{label}</span>
       <span
         className={cn(

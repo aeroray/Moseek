@@ -955,6 +955,106 @@ describe("config center", () => {
     expect(scroller?.className).toContain("min-h-0");
   });
 
+  it("insets every tab's content the same way", () => {
+    // The four tabs had four different insets: the table tabs put their rows at 24px inside the
+    // card, 原始配置 at 12px (a 29px text inset) and 解析报告 at 20px (a 34px text inset). jsdom
+    // cannot measure any of that, so the contract that produces it is what is pinned.
+    //
+    // The rule: the card content carries no padding of its own, each tab's own wrapper supplies
+    // 16px (matching the header's `px-4`), and a bordered list box adds 8px more so its row text
+    // lands at 24px — which is where the tables' `pl-6` puts theirs.
+    renderCenter();
+
+    // The tables express the 24px with `pl-6`/`pr-6` on their edge cells.
+    const sourcesCard = screen
+      .getAllByText("源列表")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean);
+    expect(sourcesCard?.querySelector("[data-slot='card-content']")?.className).toContain(
+      "p-0",
+    );
+    expect(
+      sourcesCard?.querySelector("[data-slot='table-head']")?.className,
+    ).toContain("pl-6");
+
+    // 适配器 matches it.
+    openAdaptersTab();
+    const adapterCardEl = adapterCard();
+    expect(
+      adapterCardEl.querySelector("[data-slot='card-content']")?.className,
+    ).toContain("p-0");
+    expect(
+      adapterCardEl.querySelector("[data-slot='table-head']")?.className,
+    ).toContain("pl-6");
+  });
+
+  it("gives 原始配置 and 解析报告 the same 16px content inset", () => {
+    // These two are the pair the user compared. 原始配置 was `p-3 pt-4` (12px) and 解析报告 was
+    // `p-5` (20px); both now carry no padding and an inner wrapper supplies 16px, so the block
+    // edges line up with the card header's own `px-4`.
+    renderCenter();
+    openRawTab();
+
+    const rawCard = screen
+      .getAllByText("原始配置")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean);
+    expect(rawCard?.querySelector("[data-slot='card-content']")?.className).toContain("p-0");
+    // The visual editor supplies the inset for both of its views.
+    const visual = rawCard?.querySelector("[data-slot='card-content'] > div");
+    expect(visual?.className).toContain("px-4");
+
+    openReportTab();
+    const reportCard = screen
+      .getAllByText("解析报告")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean);
+    expect(reportCard?.querySelector("[data-slot='card-content']")?.className).toContain("p-0");
+    expect(
+      reportCard?.querySelector("[data-slot='card-content'] > div")?.className,
+    ).toContain("px-4");
+  });
+
+  it("makes the raw search box and the list below it the same width", () => {
+    // They are siblings in a column, so they must share an edge. The scroll container used to carry
+    // `pr-1` to keep the scrollbar clear, which made the list 4px narrower than the search box.
+    renderCenter();
+    openRawTab();
+
+    const content = screen
+      .getAllByText("原始配置")
+      .map((node) => node.closest("[data-slot='card']"))
+      .find(Boolean)
+      ?.querySelector("[data-slot='card-content']");
+    const scroller = content?.querySelector("div.overflow-y-auto");
+    expect(scroller).not.toBeNull();
+    // No asymmetric padding: any inset is on the shared parent, so both children match.
+    expect(scroller?.className).not.toMatch(/\bpr-\d/);
+    expect(scroller?.className).not.toMatch(/\bpl-\d/);
+  });
+
+  it("gives 原始配置's rows the same padding as a table row", () => {
+    // The list's rows looked more tightly packed than the adapter table's. Both now use 10px of
+    // vertical padding; the remaining height difference is the adapter rows' second line of text.
+    renderCenter();
+    openRawTab();
+
+    const row = screen.getByRole("button", { name: "编辑 可用的源" }).closest("div.flex");
+    expect(row?.className).toContain("py-2.5");
+    expect(row?.className).toContain("px-2");
+  });
+
+  it("gives a report row the same padding as an entry row", () => {
+    // 解析报告's rows sat at 34px from the card edge — the widest of the four tabs — because they
+    // carried `px-4` inside an already-padded content area.
+    renderCenter();
+    openReportTab();
+
+    const label = screen.getByText("可搜索的源");
+    expect(label.parentElement?.className).toContain("px-2");
+    expect(label.parentElement?.className).toContain("py-2.5");
+  });
+
   it("sizes the raw editor from the space left, not a fixed height", () => {
     // A fixed 680px editor made the card 938px tall in an 805px window. The page is
     // overflow-hidden, so the bottom of the editor and the last lines of the configuration were

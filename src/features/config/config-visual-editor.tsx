@@ -99,7 +99,7 @@ export function ConfigVisualEditor({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-3">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4">
       {hasComments && (
         <div className="flex items-start gap-2 rounded-md border border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] p-2.5 text-xs leading-5 text-[color:var(--status-adapter)]">
           <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
@@ -128,7 +128,11 @@ export function ConfigVisualEditor({
         />
       </div>
 
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
+      {/* The scroll container reserves nothing on the right. It used to carry `pr-1` to keep the
+          scrollbar off the content, which made the list 4px narrower than the search box directly
+          above it — the two are siblings and must share an edge. The bar overlays the content
+          instead, as it does in the table tabs, where the rows run to the card's edge under it. */}
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
         {model.sections.map((section) => (
           <SectionBlock
             key={section.key}
@@ -203,9 +207,14 @@ function SectionBlock({
 
   return (
     <section className="rounded-lg border border-border/70 bg-card/40">
+      {/* `px-2`, not `px-3`. The section box already sits 16px inside the card (the content's own
+          `px-4`) and its border takes 1px, so 8px of inner padding puts the heading and the entry
+          names 25px from the card — exactly where the table tabs' `pl-6` puts theirs. The old 12px
+          landed at 29px, which is what made this list's rows look differently spaced from the
+          adapter list's. Measured against the rendered page, not guessed. */}
       <button
         type="button"
-        className="flex w-full items-center gap-2 px-3 py-2.5 text-left"
+        className="flex w-full items-center gap-2 px-2 py-2.5 text-left"
         aria-expanded={isOpen}
         onClick={onToggle}
       >
@@ -226,7 +235,7 @@ function SectionBlock({
       {isOpen && (
         <div className="flex flex-col border-t border-border/60">
           {matching.length === 0 ? (
-            <p className="px-3 py-3 text-xs text-muted-foreground">
+            <p className="px-2 py-3 text-xs text-muted-foreground">
               {query ? "没有匹配的条目。" : `还没有${section.title}，可以添加一条。`}
             </p>
           ) : (
@@ -387,7 +396,7 @@ function EntryRow({
 }) {
   return (
     <div className="border-b border-border/40 last:border-b-0">
-      <div className="flex items-center gap-2 px-3 py-2">
+      <div className="flex items-center gap-2 px-2 py-2.5">
         <button
           type="button"
           className="flex min-w-0 flex-1 items-baseline gap-2 text-left"
@@ -416,7 +425,7 @@ function EntryRow({
       </div>
 
       {editing && (
-        <div className="grid gap-2.5 bg-muted/20 px-3 pb-3 pt-1 sm:grid-cols-2">
+        <div className="grid gap-2.5 bg-muted/20 px-2 pb-3 pt-1 sm:grid-cols-2">
           {entry.fields.map((field) => (
             <FieldRow
               key={field.name}
