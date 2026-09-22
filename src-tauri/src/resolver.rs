@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::policy::{
-    fetch_media_bytes, fetch_text_following_redirects, fetch_text_with_headers,
-    fetch_text_with_method, validate_remote_url,
+    fetch_media_bytes, fetch_media_prefix, fetch_text_following_redirects, fetch_text_with_headers,
+    fetch_text_with_method, open_media_response, validate_remote_url,
 };
 
 #[derive(Clone, Deserialize)]
@@ -43,6 +43,252 @@ pub struct MediaResource {
     pub body_base64: String,
     pub content_type: Option<String>,
     pub url: String,
+}
+
+/// What container a media address actually serves.
+///
+/// `container` is decided from the bytes, not the label. Publishers mislabel Content-Type often
+/// enough that this project already treats it as untrustworthy, and the address itself is worse
+/// still: the FLV channel this was built for is `https://live.ottiptv.cc/douyu/431460`, which names
+/// no extension at all and only reveals `video/x-flv` two redirects later.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaContainerProbe {
+    /// `flv`, `mpegts`, `hls` or `unknown`.
+    pub container: String,
+    pub content_type: Option<String>,
+    /// The address the probe finally landed on, after redirects.
+    pub url: String,
+    /// How many bytes the verdict was made from, so the UI can state its own confidence.
+    pub probed_bytes: usize,
+    pub message: String,
+}
+
+/// How much of a media address is read to identify its container.
+///
+/// An FLV header is 9 bytes plus the first tag, and an HLS playlist starts with `#EXTM3U`, so this
+/// is two orders of magnitude more than the verdict needs. The size is chosen for what it avoids
+/// rather than for what it reads: a live stream never ends, so a *buffered* read of this address
+/// could only ever fail — measured, the 1 MiB budget reported "error decoding response body" after
+/// 16 441 ms while the 512 KiB budget failed the same way after 5 630 ms. Reading a small window and
+/// hanging up turns that into a single fast round trip (the first chunk of this stream arrived at
+/// 1 244 ms).
+const CONTAINER_PROBE_BYTES: usize = 64 * 1024;
+
+/// Identifies the container behind a media address from its leading bytes.
+///
+/// Deliberately a pure function over bytes so it can be tested without a network.
+fn classify_media_container(body: &[u8], content_type: Option<&str>) -> (String, String) {
+    // FLV: `FLV` then a version byte then flags. The signature is exact and cannot be produced by
+    // an HLS playlist or an MPEG-TS packet, so it is checked first and needs no corroboration.
+    if body.len() >= 4 && &body[0..3] == b"FLV" {
+        return (
+            "flv".to_string(),
+            format!("文件头为 FLV（{} 字节）", body.len()),
+        );
+    }
+    // MPEG-TS: 188-byte packets each starting with the sync byte 0x47. One sync byte is a
+    // coincidence; two in a row at the packet stride is the format.
+    if body.len() >= 377 && body[0] == 0x47 && body[188] == 0x47 && body[376] == 0x47 {
+        return ("mpegts".to_string(), "文件头为 MPEG-TS（188 字节包）".to_string());
+    }
+    // An HLS playlist is text and is unambiguous when present. A BOM is tolerated because
+    // `isHlsPlaylist` on the player side tolerates one too.
+    let text = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    if text.starts_with(b"#EXTM3U") {
+        return ("hls".to_string(), "文件头为 #EXTM3U".to_string());
+    }
+    // A web page is worth naming separately: several IPTV addresses answer 200 with a landing page,
+    // and "unknown" would leave the user with nothing to act on.
+    let head = String::from_utf8_lossy(&body[..body.len().min(512)]);
+    let trimmed = head.trim_start().to_ascii_lowercase();
+    if trimmed.starts_with("<!doctype html") || trimmed.starts_with("<html") {
+        return ("html".to_string(), "响应是一个网页而不是媒体流".to_string());
+    }
+    // Only now does the label get a say, and only as a tiebreak for a body that said nothing.
+    let label = content_type.unwrap_or_default().to_ascii_lowercase();
+    if label.contains("flv") {
+        return (
+            "flv".to_string(),
+            format!("仅凭响应头 video/x-flv 判定（前 {} 字节无文件头）", body.len()),
+        );
+    }
+    if label.contains("mpegurl") {
+        return (
+            "hls".to_string(),
+            format!("仅凭响应头 {label} 判定（前 {} 字节无文件头）", body.len()),
+        );
+    }
+    if label.starts_with("video/mp2t") {
+        return ("mpegts".to_string(), "仅凭响应头 video/mp2t 判定".to_string());
+    }
+    (
+        "unknown".to_string(),
+        format!(
+            "前 {} 字节无法识别容器（响应头 {}）",
+            body.len(),
+            content_type.unwrap_or("未知")
+        ),
+    )
+}
+
+/// Reads the first few bytes of a media address and reports what container they are.
+///
+/// This is the only reliable way to answer the question for an arbitrary IPTV address. The label is
+/// not trustworthy (this project has already been burned by publishers mislabelling), and the URL
+/// frequently carries no extension — the channel this exists for is a bare `/douyu/431460` that
+/// 301-redirects to an FLV. The bytes cannot lie, and the redirect is followed here exactly as the
+/// player would follow it, so the verdict describes what playback will actually receive.
+#[tauri::command]
+pub async fn probe_media_container(
+    url: String,
+    headers: Option<HashMap<String, String>>,
+) -> Result<MediaContainerProbe, String> {
+    let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
+    let header_pairs = headers
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let (body, content_type, final_url) = fetch_media_prefix(
+        parsed_url,
+        CONTAINER_PROBE_BYTES,
+        "媒体容器探测",
+        &header_pairs,
+    )
+    .await?;
+    let (container, message) = classify_media_container(&body, content_type.as_deref());
+    Ok(MediaContainerProbe {
+        container,
+        content_type,
+        url: final_url.to_string(),
+        probed_bytes: body.len(),
+        message,
+    })
+}
+
+/// Live media streams currently open, so the frontend can stop one it no longer wants.
+///
+/// A live response never ends on its own, so a stream the user has navigated away from would keep
+/// downloading until the process exits unless something cancels it. Keyed by an id the frontend
+/// generates, because the frontend is the side that knows when playback has moved on.
+#[derive(Default)]
+pub struct MediaStreamRegistry(
+    std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+);
+
+/// Streams a live media response to the frontend over a channel.
+///
+/// The buffered `fetch_media_resource` command cannot serve this: it reads a body to completion, and
+/// a live HTTP-FLV body never completes. Measured on `https://live.ottiptv.cc/douyu/431460`, asking
+/// it for 1 MiB returned "error decoding response body" after 16 441 ms — reqwest reports a
+/// total-timeout hit during a body read as a *decode* error — even though the same response had
+/// already delivered 267 280 bytes of healthy `video/x-flv`. The stream is therefore forwarded as it
+/// arrives, under a per-read deadline instead of a total one.
+///
+/// The first message is always metadata, so the caller learns the final address and content type
+/// before any media arrives.
+#[tauri::command]
+pub async fn stream_media_resource(
+    stream_id: String,
+    url: String,
+    headers: Option<HashMap<String, String>>,
+    channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
+    registry: tauri::State<'_, MediaStreamRegistry>,
+) -> Result<(), String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use tauri::ipc::InvokeResponseBody;
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    registry
+        .0
+        .lock()
+        .map_err(|_| "媒体流注册表不可用".to_string())?
+        .insert(stream_id.clone(), cancelled.clone());
+    // The guard removes the entry on every exit path, including the early `?` returns below, so a
+    // finished or failed stream cannot leave a stale id behind.
+    let _guard = StreamRegistrationGuard {
+        registry: &registry,
+        stream_id: stream_id.clone(),
+    };
+
+    let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
+    let header_pairs = headers
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let (mut response, final_url) = open_media_response(parsed_url, "媒体流", &header_pairs).await?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    channel
+        .send(InvokeResponseBody::Json(
+            serde_json::json!({
+                "kind": "meta",
+                "url": final_url.to_string(),
+                "contentType": content_type,
+            })
+            .to_string(),
+        ))
+        .map_err(|error| format!("媒体流元数据发送失败：{error}"))?;
+
+    while !cancelled.load(Ordering::Relaxed) {
+        match response.chunk().await {
+            Ok(Some(chunk)) => {
+                if chunk.is_empty() {
+                    continue;
+                }
+                if channel.send(InvokeResponseBody::Raw(chunk.to_vec())).is_err() {
+                    // The webview dropped the channel, which means nothing is listening any more.
+                    return Ok(());
+                }
+            }
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                if cancelled.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
+                return Err(format!("媒体流读取失败：{error}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Stops a stream started by [`stream_media_resource`].
+///
+/// Idempotent: cancelling an already-finished stream is an ordinary outcome, not an error, because
+/// the frontend cannot know whether the upstream ended a moment before it stopped listening.
+#[tauri::command]
+pub fn cancel_media_stream(
+    stream_id: String,
+    registry: tauri::State<'_, MediaStreamRegistry>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    let registry = registry
+        .0
+        .lock()
+        .map_err(|_| "媒体流注册表不可用".to_string())?;
+    if let Some(flag) = registry.get(&stream_id) {
+        flag.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+/// Removes a stream's registration however the streaming command exits.
+struct StreamRegistrationGuard<'a> {
+    registry: &'a tauri::State<'a, MediaStreamRegistry>,
+    stream_id: String,
+}
+
+impl Drop for StreamRegistrationGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.registry.0.lock() {
+            registry.remove(&self.stream_id);
+        }
+    }
 }
 
 /// One line's probe outcome. `ok` means the address really served a playable manifest, not
@@ -653,8 +899,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_parser_request, is_supported_parser_method, media_kind, parser_parameter_name,
-        url_encode, validate_companion_url, value_url, MAX_PARSE_SERVICES,
+        build_parser_request, classify_media_container, is_supported_parser_method, media_kind,
+        parser_parameter_name, url_encode, validate_companion_url, value_url, MAX_PARSE_SERVICES,
     };
 
     #[test]
@@ -903,6 +1149,115 @@ mod tests {
     /// fail a build. Run it with `cargo test -- --ignored` when the scan is suspected of having
     /// stopped matching reality — the shapes it depends on are other people's markup, so this is
     /// the only test that can notice them changing.
+    /// The container verdict must come from the bytes, because neither the address nor the label can
+    /// be trusted. The channel this was written for is `https://live.ottiptv.cc/douyu/431460`: the
+    /// address names no extension and 301-redirects to an FLV, and the mislabelling problem is
+    /// already established in this project.
+    #[test]
+    fn a_container_is_identified_from_its_leading_bytes() {
+        // A real FLV header, captured from the live channel this was diagnosed on.
+        let mut flv = b"FLV\x01\x05\x00\x00\x00\x09".to_vec();
+        flv.extend_from_slice(&[0u8; 32]);
+        assert_eq!(classify_media_container(&flv, Some("video/x-flv")).0, "flv");
+
+        // The bytes outrank a wrong label in both directions.
+        assert_eq!(
+            classify_media_container(&flv, Some("application/octet-stream")).0,
+            "flv"
+        );
+        assert_eq!(
+            classify_media_container(b"#EXTM3U\n#EXT-X-VERSION:3\n", Some("video/x-flv")).0,
+            "hls"
+        );
+        // A BOM before the playlist is tolerated, matching the player's own playlist check.
+        assert_eq!(
+            classify_media_container(b"\xEF\xBB\xBF#EXTM3U\n", None).0,
+            "hls"
+        );
+    }
+
+    #[test]
+    fn mpeg_ts_is_recognised_by_its_packet_stride() {
+        // 188-byte packets, each beginning with the sync byte.
+        let mut ts = vec![0u8; 188 * 3];
+        ts[0] = 0x47;
+        ts[188] = 0x47;
+        ts[376] = 0x47;
+        assert_eq!(classify_media_container(&ts, None).0, "mpegts");
+        // A single sync byte is a coincidence, not the format.
+        let mut stray = vec![0u8; 188 * 3];
+        stray[0] = 0x47;
+        assert_eq!(classify_media_container(&stray, None).0, "unknown");
+    }
+
+    #[test]
+    fn a_landing_page_is_named_rather_than_reported_as_unknown() {
+        // Several IPTV addresses answer 200 with a web page. "unknown" would leave the user with
+        // nothing to act on.
+        let page = b"<!DOCTYPE html><html><head><title>Not found</title></head></html>";
+        let (container, message) = classify_media_container(page, Some("text/html"));
+        assert_eq!(container, "html");
+        assert!(message.contains("网页"), "{message}");
+    }
+
+    /// The label is only a tiebreak for a body that said nothing itself, and the verdict has to say
+    /// when that is all it had to go on.
+    #[test]
+    fn the_content_type_is_used_only_when_the_bytes_say_nothing() {
+        let opaque = vec![0u8; 64];
+        let (container, message) = classify_media_container(&opaque, Some("video/x-flv"));
+        assert_eq!(container, "flv");
+        assert!(message.contains("仅凭响应头"), "{message}");
+
+        let (container, message) = classify_media_container(&opaque, Some("application/json"));
+        assert_eq!(container, "unknown");
+        assert!(message.contains("application/json"), "{message}");
+    }
+
+    /// An empty or truncated body must not panic — the probe reads a bounded window and a dead
+    /// upstream can return nothing at all.
+    #[test]
+    fn a_short_body_is_handled_without_panicking() {
+        assert_eq!(classify_media_container(b"", None).0, "unknown");
+        assert_eq!(classify_media_container(b"FL", None).0, "unknown");
+        assert_eq!(classify_media_container(b"FLV", None).0, "unknown");
+    }
+
+    /// The container probe, against the real channel it was written for.
+    ///
+    /// Ignored by default because it needs the network. Run it with `cargo test -- --ignored` when
+    /// the verdict is suspected of having stopped matching reality — the address redirects through
+    /// someone else's CDN, so this is the only test that can notice that changing.
+    #[test]
+    #[ignore]
+    fn the_real_flv_channel_is_identified_as_flv() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let url = reqwest::Url::parse("https://live.ottiptv.cc/douyu/431460").unwrap();
+            let started = std::time::Instant::now();
+            let (body, content_type, final_url) =
+                crate::policy::fetch_media_prefix(
+                    url,
+                    super::CONTAINER_PROBE_BYTES,
+                    "媒体容器探测",
+                    &[],
+                )
+                .await
+                .expect("the live channel answers");
+            let (container, message) = classify_media_container(&body, content_type.as_deref());
+            println!(
+                "container={container} bytes={} ct={content_type:?} elapsed={}ms\n  {message}\n  final={final_url}",
+                body.len(),
+                started.elapsed().as_millis()
+            );
+            assert_eq!(container, "flv");
+            assert_eq!(&body[0..3], b"FLV");
+        });
+    }
+
     #[test]
     #[ignore]
     fn the_real_share_pages_still_yield_a_manifest() {

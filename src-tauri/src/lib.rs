@@ -37,6 +37,7 @@ pub fn run() {
             app.manage(AppDatabase(std::sync::Arc::new(std::sync::Mutex::new(
                 connection,
             ))));
+            app.manage(resolver::MediaStreamRegistry::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -64,6 +65,9 @@ pub fn run() {
             live::test_live_source,
             live::get_epg,
             resolver::fetch_media_resource,
+            resolver::probe_media_container,
+            resolver::stream_media_resource,
+            resolver::cancel_media_stream,
             resolver::resolve_playback,
             resolver::probe_stream_urls,
             resolver::sniff_with_companion,

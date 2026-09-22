@@ -215,6 +215,157 @@ pub(crate) async fn fetch_text_with_method(
     String::from_utf8(body).map_err(|_| format!("{resource_name}不是有效的 UTF-8 文本"))
 }
 
+/// How long a live stream may stay silent between two reads before it is treated as dead.
+///
+/// This is a *gap* deadline, not a total one. A live HTTP-FLV body never completes, so the only
+/// question worth bounding is whether the upstream is still delivering.
+const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// How many redirects a media request follows, matching `fetch_media_bytes`.
+const MEDIA_REDIRECT_LIMIT: usize = 3;
+
+/// Header names a caller may not override, because doing so breaks the request the policy built.
+const PROTECTED_HEADERS: [&str; 9] = [
+    "host",
+    "content-length",
+    "connection",
+    "transfer-encoding",
+    "proxy-authorization",
+    "proxy-authenticate",
+    "keep-alive",
+    "te",
+    "trailer",
+];
+
+/// Applies caller headers to a request, refusing the ones that would corrupt it.
+fn apply_request_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &[(String, String)],
+) -> Result<reqwest::RequestBuilder, String> {
+    for (name, value) in headers {
+        // `upgrade` is checked here rather than being listed above so the message names the header
+        // the caller actually sent.
+        if PROTECTED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) || name.eq_ignore_ascii_case("upgrade") {
+            return Err(format!("不允许覆盖受保护的 HTTP 请求头：{name}"));
+        }
+        let header_name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|error| format!("无效的 HTTP 请求头名称：{error}"))?;
+        let header_value = HeaderValue::from_str(value)
+            .map_err(|error| format!("无效的 HTTP 请求头值：{error}"))?;
+        request = request.header(header_name, header_value);
+    }
+    Ok(request)
+}
+
+/// Opens a media response and hands back the body as a stream, following bounded redirects.
+///
+/// Used by both the container sniff and live playback, so the redirect, policy and error-status
+/// handling cannot drift between "what we detect" and "what we play".
+pub(crate) async fn open_media_response(
+    url: Url,
+    resource_name: &str,
+    headers: &[(String, String)],
+) -> Result<(reqwest::Response, Url), String> {
+    let mut current_url = url;
+    for redirect_index in 0..=MEDIA_REDIRECT_LIMIT {
+        validate_remote_url(&current_url)?;
+        let client = build_http_client_with(&current_url, ClientMode::Streaming).await?;
+        let request = apply_request_headers(client.get(current_url.clone()), headers)?;
+        let response = request
+            .send()
+            .await
+            .map_err(|error| describe_http_error(format!("{resource_name}请求失败"), &error))?;
+        if response.status().is_redirection() {
+            if redirect_index == MEDIA_REDIRECT_LIMIT {
+                return Err(format!(
+                    "{resource_name}重定向次数超过 {MEDIA_REDIRECT_LIMIT} 次"
+                ));
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| format!("{resource_name}重定向缺少目标地址"))?
+                .to_str()
+                .map_err(|error| format!("{resource_name}重定向地址无效：{error}"))?
+                .to_string();
+            let next_url = current_url
+                .join(&location)
+                .map_err(|error| format!("{resource_name}重定向地址无法解析：{error}"))?;
+            if next_url == current_url {
+                return Err(format!(
+                    "{resource_name}的重定向没有指向新地址（Location 为空或指向自身），该地址当前不可用"
+                ));
+            }
+            current_url = next_url;
+            continue;
+        }
+        if !response.status().is_success() {
+            // Read a bounded error body, for the same reason `fetch_response_bytes` does: the
+            // status alone does not say *why*, and a region block states it only in the body.
+            let status = response.status();
+            let mut response = response;
+            let mut detail = String::new();
+            while let Ok(Some(chunk)) = response.chunk().await {
+                if detail.len().saturating_add(chunk.len()) > ERROR_BODY_MAX_BYTES {
+                    break;
+                }
+                detail.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            let trimmed = detail.trim();
+            return Err(if trimmed.is_empty() {
+                format!("{resource_name}返回错误状态：HTTP {}", status.as_u16())
+            } else {
+                format!(
+                    "{resource_name}返回错误状态：HTTP {}；{}",
+                    status.as_u16(),
+                    collapse_whitespace(trimmed)
+                )
+            });
+        }
+        return Ok((response, current_url));
+    }
+    Err(format!("{resource_name}请求未返回有效响应"))
+}
+
+/// Reads at most `max_bytes` of a media response, then abandons the connection.
+///
+/// This exists because a live stream never ends. `fetch_media_bytes` reads a body to completion,
+/// which is correct for a document and impossible for a running stream: measured against
+/// `https://live.ottiptv.cc/douyu/431460`, the 1 MiB budget returned "error decoding response body"
+/// after 16 441 ms even though the same response had already delivered 267 280 bytes of a healthy
+/// `video/x-flv` body, and the 512 KiB budget failed the same way after 5 630 ms. Identifying a
+/// container needs a few bytes, not the whole stream, so the read stops as soon as the window is
+/// full — which is also what keeps a container sniff to one round trip instead of a timeout.
+pub(crate) async fn fetch_media_prefix(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+    headers: &[(String, String)],
+) -> Result<(Vec<u8>, Option<String>, Url), String> {
+    let (mut response, final_url) = open_media_response(url, resource_name, headers).await?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("{resource_name}读取失败：{error}"))?
+    {
+        let remaining = max_bytes.saturating_sub(body.len());
+        if remaining == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if body.len() >= max_bytes {
+            break;
+        }
+    }
+    Ok((body, content_type, final_url))
+}
+
 pub(crate) async fn fetch_media_bytes(
     url: Url,
     max_bytes: usize,
@@ -277,28 +428,7 @@ async fn fetch_response_bytes(
         validate_remote_url(&current_url)?;
         let client = build_http_client(&current_url).await?;
         let mut request = client.request(method.clone(), current_url.clone());
-        for (name, value) in headers {
-            if matches!(
-                name.to_ascii_lowercase().as_str(),
-                "host"
-                    | "content-length"
-                    | "connection"
-                    | "transfer-encoding"
-                    | "proxy-authorization"
-                    | "proxy-authenticate"
-                    | "keep-alive"
-                    | "te"
-                    | "trailer"
-                    | "upgrade"
-            ) {
-                return Err(format!("不允许覆盖受保护的 HTTP 请求头：{name}"));
-            }
-            let header_name = HeaderName::from_bytes(name.as_bytes())
-                .map_err(|error| format!("无效的 HTTP 请求头名称：{error}"))?;
-            let header_value = HeaderValue::from_str(value)
-                .map_err(|error| format!("无效的 HTTP 请求头值：{error}"))?;
-            request = request.header(header_name, header_value);
-        }
+        request = apply_request_headers(request, headers)?;
         if let Some(body) = body.clone() {
             request = request.body(body);
         }
@@ -444,21 +574,48 @@ async fn resolve_allowed_addresses(
 }
 
 async fn build_http_client(url: &Url) -> Result<Client, String> {
+    build_http_client_with(url, ClientMode::Buffered).await
+}
+
+/// How a request's deadline is applied.
+///
+/// `Buffered` bounds the *whole* exchange, which is right for a document or a manifest: those end,
+/// and a request that has not ended by the deadline has failed. `Streaming` bounds only the gap
+/// between two reads.
+///
+/// The distinction is load-bearing for live media, and getting it wrong is silent. reqwest applies
+/// `.timeout()` to the entire response body, so on a live HTTP-FLV stream — which by definition
+/// never ends — the deadline always expires mid-body, and reqwest surfaces that as
+/// `Kind::Decode`, i.e. the message "error decoding response body". Measured on
+/// `https://live.ottiptv.cc/douyu/431460` with the buffered client: the 1 MiB budget failed after
+/// 16 441 ms and the 512 KiB budget after 5 630 ms, both reporting a decode error even though the
+/// response was a perfectly healthy `video/x-flv` body that had already delivered 267 280 bytes.
+/// Reading the same URL with only a per-read deadline delivered its first chunk in 1 244 ms.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientMode {
+    Buffered,
+    Streaming,
+}
+
+async fn build_http_client_with(url: &Url, mode: ClientMode) -> Result<Client, String> {
     let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
     let port = url.port_or_known_default().unwrap_or(443);
     // This is the one place a name is resolved, so it is also where the address policy is
     // enforced for names.
     let resolved_addresses = resolve_allowed_addresses(host, port).await?;
-    Client::builder()
-        .timeout(Duration::from_secs(15))
+    let builder = Client::builder()
         .connect_timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         // **All** resolved addresses are handed to reqwest, not just the first. reqwest tries them
         // in order, which is what keeps a host with one unhealthy address reachable.
         .resolve_to_addrs(host, &resolved_addresses)
-        .user_agent("Moseek/0.1")
-        .build()
-        .map_err(|error| error.to_string())
+        .user_agent("Moseek/0.1");
+    let builder = match mode {
+        ClientMode::Buffered => builder.timeout(Duration::from_secs(15)),
+        // A live stream is expected to be quiet between chunks; it is not expected to finish.
+        ClientMode::Streaming => builder.read_timeout(STREAM_READ_TIMEOUT),
+    };
+    builder.build().map_err(|error| error.to_string())
 }
 
 fn is_disallowed_host(host: &str) -> bool {

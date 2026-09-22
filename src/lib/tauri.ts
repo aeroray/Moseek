@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 
 import { hasScriptArchive } from "@/lib/adapters";
 import type {
@@ -68,6 +68,23 @@ export interface MediaResource {
   bodyBase64: string;
   contentType?: string | null;
   url: string;
+}
+
+/** The container a media address actually serves, decided from its leading bytes. */
+export interface MediaContainerProbe {
+  container: "flv" | "mpegts" | "hls" | "html" | "unknown";
+  contentType?: string | null;
+  /** The address the probe finally landed on, after redirects. */
+  url: string;
+  probedBytes: number;
+  message: string;
+}
+
+/** Metadata for a live stream, delivered before any media bytes. */
+export interface MediaStreamMeta {
+  kind: "meta";
+  url: string;
+  contentType?: string | null;
 }
 
 /** Outcome of probing one live line. `ok` means a real manifest was served, not just a 200. */
@@ -369,6 +386,81 @@ export async function fetchMediaResource(
     headers,
     maxBytes: maxBytes ?? null,
   });
+}
+
+/**
+ * Identifies what container an address actually serves, from its leading bytes.
+ *
+ * Returns null outside the desktop runtime, where the command is not registered. Callers must treat
+ * that as "no evidence" rather than "not FLV": the browser preview has no way to ask, and guessing
+ * there would be exactly the mistake this command exists to remove.
+ */
+export async function probeMediaContainer(
+  url: string,
+  headers: Record<string, string> = {},
+) {
+  if (!isTauriRuntime()) return null;
+  return invokeCommand<MediaContainerProbe>("probe_media_container", {
+    url,
+    headers,
+  });
+}
+
+/**
+ * Streams a live media response as it arrives, instead of buffering it to completion.
+ *
+ * A live body never ends, so `fetchMediaResource` cannot serve one: reqwest applies its timeout to
+ * the whole body and reports the resulting expiry as "error decoding response body". This returns a
+ * handle whose `cancel()` stops the upstream request.
+ */
+export async function streamMediaResource(
+  streamId: string,
+  url: string,
+  headers: Record<string, string>,
+  onChunk: (chunk: Uint8Array) => void,
+  onMeta?: (meta: MediaStreamMeta) => void,
+  onError?: (message: string) => void,
+) {
+  if (!isTauriRuntime()) return null;
+  const channel = new Channel<Uint8Array | MediaStreamMeta>();
+  channel.onmessage = (message) => {
+    if (message instanceof ArrayBuffer) {
+      onChunk(new Uint8Array(message));
+      return;
+    }
+    if (message instanceof Uint8Array) {
+      onChunk(message);
+      return;
+    }
+    // The command sends metadata as a JSON string, which arrives as a plain string.
+    if (typeof message === "string") {
+      try {
+        const parsed = JSON.parse(message) as MediaStreamMeta;
+        if (parsed && parsed.kind === "meta") onMeta?.(parsed);
+      } catch {
+        // A payload that is neither bytes nor metadata is not actionable; dropping it keeps the
+        // media path running rather than tearing playback down over a diagnostic message.
+      }
+      return;
+    }
+    if (message && typeof message === "object" && message.kind === "meta") {
+      onMeta?.(message);
+    }
+  };
+  const finished = invoke<void>("stream_media_resource", {
+    streamId,
+    url,
+    headers,
+    channel,
+  }).catch((error: unknown) => {
+    onError?.(error instanceof Error ? error.message : String(error));
+  });
+  return {
+    cancel: async () => {
+      await invokeCommand<void>("cancel_media_stream", { streamId });
+      await finished;
+    },
+  };
 }
 
 /**

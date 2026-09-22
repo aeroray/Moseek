@@ -39,7 +39,8 @@ import {
 import { cn, errorMessage } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
-import { MediaPlayer, usesHlsPipeline } from "@/features/player/media-player";
+import { MediaPlayer } from "@/features/player/media-player";
+import { resolveMediaPipeline } from "@/features/player/media-pipeline";
 import { PlaybackDiagnostics } from "@/features/player/playback-diagnostics";
 import { useStreamProbes } from "@/features/player/use-stream-probes";
 import type { MediaDiagnosticSnapshot } from "@/features/player/media-diagnostics";
@@ -202,9 +203,10 @@ export function LiveView() {
     resolvedStream?.url ?? selectedStreamUrl ?? selectedChannel?.streamUrl ?? "";
   const playerKind =
     resolvedStream?.mediaKind ?? selectedChannel?.mediaKind ?? "unknown";
-  const playerPipeline = usesHlsPipeline(playerKind, true, playerUrl)
-    ? "hls"
-    : "native";
+  // Keyed on the resolved pipeline rather than a boolean, because there are now three of them and
+  // each owns a different library attached to the same <video> element. A boolean would key FLV and
+  // native identically, so switching between those two would reuse a player built for the other.
+  const playerPipeline = resolveMediaPipeline(playerKind, true, playerUrl);
 
   // A line change invalidates the resolved address, which belonged to the previous line.
   useEffect(() => {

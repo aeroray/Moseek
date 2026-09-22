@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  describeMpegtsError,
+  describePipeline,
   extractUpstreamStatus,
   formatHlsError,
+  formatMpegtsError,
+  mediaPipelineLabels,
 } from "@/features/player/media-diagnostics";
 
 describe("upstream status recovery", () => {
@@ -119,5 +123,121 @@ describe("HLS failure messages", () => {
   it("distinguishes a non-playlist response from a network failure", () => {
     const message = formatHlsError("manifestLoadError", 415);
     expect(message).toContain("不是有效的 HLS 清单");
+  });
+});
+
+describe("pipeline labels", () => {
+  it("names the FLV pipeline as mpegts.js rather than as hls.js", () => {
+    // The report has to be honest about which library ran. Reporting an FLV stream as an HLS
+    // pipeline would point anyone reading the diagnosis at a component that never loaded.
+    expect(mediaPipelineLabels["flv-mpegts"]).toContain("mpegts.js");
+    expect(mediaPipelineLabels["flv-mpegts"]).not.toContain("hls.js");
+  });
+});
+
+describe("pipeline media source reporting", () => {
+  /** mpegts.js exposes no MediaSource accessor, so this is what the panel actually receives. */
+  function videoWithSrc(src: string) {
+    return {
+      src,
+      buffered: {
+        length: 1,
+        start: () => 0,
+        end: () => 12.5,
+      },
+    } as unknown as HTMLVideoElement;
+  }
+
+  it("does not claim mpegts.js has no MediaSource when it is playing through one", () => {
+    // mpegts.js keeps its MediaSource private, so `mediaSource` is always null for this pipeline.
+    // Reporting "未挂载" beside 12.5s of buffered data would contradict itself and send a reader
+    // looking for a mounting failure that never happened.
+    const snapshot = describePipeline(
+      null,
+      "flv-mpegts",
+      videoWithSrc("blob:http://tauri.localhost/abc"),
+      null,
+    );
+    expect(snapshot.mediaSourceState).toBe("由 mpegts.js 托管");
+    expect(snapshot.mediaSourceState).not.toBe("未挂载");
+    expect(snapshot.bufferedSeconds).toBe(12.5);
+  });
+
+  it("still says so when the FLV pipeline never attached", () => {
+    // The blob URL is the corroborating evidence: mpegts.js only ever plays through one.
+    const snapshot = describePipeline(null, "flv-mpegts", videoWithSrc(""), null);
+    expect(snapshot.mediaSourceState).toBe("未挂载");
+  });
+
+  it("keeps reporting the real readyState for the HLS pipeline", () => {
+    const snapshot = describePipeline(
+      null,
+      "hls-inline",
+      videoWithSrc("blob:http://tauri.localhost/abc"),
+      { readyState: "open" } as unknown as MediaSource,
+    );
+    expect(snapshot.mediaSourceState).toBe("open");
+  });
+});
+
+describe("FLV failure messages", () => {
+  it("never blames an HLS manifest for an FLV stream", () => {
+    // The whole reason this pipeline exists is that an FLV stream is not a playlist. Saying
+    // "清单" here would describe a stage that never ran, which is the exact misdiagnosis being fixed.
+    const messages = [
+      formatMpegtsError("NetworkError", "NetworkException", { code: 0, msg: "socket closed" }),
+      formatMpegtsError("NetworkError", "NetworkStatusCodeInvalid", { code: 403, msg: "Forbidden" }),
+      formatMpegtsError("NetworkError", "NetworkUnrecoverableEarlyEof", { code: 0, msg: "eof" }),
+      formatMpegtsError("MediaError", "MediaFormatError", { code: 0, msg: "invalid" }),
+      formatMpegtsError("MediaError", "MediaCodecUnsupported", { code: 0, msg: "hvc1" }),
+      formatMpegtsError("MediaError", "MediaMSEError", { code: 0, msg: "buffer" }),
+      formatMpegtsError("OtherError", "Unknown", { code: 0, msg: "?" }),
+    ];
+    for (const message of messages) {
+      expect(message).not.toContain("清单");
+      expect(message).not.toContain("HLS");
+    }
+  });
+
+  it("separates a timeout from a peer that stops sending", () => {
+    // The same distinction the HLS copy makes, for the same reason: the remedies differ.
+    const timedOut = formatMpegtsError("NetworkError", "NetworkException", {
+      code: 0,
+      msg: "operation timed out",
+    });
+    expect(timedOut).toContain("超时");
+
+    const closed = formatMpegtsError("NetworkError", "NetworkException", {
+      code: 0,
+      msg: "connection closed before message completed",
+    });
+    expect(closed).toContain("无法从上游持续读取");
+    expect(closed).not.toContain("超时");
+  });
+
+  it("keeps an upstream status visible", () => {
+    const message = formatMpegtsError("NetworkError", "NetworkStatusCodeInvalid", {
+      code: 403,
+      msg: "Forbidden",
+    });
+    expect(message).toContain("HTTP 403");
+  });
+
+  it("still says something useful when mpegts.js supplies nothing", () => {
+    // mpegts.js reports three separate arguments and any of them may be absent; a blank message
+    // would leave the diagnostic timeline with an empty row.
+    expect(describeMpegtsError()).toContain("未提供错误详情");
+    expect(formatMpegtsError()).toContain("FLV 直播播放失败");
+  });
+
+  it("keeps the media type and detail in the timeline description", () => {
+    // The type is what separates a dead upstream from an undecodable stream, so it has to survive.
+    const described = describeMpegtsError("MediaError", "MediaCodecUnsupported", {
+      code: 0,
+      msg: "HEVC not supported",
+    });
+    expect(described).toContain("MediaError");
+    expect(described).toContain("MediaCodecUnsupported");
+    expect(described).toContain("HEVC not supported");
   });
 });

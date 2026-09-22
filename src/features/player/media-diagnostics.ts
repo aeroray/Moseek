@@ -42,7 +42,7 @@ export interface MediaSnapshot {
 }
 
 export interface MediaPipelineSnapshot {
-  mode: "hls-worker" | "hls-inline" | "native";
+  mode: "hls-worker" | "hls-inline" | "flv-mpegts" | "native";
   levelCount: number;
   currentLevel: number;
   loadLevel: number;
@@ -219,7 +219,18 @@ export function describePipeline(
 ): MediaPipelineSnapshot {
   let mediaSourceState = "未使用";
   if (mode !== "native") {
-    mediaSourceState = mediaSource?.readyState ?? "未挂载";
+    // mpegts.js keeps its MediaSource private and does not expose an accessor, so the object is
+    // never available here even though one is definitely mounted. Reporting "未挂载" for a working
+    // FLV stream would contradict the buffered seconds shown beside it, so the row names the real
+    // owner instead. The blob URL on the element is the corroborating evidence: mpegts.js only ever
+    // plays through `URL.createObjectURL`, so its absence means the pipeline never attached.
+    if (mode === "flv-mpegts") {
+      mediaSourceState = video.src.startsWith("blob:")
+        ? "由 mpegts.js 托管"
+        : "未挂载";
+    } else {
+      mediaSourceState = mediaSource?.readyState ?? "未挂载";
+    }
   }
   let bufferedSeconds = 0;
   const { buffered } = video;
@@ -255,8 +266,67 @@ export const mediaPipelineLabels: Record<
 > = {
   "hls-worker": "hls.js（转封装线程）",
   "hls-inline": "hls.js（主线程转封装）",
+  "flv-mpegts": "mpegts.js（HTTP-FLV 转封装）",
   native: "原生 video",
 };
+
+/**
+ * Renders one mpegts.js error for the diagnostic timeline.
+ *
+ * mpegts.js reports its failures as three separate arguments — a type, a detail and a message
+ * object — and none of them is meaningful alone. A network failure and a codec failure both arrive
+ * as `ERROR`, so the type is what tells the user whether to blame the upstream or the stream's
+ * encoding; without it every FLV failure reads identically.
+ */
+export function describeMpegtsError(
+  errorType?: string,
+  errorDetail?: string,
+  errorInfo?: { code?: number; msg?: string },
+) {
+  const parts: string[] = [];
+  if (errorType) parts.push(errorType);
+  if (errorDetail) parts.push(errorDetail);
+  if (errorInfo?.code) parts.push(`code ${errorInfo.code}`);
+  if (errorInfo?.msg) parts.push(errorInfo.msg);
+  return parts.length > 0 ? parts.join(" · ") : "mpegts.js 未提供错误详情";
+}
+
+/**
+ * Turns an mpegts.js error into the sentence the user reads.
+ *
+ * The FLV pipeline must not talk about an "HLS 清单" (manifest): the whole reason this pipeline
+ * exists is that an FLV stream is not a playlist, and reporting a manifest problem for one would
+ * describe a stage that never ran.
+ */
+export function formatMpegtsError(
+  errorType?: string,
+  errorDetail?: string,
+  errorInfo?: { code?: number; msg?: string },
+) {
+  const detail = describeMpegtsError(errorType, errorDetail, errorInfo);
+  const status = errorInfo?.code || extractUpstreamStatus(errorInfo?.msg);
+  const statusNote = status ? `（HTTP ${status}）` : "";
+  switch (errorDetail) {
+    case "NetworkException":
+    case "NetworkError":
+      if (errorInfo?.msg && looksLikeTimeout(errorInfo.msg)) {
+        return "连接 FLV 直播流超时，上游没有在限定时间内继续发送数据。该地址可能已失效或只对特定运营商网络开放。";
+      }
+      return `无法从上游持续读取 FLV 直播流${statusNote}。该地址可能已失效，或只对特定运营商网络开放。`;
+    case "NetworkStatusCodeInvalid":
+      return `上游拒绝了 FLV 直播流请求${statusNote}。这类地址通常只对特定运营商网络或授权客户端开放。`;
+    case "NetworkUnrecoverableEarlyEof":
+      return "FLV 直播流在播放中途被上游关闭，且无法重新连接。请切换频道或稍后重试。";
+    case "MediaFormatError":
+      return "FLV 直播流已返回，但封装格式无法解析；该地址可能并不是有效的 FLV 流。";
+    case "MediaCodecUnsupported":
+      return "FLV 直播流的编码当前播放环境无法解码（常见于 H.265 或非 AAC 音轨）。";
+    case "MediaMSEError":
+      return "FLV 直播流无法写入播放缓冲区，当前播放环境可能不支持该编码。";
+    default:
+      return `FLV 直播播放失败：${detail}`;
+  }
+}
 
 /**
  * Renders one hls.js error for the diagnostic timeline. The Tauri loader reports its

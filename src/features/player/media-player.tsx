@@ -8,25 +8,39 @@ import Hls, {
   type LoaderConfiguration,
   type LoaderContext,
 } from "hls.js";
+import Mpegts from "mpegts.js";
 import { CircleAlert, RotateCw } from "lucide-react";
 import Plyr from "plyr";
 import "plyr/dist/plyr.css";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { fetchMediaResource, isTauriRuntime } from "@/lib/tauri";
+import {
+  fetchMediaResource,
+  isTauriRuntime,
+  probeMediaContainer,
+  streamMediaResource,
+  type MediaStreamMeta,
+} from "@/lib/tauri";
 import { getByteRangeHeader, isEmptyFragmentResponse } from "@/features/player/media-range";
 import {
   clearsFailureNote,
   decideLiveWatchdog,
 } from "@/features/player/live-watchdog";
 import {
+  resolveMediaPipeline,
+  shouldProbeContainer,
+  type MediaContainerEvidence,
+} from "@/features/player/media-pipeline";
+import {
   createDiagnosticRecorder,
   describeHlsError,
   describeMediaElement,
+  describeMpegtsError,
   describePipeline,
   extractUpstreamStatus,
   formatHlsError,
+  formatMpegtsError,
   mediaStatusLabels,
   probeMediaEnvironment,
   type MediaDiagnosticSnapshot,
@@ -37,6 +51,7 @@ import {
 import type { MediaKind } from "@/types/moseek";
 
 export type { MediaStatus };
+export { resolveMediaPipeline, usesHlsPipeline } from "@/features/player/media-pipeline";
 
 interface MediaPlayerProps {
   title: string;
@@ -75,19 +90,6 @@ let cachedTransmuxWorkerSupport: boolean | null = null;
  * "this is not a playlist".
  */
 const PLAYLIST_MAX_BYTES = 1024 * 1024;
-
-/**
- * Decides whether a source must be played through hls.js.
- *
- * A live channel is normally HLS even without the extension, but an explicit mp4 is never an
- * HLS manifest: forcing one through hls.js downloaded the whole file and then failed with a
- * size-limit error instead of playing it. Exported so callers can key the player on the
- * pipeline, because switching between the two kinds needs a fresh player.
- */
-export function usesHlsPipeline(kind: MediaKind, isLive: boolean, url: string) {
-  if (kind === "mp4") return false;
-  return isLive || kind === "hls" || url.toLowerCase().includes(".m3u8");
-}
 
 /**
  * How long one live load attempt is given to produce its first picture.
@@ -278,6 +280,169 @@ function createTauriMediaLoader(sourceRef: { current: MediaSourceState }) {
   };
 }
 
+/**
+ * The literal values of mpegts.js's `LoaderErrors`.
+ *
+ * Its typings declare `LoaderErrors` as an interface *and* use it as the parameter type of
+ * `BaseLoader.onError`, which is not satisfiable: `LoaderErrors.EXCEPTION` has the literal type
+ * `'Exception'`, which is not assignable to the interface. Indexing the interface recovers the union
+ * the callbacks actually receive, so the class stays honest about what mpegts.js passes it.
+ */
+type MpegtsLoaderError = Mpegts.LoaderErrors[keyof Mpegts.LoaderErrors];
+
+/**
+ * Feeds mpegts.js from the Rust streaming command instead of the webview's own `fetch`.
+ *
+ * The webview cannot fetch these streams itself. The desktop runtime proxies media through Rust
+ * precisely because these hosts cannot be relied on for CORS headers, and Rust also keeps the
+ * request behind the project's public-URL, header, redirect and DNS policy, which a direct `fetch`
+ * would bypass. This mirrors what the hls.js path already does with `TauriMediaLoader`.
+ *
+ * `mpegts.js` drives a loader through `Mpegts.BaseLoader`: it assigns the callbacks after
+ * construction and then calls `open`. Chunks are pushed in arrival order with the stream offset they
+ * begin at, which is load-bearing — a wrong `byteStart` misplaces timestamps rather than merely
+ * logging oddly. `onComplete` is never called for a live stream, because a live stream does not end.
+ */
+class TauriFlvLoader {
+  /** `true` for a streaming loader: mpegts.js only disables its stash buffer for range loaders. */
+  readonly _needStash = true;
+  _status: number = Mpegts.LoaderStatus.kIdle;
+
+  onContentLengthKnown: (contentLength: number) => void = () => {};
+  onURLRedirect: (redirectedURL: string) => void = () => {};
+  onDataArrival: (
+    chunk: ArrayBuffer,
+    byteStart: number,
+    receivedLength?: number,
+  ) => void = () => {};
+  onError: (
+    errorType: MpegtsLoaderError,
+    errorInfo: Mpegts.LoaderErrorMessage,
+  ) => void = () => {};
+  onComplete: (rangeFrom: number, rangeTo: number) => void = () => {};
+
+  /** Request headers for the current source, refreshed by the player on every channel switch. */
+  requestHeaders: Record<string, string> = {};
+
+  private readonly streamId: string;
+  private cancelStream: (() => Promise<void>) | null = null;
+  private received = 0;
+  private aborted = false;
+
+  constructor(
+    _seekHandler: unknown,
+    private readonly config: Mpegts.Config,
+  ) {
+    // Unique per loader so a cancelled stream can never cancel a later one: mpegts.js builds a new
+    // loader on every reconnect, and a shared id would make the registry's single flag ambiguous.
+    this.streamId = `flv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  get type() {
+    return "tauri-flv-loader";
+  }
+
+  get status() {
+    return this._status;
+  }
+
+  get needStashBuffer() {
+    return this._needStash;
+  }
+
+  /** Reported in mpegts.js's statistics; it reads this unconditionally on a live stream. */
+  get currentSpeed() {
+    return 0;
+  }
+
+  isWorking() {
+    return (
+      this._status === Mpegts.LoaderStatus.kConnecting ||
+      this._status === Mpegts.LoaderStatus.kBuffering
+    );
+  }
+
+  open(dataSource: Mpegts.MediaSegment) {
+    this._status = Mpegts.LoaderStatus.kConnecting;
+    const url = dataSource.url ?? "";
+    const headers = {
+      ...((this.config.headers as Record<string, string> | undefined) ?? {}),
+      ...this.requestHeaders,
+    };
+    void streamMediaResource(
+      this.streamId,
+      url,
+      headers,
+      (chunk) => {
+        if (this.aborted) return;
+        this._status = Mpegts.LoaderStatus.kBuffering;
+        const byteStart = this.received;
+        this.received += chunk.byteLength;
+        this.onDataArrival(
+          chunk.buffer.slice(
+            chunk.byteOffset,
+            chunk.byteOffset + chunk.byteLength,
+          ) as ArrayBuffer,
+          byteStart,
+          this.received,
+        );
+      },
+      (meta: MediaStreamMeta) => {
+        if (meta.url && meta.url !== url) this.onURLRedirect(meta.url);
+      },
+      (message) => {
+        if (this.aborted) return;
+        this._status = Mpegts.LoaderStatus.kError;
+        // `Exception` is the loader-level class for a transport failure; mpegts.js maps it to its
+        // own `NetworkError` type for the player, so reporting the player-level type here would
+        // describe a stage that has not run yet.
+        this.onError(Mpegts.LoaderErrors.EXCEPTION, { code: 0, msg: message });
+      },
+    )
+      .then((handle) => {
+        if (!handle) {
+          this._status = Mpegts.LoaderStatus.kError;
+          this.onError(Mpegts.LoaderErrors.EXCEPTION, {
+            code: 0,
+            msg: "桌面运行时未提供媒体流通道",
+          });
+          return;
+        }
+        // An abort that arrives before the handle exists must still stop the stream, so the intent
+        // is applied as soon as the handle is available rather than being lost.
+        if (this.aborted) {
+          void handle.cancel();
+          return;
+        }
+        this.cancelStream = handle.cancel;
+      })
+      .catch((error: unknown) => {
+        if (this.aborted) return;
+        this._status = Mpegts.LoaderStatus.kError;
+        this.onError(Mpegts.LoaderErrors.EXCEPTION, {
+          code: 0,
+          msg: error instanceof Error ? error.message : String(error),
+        });
+      });
+  }
+
+  abort() {
+    this.aborted = true;
+    this._status = Mpegts.LoaderStatus.kIdle;
+    void this.cancelStream?.();
+    this.cancelStream = null;
+  }
+
+  destroy() {
+    this.abort();
+    this.onContentLengthKnown = () => {};
+    this.onURLRedirect = () => {};
+    this.onDataArrival = () => {};
+    this.onError = () => {};
+    this.onComplete = () => {};
+  }
+}
+
 function decodeBase64(value: string) {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -309,7 +474,11 @@ function isHlsPlaylist(value: string) {
 }
 
 function isHlsSource(source: MediaSourceState) {
-  return usesHlsPipeline(source.kind, source.isLive, source.url);
+  return resolveMediaPipeline(source.kind, source.isLive, source.url) === "hls";
+}
+
+function isFlvSource(source: MediaSourceState) {
+  return resolveMediaPipeline(source.kind, source.isLive, source.url) === "flv";
 }
 
 export function MediaPlayer({
@@ -329,6 +498,14 @@ export function MediaPlayer({
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<Plyr | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  /**
+   * The mpegts.js instance, held in a ref rather than only in the effect's closure.
+   *
+   * The cleanup function is the only place that can stop the upstream stream, and a live response
+   * never ends on its own: an instance left behind keeps downloading until the process exits. The
+   * effect's local variable is not reachable from `cleanup`, so the instance has to be shared.
+   */
+  const mpegtsRef = useRef<Mpegts.Player | null>(null);
   const callbackRef = useRef({ onProgress, onStatus, onDiagnostic, onPlayable });
   const resumeRef = useRef(resumeAt);
   const recorderRef = useRef(createDiagnosticRecorder());
@@ -350,11 +527,53 @@ export function MediaPlayer({
   // the loading layer below, so the user never sees a bare Plyr control strip floating on an
   // empty black pane — which read as "the player is only ever this small".
   const [hasStarted, setHasStarted] = useState(false);
+  /**
+   * What container the address actually serves, once it has been measured.
+   *
+   * Null means "not measured", which is not the same as "not FLV": the pipeline decision must not
+   * treat an absent measurement as evidence either way.
+   */
+  const [containerEvidence, setContainerEvidence] =
+    useState<MediaContainerEvidence | null>(null);
+
+  const pipeline = resolveMediaPipeline(kind, isLive, url, containerEvidence);
 
   useEffect(() => {
     callbackRef.current = { onProgress, onStatus, onDiagnostic, onPlayable };
     resumeRef.current = resumeAt;
   }, [onDiagnostic, onPlayable, onProgress, onStatus, resumeAt]);
+
+  /**
+   * Measures the container before trusting the URL, for the addresses where the URL says nothing.
+   *
+   * Only the ambiguous case is measured (`shouldProbeContainer`): an address that already declares
+   * itself as `.m3u8`, `.mp4` or `.flv` needs no round trip. The probe is deliberately *not* awaited
+   * before playback starts — the measured cost on the real channel is ~1.6 s, and making every live
+   * channel wait that long to confirm what it already claimed would be a regression for the many
+   * that are genuinely HLS. Playback therefore begins on the URL-derived guess and is rebuilt only
+   * if the measurement contradicts it, which the `pipeline` dependency below takes care of.
+   */
+  useEffect(() => {
+    if (!shouldProbeContainer(kind, isLive, url)) return;
+    let cancelled = false;
+    setContainerEvidence(null);
+    void probeMediaContainer(url, headers)
+      .then((probe) => {
+        if (cancelled || !probe) return;
+        recorderRef.current.push(
+          "媒体容器探测",
+          `${probe.container} · ${probe.message} · 最终地址 ${truncateForDiagnostics(probe.url)}`,
+        );
+        setContainerEvidence({ container: probe.container, url: probe.url });
+      })
+      .catch(() => {
+        // A failed probe is not a playback failure: the URL-derived pipeline is still a valid
+        // guess, and the player reports any real problem through its own events.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [headers, isLive, kind, url]);
 
   useEffect(() => {
     const source = { url, kind, isLive, headers, poster };
@@ -662,8 +881,224 @@ export function MediaPlayer({
     video.defaultMuted = liveMode;
     video.muted = liveMode;
     video.preload = "auto";
-    const isHls = isHlsSource(initialSource);
-    if (isHls && Hls.isSupported()) {
+    const isHls = pipeline === "hls";
+    const isFlv = pipeline === "flv";
+    if (isFlv && Mpegts.isSupported()) {
+      let flvRecoveryAttempts = 0;
+      let playerCreated = false;
+      /** When the loader last delivered bytes. See `flvRequestInFlight`. */
+      let lastChunkAt = 0;
+      /**
+       * Whether the stream is still delivering.
+       *
+       * mpegts.js exposes no per-chunk in-flight signal the way hls.js does, so the equivalent is
+       * derived from arrival time: a stream that produced bytes within the last stall-check window
+       * is slow, not dead. This is what keeps the shared `decideLiveWatchdog` rule honest for this
+       * pipeline — the defect it exists to prevent (a watchdog cancelling a request that was still
+       * downloading, then blaming the source) applies here identically.
+       */
+      const flvRequestInFlight = () => Date.now() - lastChunkAt < LIVE_STALL_CHECK_MS;
+
+      const markFlvBuffered = () => {
+        flvRecoveryAttempts = 0;
+        hasBufferedFragment = true;
+        if (startupWatchdog !== null) {
+          clearTimeout(startupWatchdog);
+          startupWatchdog = null;
+        }
+        startBufferedLivePlayback();
+      };
+
+      let startupDeadlineAt = 0;
+      const armStartupWatchdog = () => {
+        if (!liveMode || disposed || hasBufferedFragment) return;
+        if (startupWatchdog !== null) clearTimeout(startupWatchdog);
+        startupDeadlineAt = Date.now() + LIVE_STARTUP_BUDGET_MS;
+        startupWatchdog = setTimeout(function check() {
+          startupWatchdog = null;
+          if (disposed) return;
+          const decision = decideLiveWatchdog({
+            hasBufferedFragment,
+            requestInFlight: flvRequestInFlight(),
+            now: Date.now(),
+            deadlineAt: startupDeadlineAt,
+          });
+          if (decision === "stop") return;
+          const waited = LIVE_STARTUP_BUDGET_MS - (startupDeadlineAt - Date.now());
+          if (decision === "postpone") {
+            recorder.push(
+              "看门狗推迟",
+              `FLV 流仍在传输，已等待 ${Math.round(waited / 1000)} 秒`,
+            );
+            scheduleDiagnosticFlush();
+            startupWatchdog = setTimeout(check, LIVE_STALL_CHECK_MS);
+            return;
+          }
+          recorder.push(
+            "启动看门狗触发",
+            `${Math.round(waited / 1000)} 秒内没有可播放的画面`,
+          );
+          if (!recoverFlvStream()) {
+            report(
+              "error",
+              "FLV 直播流长时间没有可播放的画面，请切换频道或稍后重试。",
+            );
+          }
+        }, LIVE_STALL_CHECK_MS);
+      };
+      function recoverFlvStream() {
+        const instance = mpegtsRef.current;
+        if (
+          !liveMode ||
+          flvRecoveryAttempts >= 2 ||
+          disposed ||
+          liveRecoveryTimer !== null ||
+          !instance
+        ) {
+          return false;
+        }
+        flvRecoveryAttempts += 1;
+        playbackRequested = true;
+        playbackAttempts = 0;
+        hasBufferedFragment = false;
+        lastChunkAt = Date.now();
+        recorder.push("尝试重连 FLV 直播流", `第 ${flvRecoveryAttempts} 次`);
+        scheduleDiagnosticFlush(true);
+        // `unload` then `load` is mpegts.js's own reconnect path: it tears the transmuxer down and
+        // builds a fresh loader, which is what actually re-issues the request.
+        instance.unload();
+        liveRecoveryTimer = setTimeout(() => {
+          liveRecoveryTimer = null;
+          if (disposed) return;
+          instance.load();
+          void Promise.resolve(instance.play()).catch(() => {});
+          armStartupWatchdog();
+        }, 600);
+        return true;
+      }
+
+      const createFlvPlayerNow = () => {
+        const config: Mpegts.Config = {
+          // Deliberately on the main thread. The project already measured that a blob-URL worker is
+          // the CSP-sensitive path here (the black live screen was a refused `worker-src blob:`),
+          // and mpegts.js falls back to inline transmuxing internally with no signal the caller can
+          // observe — so a refusal would be silent. FLV transmuxing is light enough that the
+          // deterministic choice costs nothing measurable.
+          enableWorker: false,
+          isLive: liveMode,
+          // A live FLV stream has no meaningful seek, and its timestamps start near zero rather
+          // than at a wall clock, so latency chasing would fight the source instead of the buffer.
+          liveBufferLatencyChasing: false,
+          // The loader already owns the request, so mpegts.js must not add its own headers on top.
+          headers: sourceRef.current.headers,
+          customLoader: TauriFlvLoader as unknown as Mpegts.CustomLoaderConstructor,
+        };
+        const instance = Mpegts.createPlayer(
+          { type: "flv", isLive: liveMode, url: sourceRef.current.url },
+          config,
+        );
+        mpegtsRef.current = instance;
+        pipelineMode = "flv-mpegts";
+        lastChunkAt = Date.now();
+        recorder.push("创建 mpegts.js 实例", "type=flv · HTTP-FLV 转封装");
+        instance.on(Mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+          recorder.push("FLV 播放错误", describeMpegtsError(errorType, errorDetail, errorInfo));
+          if (liveMode && recoverFlvStream()) return;
+          report("error", formatMpegtsError(errorType, errorDetail, errorInfo));
+        });
+        instance.on(Mpegts.Events.MEDIA_INFO, (mediaInfo: unknown) => {
+          recorder.push("FLV 媒体信息", truncateForDiagnostics(JSON.stringify(mediaInfo)));
+          markFlvBuffered();
+        });
+        // The loader is the only place that sees raw arrivals, so byte progress is recorded from
+        // the media element's own buffered range instead of a chunk callback.
+        instance.on(Mpegts.Events.STATISTICS_INFO, (statistics: unknown) => {
+          lastChunkAt = Date.now();
+          const speed = (statistics as { speed?: number } | null)?.speed;
+          if (typeof speed === "number" && speed > 0) {
+            recorder.push("FLV 传输速率", `${Math.round(speed)} KB/s`);
+          }
+        });
+        if (!playerCreated) {
+          createPlayer();
+          playerCreated = true;
+        }
+        instance.attachMediaElement(video);
+        instance.load();
+        // A rejected play() is expected before the element has data; `startLivePlayback` below owns
+        // the retry policy, exactly as it does for HLS.
+        void Promise.resolve(instance.play()).catch(() => {});
+        return instance;
+      };
+
+      const restartFlvPipeline = () => {
+        const previous = mpegtsRef.current;
+        if (liveRecoveryTimer !== null) {
+          clearTimeout(liveRecoveryTimer);
+          liveRecoveryTimer = null;
+        }
+        if (startupWatchdog !== null) {
+          clearTimeout(startupWatchdog);
+          startupWatchdog = null;
+        }
+        hasBufferedFragment = false;
+        flvRecoveryAttempts = 0;
+        playbackAttempts = 0;
+        playbackAttemptInFlight = false;
+        playbackRequested = liveMode;
+        sourceVersion += 1;
+        setIsBuffering(liveMode);
+        previous?.destroy();
+        mpegtsRef.current = null;
+        if (disposed) return;
+        createFlvPlayerNow();
+        armStartupWatchdog();
+      };
+
+      pipelineMode = "flv-mpegts";
+      armStartupWatchdog();
+      scheduleBoot(createFlvPlayerNow);
+      retryRef.current = () => {
+        setHasFailed(false);
+        status = "loading";
+        lastMessage = null;
+        recorder.push("用户重试", "重新装载当前地址");
+        restartFlvPipeline();
+      };
+      loadSourceRef.current = (source) => {
+        const instance = mpegtsRef.current;
+        if (!instance || resolveMediaPipeline(source.kind, source.isLive, source.url) !== "flv") {
+          return;
+        }
+        if (liveRecoveryTimer !== null) {
+          clearTimeout(liveRecoveryTimer);
+          liveRecoveryTimer = null;
+        }
+        if (startupWatchdog !== null) {
+          clearTimeout(startupWatchdog);
+          startupWatchdog = null;
+        }
+        flvRecoveryAttempts = 0;
+        sourceVersion += 1;
+        playbackAttempts = 0;
+        playbackAttemptInFlight = false;
+        hasBufferedFragment = false;
+        playbackRequested = source.isLive;
+        setIsBuffering(source.isLive);
+        setHasFailed(false);
+        video.poster = source.poster ?? "";
+        recorder.push("切换播放地址", truncateForDiagnostics(source.url));
+        // mpegts.js has no "change the address" call: the data source is fixed at construction, so
+        // a switch rebuilds the instance. `restartFlvPipeline` is exactly that path.
+        restartFlvPipeline();
+        scheduleDiagnosticFlush(true);
+      };
+    } else if (isFlv) {
+      report(
+        "error",
+        "当前运行环境不支持 FLV 转封装播放（需要 Media Source Extensions），无法播放该频道。",
+      );
+    } else if (isHls && Hls.isSupported()) {
       let hls: Hls | null = null;
       let liveRecoveryAttempts = 0;
       let workerFallbackUsed = false;
@@ -994,7 +1429,7 @@ export function MediaPlayer({
     } else {
       pipelineMode = "native";
       loadSourceRef.current = (source) => {
-        if (isHlsSource(source)) return;
+        if (isHlsSource(source) || isFlvSource(source)) return;
         setIsBuffering(false);
         setHasFailed(false);
         video.poster = source.poster ?? "";
@@ -1031,6 +1466,11 @@ export function MediaPlayer({
       video.removeEventListener("loadeddata", announcePlayable);
       hlsRef.current?.destroy();
       hlsRef.current = null;
+      // A live FLV response never ends on its own, so this destroy is what actually stops the
+      // upstream stream. Without it the Rust command would keep downloading into a webview that has
+      // already navigated away.
+      mpegtsRef.current?.destroy();
+      mpegtsRef.current = null;
       playerRef.current?.destroy();
       playerRef.current = null;
       livePlayer = null;
@@ -1039,7 +1479,11 @@ export function MediaPlayer({
       video.removeAttribute("src");
       video.load();
     };
-  }, [isLive]);
+    // Keyed on the pipeline rather than on `isLive` alone. A probed container can change the
+    // pipeline for an address that stays the same, and each pipeline owns a different library
+    // attached to the same <video> element — hls.js and mpegts.js both attach a MediaSource, and
+    // neither can be swapped for the other without rebuilding the player.
+  }, [pipeline]);
 
   return (
     <div
