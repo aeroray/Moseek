@@ -1,4 +1,6 @@
 import {
+  memo,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -660,55 +662,74 @@ export function ConfigCenter() {
     setImportOpen(true);
   };
 
-  const handleToggleSource = async (sourceKey: string) => {
-    try {
-      await toggleSource(sourceKey);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "源状态保存失败";
-      setParseState({ type: "error", message });
-    }
-  };
+  /**
+   * These handlers are `useCallback`s so the source table's `memo` is not defeated.
+   *
+   * The table is memoised because typing in the import dialog was re-rendering all 358 of its rows.
+   * `memo` compares props by identity, so a handler recreated on every render would make the whole
+   * thing decorative — the table would still re-render on every keystroke, and the fix would look
+   * applied while changing nothing. Every dependency below is a store action or a `useState` setter,
+   * both stable, or a value that does not change while the user is typing in the dialog.
+   */
+  const handleToggleSource = useCallback(
+    async (sourceKey: string) => {
+      try {
+        await toggleSource(sourceKey);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "源状态保存失败";
+        setParseState({ type: "error", message });
+      }
+    },
+    [toggleSource],
+  );
 
   const [removeRequest, setRemoveRequest] = useState<{
     keys: string[];
     description: string;
   } | null>(null);
 
-  const handleRemoveSources = (
-    keys: string[],
-    description: string,
-    options: { needsConfirmation: boolean },
-  ) => {
-    if (keys.length === 0) return;
-    // Removing a source that cannot run is the ordinary way to tidy a configuration, so it goes
-    // through without a prompt. Removing one that works is the surprising case — the user is
-    // discarding something usable — and only that asks.
-    if (!options.needsConfirmation) {
-      void performRemoveSources(keys);
-      return;
-    }
-    setRemoveRequest({ keys, description });
-  };
-
-  const performRemoveSources = async (keys: string[]) => {
-    try {
-      await removeSources(keys);
-      if (inspectedSourceKey && keys.includes(inspectedSourceKey)) {
-        setInspectedSourceKey(null);
+  const performRemoveSources = useCallback(
+    async (keys: string[]) => {
+      try {
+        await removeSources(keys);
+        if (inspectedSourceKey && keys.includes(inspectedSourceKey)) {
+          setInspectedSourceKey(null);
+        }
+        toast({
+          variant: "success",
+          title: "已删除源",
+          description: `从配置中移除了 ${keys.length} 个源。`,
+        });
+      } catch (error) {
+        toast({
+          variant: "error",
+          title: "删除失败",
+          description: error instanceof Error ? error.message : "删除源失败",
+        });
       }
-      toast({
-        variant: "success",
-        title: "已删除源",
-        description: `从配置中移除了 ${keys.length} 个源。`,
-      });
-    } catch (error) {
-      toast({
-        variant: "error",
-        title: "删除失败",
-        description: error instanceof Error ? error.message : "删除源失败",
-      });
-    }
-  };
+    },
+    [removeSources, inspectedSourceKey, toast],
+  );
+
+  /** Decides whether removing a source needs a prompt. Stable for the same reason as its neighbours. */
+  const handleRemoveSources = useCallback(
+    (
+      keys: string[],
+      description: string,
+      options: { needsConfirmation: boolean },
+    ) => {
+      if (keys.length === 0) return;
+      // Removing a source that cannot run is the ordinary way to tidy a configuration, so it goes
+      // through without a prompt. Removing one that works is the surprising case — the user is
+      // discarding something usable — and only that asks.
+      if (!options.needsConfirmation) {
+        void performRemoveSources(keys);
+        return;
+      }
+      setRemoveRequest({ keys, description });
+    },
+    [performRemoveSources],
+  );
 
   const confirmRemoveSources = async () => {
     const request = removeRequest;
@@ -763,8 +784,9 @@ export function ConfigCenter() {
    */
   const cancelledTestKeys = useRef(new Set<string>());
 
-  const handleTestSource = async (source: SourceRecord) => {
-    if (testingKeys.has(source.key)) return;
+  const handleTestSource = useCallback(
+    async (source: SourceRecord) => {
+      if (testingKeys.has(source.key)) return;
     cancelledTestKeys.current.delete(source.key);
     setTestingKeys((current) => new Set(current).add(source.key));
     try {
@@ -833,7 +855,16 @@ export function ConfigCenter() {
         return next;
       });
     }
-  };
+    },
+    [
+      activeConfigId,
+      setConfigDocument,
+      setSourceTestResult,
+      testSource,
+      testingKeys,
+      toast,
+    ],
+  );
 
   /**
    * Abandons a single test.
@@ -841,14 +872,14 @@ export function ConfigCenter() {
    * The loading state clears immediately rather than when the request settles, so the row stops
    * looking busy the moment the user asks it to. The outcome is dropped when it arrives.
    */
-  const handleCancelTestSource = (sourceKey: string) => {
+  const handleCancelTestSource = useCallback((sourceKey: string) => {
     cancelledTestKeys.current.add(sourceKey);
     setTestingKeys((current) => {
       const next = new Set(current);
       next.delete(sourceKey);
       return next;
     });
-  };
+  }, []);
 
   /**
    * Tests a source as part of a batch, without touching the shared status banner.
@@ -959,9 +990,9 @@ export function ConfigCenter() {
     });
   };
 
-  const handleCancelTestAll = () => {
+  const handleCancelTestAll = useCallback(() => {
     cancelRunRef.current?.();
-  };
+  }, []);
 
   const handleLocalFile = async (file: File) => {
     if (!file) return;
@@ -1990,220 +2021,18 @@ export function ConfigCenter() {
                   /* The list is the only scrolling region on the page. It takes whatever height
                      is left after the fixed header above it, so the page itself never scrolls
                      and the controls stay put. */
-                  <ScrollArea className="min-h-0 flex-1">
-                    <Table containerClassName="overflow-visible">
-                      <TableHeader className="sticky top-0 z-10 bg-card">
-                        <TableRow className="hover:bg-transparent">
-                          <TableHead className="w-[30%] pl-6">资源名称</TableHead>
-                          <TableHead>状态</TableHead>
-                          <TableHead>适配器</TableHead>
-                          <TableHead>连接测试</TableHead>
-                          <TableHead className="w-16 text-center">启用</TableHead>
-                          <TableHead className="w-20 pr-6 text-center">
-                            操作
-                          </TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {filteredSources.map((source) => {
-                          const isTesting = testingKeys.has(source.key);
-                          return (
-                          <TableRow
-                            key={source.key}
-                            className={cn(
-                              "cursor-pointer",
-                              // While this row is being tested its own cells fade, so it is obvious
-                              // which of several concurrent tests is still outstanding without
-                              // watching a spinner in the corner.
-                              isTesting && "opacity-60 [&>td]:blur-[1px]",
-                            )}
-                            onClick={() => setInspectedSourceKey(source.key)}
-                          >
-                            <TableCell className="pl-6">
-                              <div className="flex items-center gap-3">
-                                <div className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
-                                  {source.sourceType === "live" ? (
-                                    <Globe2
-                                      className="size-4"
-                                      data-icon="inline-start"
-                                      aria-hidden="true"
-                                    />
-                                  ) : (
-                                    <FileJson
-                                      className="size-4"
-                                      data-icon="inline-start"
-                                      aria-hidden="true"
-                                    />
-                                  )}
-                                </div>
-                                <div className="min-w-0">
-                                  <p className="font-medium">{source.name}</p>
-                                  {/* The second line used to read `{source.key} · 直播源`, which put
-                                      the configuration author's own identifier in front of the
-                                      reader. Measured on the owner's file: three live sources carry
-                                      the keys `-7`, `-8` and `-9`, and no one can tell what those
-                                      mean — they are array indices the publisher invented. The
-                                      address is what actually identifies a source to a person, so
-                                      that is what this shows, with the kind as the fallback when
-                                      there is no address. */}
-                                  <p className="truncate text-xs text-muted-foreground">
-                                    {source.api?.trim() ||
-                                      (source.sourceType === "cms"
-                                        ? "普通 CMS"
-                                        : source.sourceType === "live"
-                                          ? "直播源"
-                                          : "解析服务")}
-                                  </p>
-                                </div>
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              <SourceStatusBadge source={source} />
-                            </TableCell>
-                            <TableCell className="max-w-52">
-                              {/* The adapter badge leads, because the first thing to know is
-                                  whether an adapter exists at all; the name follows at the same
-                                  size as the rest of the row rather than shouting over it. */}
-                              <div className="flex min-w-0 items-center gap-2">
-                                <AdapterPresenceBadge source={source} />
-                                <span className="truncate text-xs text-muted-foreground">
-                                  {getAdapterProfile(source).label}
-                                </span>
-                              </div>
-                            </TableCell>
-                            <TableCell>
-                              <SourceTestBadge source={source} />
-                            </TableCell>
-                            <TableCell
-                              className="text-center"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              {/* A switch that cannot change anything is worse than a disabled
-                                  one: it invites a click and silently does nothing. Unusable
-                                  sources get a dash, which says "not applicable" honestly. The
-                                  test is the same predicate the status column uses, so a row can
-                                  never offer a switch while telling the user it cannot run. */}
-                              {isTestableSource(source) ? (
-                                <Switch
-                                  checked={source.enabled}
-                                  onCheckedChange={() =>
-                                    void handleToggleSource(source.key)
-                                  }
-                                  aria-label={`启用 ${source.name}`}
-                                />
-                              ) : (
-                                <span
-                                  className="text-xs text-muted-foreground/60"
-                                  aria-hidden="true"
-                                >
-                                  —
-                                </span>
-                              )}
-                            </TableCell>
-                            <TableCell
-                              className="pr-6"
-                              onClick={(event) => event.stopPropagation()}
-                            >
-                              {/* Centred in a flex row so the two icon buttons line up under the
-                                  centred header, and so a row without a test button still has its
-                                  delete button in the same place as every other row. */}
-                              <div className="flex items-center justify-center gap-1">
-                                {isTestableSource(source) && (
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="icon-sm"
-                                    className="group/test relative text-muted-foreground"
-                                    // A row being tested is always cancellable, including on its
-                                    // own. This used to be disabled unless a batch was running and
-                                    // its cancel reached only the batch, so a single test offered
-                                    // an X that did nothing — the one control a user reaches for
-                                    // when a row hangs.
-                                    aria-label={
-                                      isTesting
-                                        ? `取消测试 ${source.name}`
-                                        : `测试 ${source.name}`
-                                    }
-                                    title={
-                                      isTesting ? "取消测试" : "测试这个源"
-                                    }
-                                    onClick={() => {
-                                      if (!isTesting) {
-                                        void handleTestSource(source);
-                                        return;
-                                      }
-                                      // A row that is busy because a batch owns it cancels the
-                                      // batch: that is the operation the user is waiting on, and
-                                      // stopping only this row would leave the rest running with no
-                                      // way to stop them from here.
-                                      if (isBatchTesting) {
-                                        handleCancelTestAll();
-                                        return;
-                                      }
-                                      handleCancelTestSource(source.key);
-                                    }}
-                                  >
-                                    {/* A row stuck on "测试中" is where a user looks when they
-                                        want it to stop, so the cancel control appears exactly
-                                        there on hover rather than only in the toolbar. The
-                                        button stays icon-only, so the label moves into the
-                                        accessible name and the tooltip. */}
-                                    {isTesting ? (
-                                      <>
-                                        <LoaderCircle
-                                          className="size-3.5 animate-spin group-hover/test:hidden"
-                                          aria-hidden="true"
-                                        />
-                                        <X
-                                          className="hidden size-3.5 group-hover/test:block"
-                                          aria-hidden="true"
-                                        />
-                                      </>
-                                    ) : (
-                                      <TestTube2
-                                        className="size-3.5"
-                                        aria-hidden="true"
-                                      />
-                                    )}
-                                  </Button>
-                                )}
-                                {/* Deleting is offered on every row. A source that cannot run
-                                    goes without a prompt, because tidying those away is the
-                                    ordinary case; one that works asks first, because discarding
-                                    something usable is the surprising one. */}
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="icon-sm"
-                                  className="text-muted-foreground hover:text-destructive"
-                                  aria-label={`删除 ${source.name}`}
-                                  title="从配置中删除"
-                                  onClick={() =>
-                                  handleRemoveSources(
-                                    [source.key],
-                                    `「${source.name}」`,
-                                    {
-                                      needsConfirmation:
-                                        !removableKeys.has(source.key),
-                                    },
-                                  )
-                                }
-                              >
-                                <Trash2
-                                  className="size-3.5"
-                                  data-icon="inline-start"
-                                  aria-hidden="true"
-                                />
-                              </Button>
-                              </div>
-                            </TableCell>
-                          </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-                    <ScrollBar />
-                  </ScrollArea>
+                  <SourceTable
+                    sources={filteredSources}
+                    testingKeys={testingKeys}
+                    removableKeys={removableKeys}
+                    isBatchTesting={isBatchTesting}
+                    onInspect={setInspectedSourceKey}
+                    onToggleSource={handleToggleSource}
+                    onTestSource={handleTestSource}
+                    onCancelTestSource={handleCancelTestSource}
+                    onCancelTestAll={handleCancelTestAll}
+                    onRemoveSources={handleRemoveSources}
+                  />
                 ) : (
                   /* Padded to match the table's own inset: the card's content area has no
                      padding (the table brings its own), so an empty state flush against it
@@ -3793,3 +3622,260 @@ function formatImportTime(value: string) {
     minute: "2-digit",
   }).format(date);
 }
+
+/**
+ * The source list.
+ *
+ * Extracted and memoised for one measured reason: typing in the import dialog re-rendered every row
+ * of this table. The dialog's text lives in `ConfigCenter`, so each keystroke re-rendered the whole
+ * page — 358 rows, 18,622 DOM nodes. Measured in a browser on the owner's configuration, one
+ * keystroke cost a median of 30 ms with the full table mounted and 7 ms with it filtered to a single
+ * row: same dialog, same document in the editor. Nothing about the editor was slow.
+ *
+ * `memo` only helps because every prop is referentially stable — `filteredSources` was already a
+ * `useMemo`, and the handlers are `useCallback`s over store actions and setters.
+ */
+const SourceTable = memo(function SourceTable({
+  sources,
+  testingKeys,
+  removableKeys,
+  isBatchTesting,
+  onInspect,
+  onToggleSource,
+  onTestSource,
+  onCancelTestSource,
+  onCancelTestAll,
+  onRemoveSources,
+}: {
+  sources: SourceRecord[];
+  testingKeys: Set<string>;
+  removableKeys: Set<string>;
+  isBatchTesting: boolean;
+  onInspect: (key: string) => void;
+  onToggleSource: (key: string) => void;
+  onTestSource: (source: SourceRecord) => void;
+  onCancelTestSource: (key: string) => void;
+  onCancelTestAll: () => void;
+  onRemoveSources: (
+    keys: string[],
+    description: string,
+    options: { needsConfirmation: boolean },
+  ) => void;
+}) {
+  return (
+    <ScrollArea className="min-h-0 flex-1">
+      <Table containerClassName="overflow-visible">
+        <TableHeader className="sticky top-0 z-10 bg-card">
+          <TableRow className="hover:bg-transparent">
+            <TableHead className="w-[30%] pl-6">资源名称</TableHead>
+            <TableHead>状态</TableHead>
+            <TableHead>适配器</TableHead>
+            <TableHead>连接测试</TableHead>
+            <TableHead className="w-16 text-center">启用</TableHead>
+            <TableHead className="w-20 pr-6 text-center">
+              操作
+            </TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {sources.map((source) => {
+            const isTesting = testingKeys.has(source.key);
+            return (
+            <TableRow
+              key={source.key}
+              className={cn(
+                "cursor-pointer",
+                // While this row is being tested its own cells fade, so it is obvious
+                // which of several concurrent tests is still outstanding without
+                // watching a spinner in the corner.
+                isTesting && "opacity-60 [&>td]:blur-[1px]",
+              )}
+              onClick={() => onInspect(source.key)}
+            >
+              <TableCell className="pl-6">
+                <div className="flex items-center gap-3">
+                  <div className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                    {source.sourceType === "live" ? (
+                      <Globe2
+                        className="size-4"
+                        data-icon="inline-start"
+                        aria-hidden="true"
+                      />
+                    ) : (
+                      <FileJson
+                        className="size-4"
+                        data-icon="inline-start"
+                        aria-hidden="true"
+                      />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <p className="font-medium">{source.name}</p>
+                    {/* The second line used to read `{source.key} · 直播源`, which put
+                        the configuration author's own identifier in front of the
+                        reader. Measured on the owner's file: three live sources carry
+                        the keys `-7`, `-8` and `-9`, and no one can tell what those
+                        mean — they are array indices the publisher invented. The
+                        address is what actually identifies a source to a person, so
+                        that is what this shows, with the kind as the fallback when
+                        there is no address. */}
+                    <p className="truncate text-xs text-muted-foreground">
+                      {source.api?.trim() ||
+                        (source.sourceType === "cms"
+                          ? "普通 CMS"
+                          : source.sourceType === "live"
+                            ? "直播源"
+                            : "解析服务")}
+                    </p>
+                  </div>
+                </div>
+              </TableCell>
+              <TableCell>
+                <SourceStatusBadge source={source} />
+              </TableCell>
+              <TableCell className="max-w-52">
+                {/* The adapter badge leads, because the first thing to know is
+                    whether an adapter exists at all; the name follows at the same
+                    size as the rest of the row rather than shouting over it. */}
+                <div className="flex min-w-0 items-center gap-2">
+                  <AdapterPresenceBadge source={source} />
+                  <span className="truncate text-xs text-muted-foreground">
+                    {getAdapterProfile(source).label}
+                  </span>
+                </div>
+              </TableCell>
+              <TableCell>
+                <SourceTestBadge source={source} />
+              </TableCell>
+              <TableCell
+                className="text-center"
+                onClick={(event) => event.stopPropagation()}
+              >
+                {/* A switch that cannot change anything is worse than a disabled
+                    one: it invites a click and silently does nothing. Unusable
+                    sources get a dash, which says "not applicable" honestly. The
+                    test is the same predicate the status column uses, so a row can
+                    never offer a switch while telling the user it cannot run. */}
+                {isTestableSource(source) ? (
+                  <Switch
+                    checked={source.enabled}
+                    onCheckedChange={() =>
+                      void onToggleSource(source.key)
+                    }
+                    aria-label={`启用 ${source.name}`}
+                  />
+                ) : (
+                  <span
+                    className="text-xs text-muted-foreground/60"
+                    aria-hidden="true"
+                  >
+                    —
+                  </span>
+                )}
+              </TableCell>
+              <TableCell
+                className="pr-6"
+                onClick={(event) => event.stopPropagation()}
+              >
+                {/* Centred in a flex row so the two icon buttons line up under the
+                    centred header, and so a row without a test button still has its
+                    delete button in the same place as every other row. */}
+                <div className="flex items-center justify-center gap-1">
+                  {isTestableSource(source) && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="group/test relative text-muted-foreground"
+                      // A row being tested is always cancellable, including on its
+                      // own. This used to be disabled unless a batch was running and
+                      // its cancel reached only the batch, so a single test offered
+                      // an X that did nothing — the one control a user reaches for
+                      // when a row hangs.
+                      aria-label={
+                        isTesting
+                          ? `取消测试 ${source.name}`
+                          : `测试 ${source.name}`
+                      }
+                      title={
+                        isTesting ? "取消测试" : "测试这个源"
+                      }
+                      onClick={() => {
+                        if (!isTesting) {
+                          void onTestSource(source);
+                          return;
+                        }
+                        // A row that is busy because a batch owns it cancels the
+                        // batch: that is the operation the user is waiting on, and
+                        // stopping only this row would leave the rest running with no
+                        // way to stop them from here.
+                        if (isBatchTesting) {
+                          onCancelTestAll();
+                          return;
+                        }
+                        onCancelTestSource(source.key);
+                      }}
+                    >
+                      {/* A row stuck on "测试中" is where a user looks when they
+                          want it to stop, so the cancel control appears exactly
+                          there on hover rather than only in the toolbar. The
+                          button stays icon-only, so the label moves into the
+                          accessible name and the tooltip. */}
+                      {isTesting ? (
+                        <>
+                          <LoaderCircle
+                            className="size-3.5 animate-spin group-hover/test:hidden"
+                            aria-hidden="true"
+                          />
+                          <X
+                            className="hidden size-3.5 group-hover/test:block"
+                            aria-hidden="true"
+                          />
+                        </>
+                      ) : (
+                        <TestTube2
+                          className="size-3.5"
+                          aria-hidden="true"
+                        />
+                      )}
+                    </Button>
+                  )}
+                  {/* Deleting is offered on every row. A source that cannot run
+                      goes without a prompt, because tidying those away is the
+                      ordinary case; one that works asks first, because discarding
+                      something usable is the surprising one. */}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-muted-foreground hover:text-destructive"
+                    aria-label={`删除 ${source.name}`}
+                    title="从配置中删除"
+                    onClick={() =>
+                    onRemoveSources(
+                      [source.key],
+                      `「${source.name}」`,
+                      {
+                        needsConfirmation:
+                          !removableKeys.has(source.key),
+                      },
+                    )
+                  }
+                >
+                  <Trash2
+                    className="size-3.5"
+                    data-icon="inline-start"
+                    aria-hidden="true"
+                  />
+                </Button>
+                </div>
+              </TableCell>
+            </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+      <ScrollBar />
+    </ScrollArea>
+  );
+});
