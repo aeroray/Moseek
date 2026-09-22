@@ -19,11 +19,21 @@ import { ScrollArea as ScrollAreaPrimitive } from "radix-ui"
  */
 type ScrollAreaProps = React.ComponentProps<typeof ScrollAreaPrimitive.Root> & {
   viewportClassName?: string
+  /**
+   * The viewport element, which is the thing that actually scrolls.
+   *
+   * Radix's `Root` is the outer box; the scrolling happens on the inner `Viewport`, so a caller that
+   * needs to observe or drive the scroll position — a virtualiser, for instance — cannot use a ref on
+   * `Root` for it. Exposed here rather than letting callers reach in with `querySelector`, which would
+   * break silently if Radix ever changed its internal markup.
+   */
+  viewportRef?: React.Ref<HTMLDivElement>
 }
 
 function ScrollArea({
   className,
   viewportClassName,
+  viewportRef,
   children,
   ...props
 }: ScrollAreaProps) {
@@ -34,6 +44,7 @@ function ScrollArea({
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
+        ref={viewportRef}
         data-slot="scroll-area-viewport"
         className={cn(
           "size-full rounded-[inherit] transition-[color,box-shadow] outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:outline-1",
