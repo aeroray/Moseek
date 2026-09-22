@@ -325,13 +325,23 @@ export async function getEpg(sourceUrl: string, format: string) {
   return invokeCommand<EpgCatalog>("get_epg", { sourceUrl, format });
 }
 
+/**
+ * Resolves an episode address into something the player can load.
+ *
+ * `allowPageScan` opts this into scanning the address when it is a player page rather than a media
+ * file, which is how ordinary CMS episodes are usually delivered. It is off for live channels: a
+ * live address has no extension either, but it is a running stream rather than markup, and the live
+ * workspace probes its lines properly instead.
+ */
 export async function resolvePlayback(
   url: string,
   parseServices: ParseServiceRecord[] = [],
+  allowPageScan = false,
 ) {
   return invokeCommand<PlaybackResolution>("resolve_playback", {
     url,
     parseServices,
+    allowPageScan,
   });
 }
 

@@ -36,7 +36,7 @@ import {
   resolvePlayback,
   type PlaybackResolution,
 } from "@/lib/tauri";
-import { cn } from "@/lib/utils";
+import { cn, errorMessage } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
 import type { EpgProgram, LiveChannel, LiveCatalog } from "@/types/moseek";
 import { MediaPlayer, usesHlsPipeline } from "@/features/player/media-player";
@@ -275,9 +275,9 @@ export function LiveView() {
       })
       .catch((error) => {
         if (cancelled) return;
-        setDiagnostic(
-          error instanceof Error ? error.message : "无法解析直播地址",
-        );
+        // `errorMessage` rather than `instanceof Error`: a Tauri command rejects with a plain
+        // string, so the Error-only reading discarded the backend's own explanation.
+        setDiagnostic(errorMessage(error, "无法解析直播地址"));
       });
     return () => {
       cancelled = true;
@@ -613,7 +613,13 @@ export function LiveView() {
                     if (!hasMore && msg) {
                       setDiagnostic(msg);
                     }
+                    return;
                   }
+                  // Playback recovered. The failure note has to be cleared with it: the watchdog
+                  // can give up and a slow fragment can still arrive moments later, and leaving the
+                  // old text in place made 播放诊断 read "正在播放" beside a 前置提示 saying the
+                  // stream never delivered a segment.
+                  if (st === "playing") setDiagnostic(null);
                 }}
               />
             ) : loadError ? (

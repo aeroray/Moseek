@@ -19,16 +19,28 @@ vi.mock("@/features/player/media-player", () => ({
   MediaPlayer: ({
     title,
     url,
+    isLive,
     onPlayable,
+    onStatus,
   }: {
     title: string;
     url: string;
+    isLive?: boolean;
     onPlayable?: () => void;
+    onStatus?: (status: string, message?: string) => void;
   }) => (
-    <div data-testid="media-player" data-url={url}>
+    <div
+      data-testid="media-player"
+      data-url={url}
+      data-autoplay={isLive ? "true" : "false"}
+    >
       {title}
       <button type="button" onClick={() => onPlayable?.()}>
         模拟可播放
+      </button>
+      {/* The footprint is gated on real playback, so the test has to be able to report it. */}
+      <button type="button" onClick={() => onStatus?.("playing")}>
+        模拟播放中
       </button>
     </div>
   ),
@@ -152,11 +164,28 @@ describe("PlayerView composition", () => {
     expect(column?.textContent).not.toMatch(/（\d+ \/ \d+）/);
   });
 
-  it("records a footprint as soon as the work is opened", async () => {
-    // This is the bug: the record was only written when the user actively switched episodes, so
-    // opening a film and watching it left no trace and the timeline stayed empty forever.
+  it("does not record a footprint just because the work was opened", async () => {
+    // The record used to be written on entry, before a byte of media was fetched and without the
+    // user pressing play, so 足迹 filled with works that were merely looked at — each with a
+    // position of 0. Opening a page is not watching something.
     renderPlayer();
     await screen.findByTestId("media-player");
+
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+
+    expect(useAppStore.getState().history).toHaveLength(0);
+  });
+
+  it("records the footprint once playback has actually started", async () => {
+    renderPlayer();
+    await screen.findByTestId("media-player");
+
+    // Nothing yet: the player exists but has not produced a picture.
+    expect(useAppStore.getState().history).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "模拟播放中" }));
 
     await waitFor(() => {
       const history = useAppStore.getState().history;
@@ -176,6 +205,7 @@ describe("PlayerView composition", () => {
     // cannot see this; the timestamp can.
     renderPlayer();
     await screen.findByTestId("media-player");
+    fireEvent.click(screen.getByRole("button", { name: "模拟播放中" }));
     await waitFor(() => expect(useAppStore.getState().history).toHaveLength(1));
 
     const first = useAppStore.getState().history[0].updatedAt;
@@ -220,6 +250,20 @@ describe("PlayerView composition", () => {
     expect(screen.getByTestId("media-player")).toBeInTheDocument();
   });
 
+  it("starts the player on a user action rather than by itself", async () => {
+    // The user's complaint was that opening a work appeared to start playing on its own. Measured
+    // in a real browser, the media element is not given `autoplay` and its `currentTime` stays at
+    // 0 — but the page must also not ask it to play, which is what this locks: the controls are
+    // live and the first frame arrives, yet nothing requests playback.
+    renderPlayer();
+    await screen.findByTestId("media-player");
+
+    expect(screen.getByTestId("media-player")).toHaveAttribute(
+      "data-autoplay",
+      "false",
+    );
+  });
+
   it("reveals the player once the media reports it can play", async () => {
     // The counterpart to the loading test: playability is what swaps the placeholder for the
     // real surface.
@@ -248,6 +292,27 @@ describe("PlayerView composition", () => {
     expect(screen.queryByText("播放失败")).not.toBeInTheDocument();
     // A retry is offered on the surface.
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
+  });
+
+  it("shows the backend's own reason when a Tauri command rejects with a string", async () => {
+    // A Tauri command returning `Err(String)` rejects its JS promise with a plain string, not an
+    // Error. `error instanceof Error` is therefore false for every backend failure, and the old
+    // `instanceof Error ? error.message : "播放地址未通过安全检查"` discarded the real reason and
+    // showed the fallback instead — which is how "播放地址未通过安全检查" reached the user while
+    // fifty-five parser services had actually failed and timed out.
+    resolvePlayback.mockRejectedValue(
+      "已尝试 12 个解析服务，但没有一个返回可播放地址。请更换线路或影视源。",
+    );
+    renderPlayer();
+
+    expect(await screen.findByText("无法播放当前内容")).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/已尝试 12 个解析服务，但没有一个返回可播放地址/).length,
+    ).toBeGreaterThan(0);
+    // The misleading fallback must not be shown in its place.
+    expect(
+      screen.queryByText("播放地址未通过安全检查"),
+    ).not.toBeInTheDocument();
   });
 
   it("fills the surface with a placeholder when the source has no episodes", () => {

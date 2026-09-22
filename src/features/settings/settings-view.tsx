@@ -44,6 +44,7 @@ import {
   setScriptArchiveEnabled,
 } from "@/lib/tauri";
 import type { ScriptExecutionLog } from "@/lib/tauri";
+import { errorMessage } from "@/lib/utils";
 import type { ScriptArchiveSummary, ThemeMode } from "@/types/moseek";
 
 interface SettingsViewProps {
@@ -99,9 +100,7 @@ export function SettingsView({
     void listScriptArchives()
       .then((archives) => setScriptArchives(archives ?? []))
       .catch((error) => {
-        setArchiveMessage(
-          error instanceof Error ? error.message : "无法读取脚本档案",
-        );
+        setArchiveMessage(errorMessage(error, "无法读取脚本档案"));
       })
       .finally(() => setIsLoadingArchives(false));
     void listScriptExecutionLogs(8)
@@ -149,9 +148,7 @@ export function SettingsView({
       setDeletedArchiveId(null);
       setArchiveMessage(`已导入「${saved.name}」，默认保持停用。`);
     } catch (error) {
-      setArchiveMessage(
-        error instanceof Error ? error.message : "脚本档案导入失败",
-      );
+      setArchiveMessage(errorMessage(error, "脚本档案导入失败"));
     }
   };
 
@@ -169,9 +166,7 @@ export function SettingsView({
         enabled ? `已启用「${archive.name}」。` : `已停用「${archive.name}」。`,
       );
     } catch (error) {
-      setArchiveMessage(
-        error instanceof Error ? error.message : "脚本档案状态保存失败",
-      );
+      setArchiveMessage(errorMessage(error, "脚本档案状态保存失败"));
     }
   };
 
@@ -184,9 +179,7 @@ export function SettingsView({
       setDeletedArchiveId(archive.id);
       setArchiveMessage(`已删除「${archive.name}」；原始配置没有变化。`);
     } catch (error) {
-      setArchiveMessage(
-        error instanceof Error ? error.message : "脚本档案删除失败",
-      );
+      setArchiveMessage(errorMessage(error, "脚本档案删除失败"));
     }
   };
 
@@ -199,9 +192,7 @@ export function SettingsView({
       setDeletedArchiveId(null);
       setArchiveMessage("已撤销删除，脚本档案已恢复并保持原启用状态。");
     } catch (error) {
-      setArchiveMessage(
-        error instanceof Error ? error.message : "脚本档案恢复失败",
-      );
+      setArchiveMessage(errorMessage(error, "脚本档案恢复失败"));
     }
   };
 
@@ -223,9 +214,7 @@ export function SettingsView({
       setScriptArchives(archives);
       setArchiveMessage(`已永久删除「${archive.name}」及其安全凭据。`);
     } catch (error) {
-      setArchiveMessage(
-        error instanceof Error ? error.message : "脚本档案永久删除失败",
-      );
+      setArchiveMessage(errorMessage(error, "脚本档案永久删除失败"));
     }
   };
 
@@ -247,9 +236,7 @@ export function SettingsView({
       refreshScriptExecutionLogs();
     } catch (error) {
       setArchiveMessage(
-        `「${archive.name}」执行失败：${
-          error instanceof Error ? error.message : "未知错误"
-        }`,
+        `「${archive.name}」执行失败：${errorMessage(error, "未知错误")}`,
       );
       refreshScriptExecutionLogs();
     } finally {

@@ -372,9 +372,12 @@ describe("FavoritesView", () => {
     // Playback still happens, from the saved address.
     expect(await screen.findByTestId("media-player")).toHaveTextContent("示例剧");
     await waitFor(() => {
+      // The third argument opts into scanning the address when it turns out to be a player page
+      // rather than a media file, which is how most ordinary CMS episodes are delivered.
       expect(resolvePlayback).toHaveBeenCalledWith(
         "https://cdn/1.m3u8",
         expect.anything(),
+        true,
       );
     });
   });
@@ -568,6 +571,7 @@ describe("FavoritesView", () => {
     expect(resolvePlayback).toHaveBeenCalledWith(
       "https://cdn/b2.m3u8",
       expect.anything(),
+      true,
     );
   });
 

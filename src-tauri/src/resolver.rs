@@ -1,13 +1,14 @@
 use std::{collections::HashMap, net::IpAddr, time::Duration, time::Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use futures_util::future::join_all;
+use futures_util::future::{join_all, select_ok};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::policy::{
-    fetch_media_bytes, fetch_text_with_headers, fetch_text_with_method, validate_remote_url,
+    fetch_media_bytes, fetch_text_following_redirects, fetch_text_with_headers,
+    fetch_text_with_method, validate_remote_url,
 };
 
 #[derive(Clone, Deserialize)]
@@ -98,10 +99,52 @@ pub async fn fetch_media_resource(
     })
 }
 
+/// How long one parser service may take.
+///
+/// The parser list in a real configuration is dozens of entries, and a dead host among them can
+/// hang for the client's full 15-second timeout. Bounded well below that because a working parser
+/// answers in well under a second, and the whole point of this budget is that one slow service
+/// cannot hold the result.
+const PARSE_SERVICE_TIMEOUT_MS: u64 = 6_000;
+
+/// How long the player page may take to answer.
+const PAGE_SCAN_TIMEOUT_MS: u64 = 10_000;
+
+/// Enough for a player page: they are a few kilobytes of markup.
+const PAGE_SCAN_MAX_BYTES: usize = 1024 * 1024;
+
+/// How many parser services are attempted before giving up.
+///
+/// The configured list is ordered by the source author's preference, so the head of it is the part
+/// worth trying. Bounded because the tail is where the dead hosts live: measured against the
+/// author's 55 unique services, none of them resolved the address, and every one attempted costs a
+/// request to a third party. This is also the fan-out cap — the attempts run as one concurrent
+/// batch, so this many is the most sockets opened at once.
+const MAX_PARSE_SERVICES: usize = 12;
+
+/// Resolves an episode address into something the player can load.
+///
+/// Three steps, cheapest and most reliable first:
+///
+/// 1. An address that already names a media file is returned as-is.
+/// 2. Otherwise the address may be a player page (`/share/<id>`, `/play/<id>`) with the manifest
+///    written into its own markup. Scanning for it costs one request to the *source's own host*
+///    and executes nothing — measured at 29 of 33 real page addresses.
+/// 3. Only then are the configured parser services tried, concurrently and under a deadline.
+///
+/// Step 3 used to be the only step, and it is the one that produced "播放地址未通过安全检查": the
+/// services are third-party endpoints with no obligation to answer, the loop was serial, and when
+/// every one of them failed the caller was told the address had failed a security check.
+///
+/// `allow_page_scan` is opt-in because the live workspace shares this command. A live channel's
+/// address routinely has no extension either, but it is a running stream rather than a page:
+/// fetching a megabyte of it to look for markup would be waste, and the live path already probes
+/// its lines properly.
 #[tauri::command]
 pub async fn resolve_playback(
     url: String,
     parse_services: Vec<ParseServiceInput>,
+    allow_page_scan: Option<bool>,
 ) -> Result<PlaybackResolution, String> {
     let parsed_url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
     validate_remote_url(&parsed_url)?;
@@ -115,44 +158,108 @@ pub async fn resolve_playback(
         });
     }
 
-    let mut attempted_service = false;
-    let mut last_error = None;
-    for service in parse_services {
-        if !service.enabled
-            || service.capability != "supported"
-            || !is_supported_parser_method(&service.method)
-        {
-            continue;
-        }
-        attempted_service = true;
-        let service_result = resolve_with_service(&url, &service).await;
-        match service_result {
-            Ok(resolved_url) => {
-                let resolved_url = reqwest::Url::parse(&resolved_url)
-                    .map_err(|error| format!("解析服务返回了无效地址：{error}"))?;
-                validate_remote_url(&resolved_url)?;
-                return Ok(PlaybackResolution {
-                    media_kind: media_kind(resolved_url.as_str()).to_string(),
-                    url: resolved_url.to_string(),
-                    adapter_id: "http-parser".to_string(),
-                    parse_service_id: Some(service.key),
-                });
-            }
-            Err(error) => last_error = Some(error),
+    // The source's own player page. This is the common shape for ordinary CMS episodes, and it is
+    // tried before any third party because the address is usually already on the page.
+    if allow_page_scan.unwrap_or(false) {
+        if let Some(resolution) = scan_episode_page(&parsed_url).await {
+            return Ok(resolution);
         }
     }
 
-    if attempted_service {
-        return Err(last_error.unwrap_or_else(|| "解析服务未返回可播放地址".to_string()));
+    let candidates: Vec<ParseServiceInput> = parse_services
+        .into_iter()
+        .filter(is_usable_parse_service)
+        .take(MAX_PARSE_SERVICES)
+        .collect();
+
+    // Nothing to try: hand the address back unchanged. Returning an error here would break every
+    // extension-less address that has no parser behind it — which is exactly what a live channel
+    // looks like, and the player is entitled to try it on its own.
+    if candidates.is_empty() {
+        return Ok(PlaybackResolution {
+            url,
+            media_kind: "unknown".to_string(),
+            adapter_id: "direct-http".to_string(),
+            parse_service_id: None,
+        });
     }
 
-    Ok(PlaybackResolution {
-        url,
-        media_kind: "unknown".to_string(),
-        adapter_id: "direct-http".to_string(),
+    match resolve_with_services(&url, &candidates).await {
+        Some(resolution) => Ok(resolution),
+        None => Err(format!(
+            "这个地址是播放页而不是视频文件，页面里没有可直接播放的地址；已尝试 {} 个解析服务，但没有一个返回可播放地址。请更换线路或影视源。",
+            candidates.len()
+        )),
+    }
+}
+
+/// Whether a configured parser service can be attempted at all.
+fn is_usable_parse_service(service: &ParseServiceInput) -> bool {
+    service.enabled
+        && service.capability == "supported"
+        && is_supported_parser_method(&service.method)
+}
+
+/// Tries the parser services concurrently, returning the first success.
+///
+/// `select_ok` resolves as soon as one of them succeeds rather than waiting for the slowest, which
+/// is the whole reason the services are fanned out. A service that fails or times out only removes
+/// itself from the race.
+async fn resolve_with_services(
+    url: &str,
+    services: &[ParseServiceInput],
+) -> Option<PlaybackResolution> {
+    let attempts = services.iter().cloned().map(|service| {
+        Box::pin(async move {
+            let resolved = tokio::time::timeout(
+                Duration::from_millis(PARSE_SERVICE_TIMEOUT_MS),
+                resolve_with_service(url, &service),
+            )
+            .await
+            .map_err(|_| format!("解析服务「{}」超时", service.key))??;
+            let resolved_url = reqwest::Url::parse(&resolved)
+                .map_err(|error| format!("解析服务返回了无效地址：{error}"))?;
+            validate_remote_url(&resolved_url)?;
+            Ok::<PlaybackResolution, String>(PlaybackResolution {
+                media_kind: media_kind(resolved_url.as_str()).to_string(),
+                url: resolved_url.to_string(),
+                adapter_id: "http-parser".to_string(),
+                parse_service_id: Some(service.key.clone()),
+            })
+        })
+    });
+    select_ok(attempts).await.ok().map(|(resolution, _)| resolution)
+}
+
+/// Scans a player page for a media address it embeds.
+///
+/// Returns `None` for any reason at all — unreachable, not a page, no address in it — because this
+/// is an optimisation on the way to the parser fallback, not a verdict about the address. Reporting
+/// the first failure here would tell the user their source is broken when a parser might still
+/// have resolved it.
+async fn scan_episode_page(url: &Url) -> Option<PlaybackResolution> {
+    let fetched = tokio::time::timeout(
+        Duration::from_millis(PAGE_SCAN_TIMEOUT_MS),
+        // Redirects are followed because this is predicting what the player would fetch, exactly
+        // as the live channel probe does.
+        fetch_text_following_redirects(url.clone(), PAGE_SCAN_MAX_BYTES, "播放页", 3),
+    )
+    .await
+    .ok()?
+    .ok()?;
+
+    let media = crate::page_stream::media_urls_in_page(&fetched, url);
+    let first = media.first()?;
+    let resolved = reqwest::Url::parse(first).ok()?;
+    validate_remote_url(&resolved).ok()?;
+    Some(PlaybackResolution {
+        media_kind: media_kind(resolved.as_str()).to_string(),
+        url: resolved.to_string(),
+        adapter_id: "page-scan".to_string(),
         parse_service_id: None,
     })
 }
+
 
 /// Probes several candidate stream URLs at once and reports which ones actually serve a
 /// playable manifest, fastest first.
@@ -328,20 +435,110 @@ pub async fn sniff_with_companion(
     })
 }
 
+/// Builds the request address for one parser service.
+///
+/// A configured parser address is a **prefix**, not a base URL: TVBox concatenates the target
+/// straight onto the end of it, which is why every real entry in a configuration ends in a bare
+/// `?url=` (or `?v=`). Appending a second `url=` parameter instead — which is what
+/// `query_pairs_mut().append_pair` does — produced `…yun.php?url=&url=https%3A%2F%2F…`.
+///
+/// That is worse than cosmetic. A service reading `$_GET['url']` receives the **empty** first
+/// value and has nothing to parse, and a service whose parameter is named `v` receives no `v` at
+/// all. So the parameter is filled in place when the template already declares one, and appended
+/// only when it declares none.
+fn build_parser_request(service_url: &str, source_url: &str) -> Result<Url, String> {
+    let endpoint = Url::parse(service_url).map_err(|error| error.to_string())?;
+    validate_remote_url(&endpoint)?;
+    let mut url = endpoint;
+    match parser_parameter_name(url.query()) {
+        Some(name) => {
+            // Replace the trailing empty value rather than adding a second one.
+            let filled = replace_query_parameter(url.query().unwrap_or_default(), &name, source_url);
+            url.set_query(Some(&filled));
+        }
+        None => {
+            url.query_pairs_mut().append_pair("url", source_url);
+        }
+    }
+    Ok(url)
+}
+
+/// The query parameter an empty-valued parser template is meant to receive the target in.
+///
+/// The first parameter with an empty value is the placeholder: that is the shape every real
+/// configuration uses, and it is the only reading that explains a trailing `?url=`. Returns `None`
+/// when every parameter already carries a value, in which case appending is correct.
+fn parser_parameter_name(query: Option<&str>) -> Option<String> {
+    let query = query?;
+    for pair in query.split('&') {
+        let mut parts = pair.splitn(2, '=');
+        let name = parts.next().unwrap_or_default();
+        let value = parts.next().unwrap_or_default();
+        if !name.is_empty() && value.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Rewrites one query parameter's value, preserving the order and every other parameter.
+fn replace_query_parameter(query: &str, name: &str, value: &str) -> String {
+    let encoded = url_encode(value);
+    let mut replaced = false;
+    let parts: Vec<String> = query
+        .split('&')
+        .map(|pair| {
+            let mut halves = pair.splitn(2, '=');
+            let key = halves.next().unwrap_or_default();
+            if !replaced && key == name {
+                replaced = true;
+                format!("{key}={encoded}")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect();
+    parts.join("&")
+}
+
+/// Percent-encodes a value for a query string.
+///
+/// Written out rather than pulled from a dependency because the required alphabet is tiny and
+/// getting it wrong corrupts the target address silently. Everything outside the unreserved set is
+/// escaped, which is correct for a value that is itself a URL.
+fn url_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 async fn resolve_with_service(
     source_url: &str,
     service: &ParseServiceInput,
 ) -> Result<String, String> {
-    let mut endpoint = reqwest::Url::parse(&service.url).map_err(|error| error.to_string())?;
-    validate_remote_url(&endpoint)?;
     let method = service.method.to_ascii_uppercase();
     let mut headers = service
         .headers
         .iter()
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect::<Vec<_>>();
+    // POST carries the target in the body, GET in the address, so only the GET path builds a
+    // request URL out of the template.
+    let endpoint = reqwest::Url::parse(&service.url).map_err(|error| error.to_string())?;
+    validate_remote_url(&endpoint)?;
+    let endpoint = if method == "GET" {
+        build_parser_request(&service.url, source_url)?
+    } else {
+        endpoint
+    };
     let body = if method == "GET" {
-        endpoint.query_pairs_mut().append_pair("url", source_url);
         None
     } else if method == "POST" {
         let mut object = service
@@ -455,7 +652,10 @@ fn validate_companion_url(url: &Url) -> Result<(), String> {
 mod tests {
     use serde_json::json;
 
-    use super::{is_supported_parser_method, media_kind, validate_companion_url, value_url};
+    use super::{
+        build_parser_request, is_supported_parser_method, media_kind, parser_parameter_name,
+        url_encode, validate_companion_url, value_url, MAX_PARSE_SERVICES,
+    };
 
     #[test]
     fn extracts_common_parser_response_shapes() {
@@ -464,6 +664,157 @@ mod tests {
             Some("https://example.com/a.m3u8".to_string())
         );
         assert_eq!(media_kind("https://example.com/a.mp4"), "mp4");
+    }
+
+    /// Every real parser address in a configuration is a prefix ending in a bare `url=`. Reading it
+    /// as a base URL and appending a second parameter made the request
+    /// `…yun.php?url=&url=https%3A%2F%2F…`, so a service reading `$_GET['url']` got the empty first
+    /// value and had nothing to parse.
+    #[test]
+    fn a_parser_template_gets_its_own_parameter_filled_not_a_second_one() {
+        let built = build_parser_request(
+            "http://119.91.123.253:2345/Api/yun.php?url=",
+            "https://vip.lz-cdn11.com/share/abc",
+        )
+        .expect("a public template builds");
+
+        assert_eq!(
+            built.as_str(),
+            "http://119.91.123.253:2345/Api/yun.php?url=https%3A%2F%2Fvip.lz-cdn11.com%2Fshare%2Fabc"
+        );
+        // Exactly one `url`, and it carries the target rather than being empty.
+        let values: Vec<String> = built
+            .query_pairs()
+            .filter(|(key, _)| key == "url")
+            .map(|(_, value)| value.into_owned())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["https://vip.lz-cdn11.com/share/abc".to_string()]
+        );
+    }
+
+    /// A template whose parameter is not called `url` must still be filled in place — one real
+    /// service uses `?v=`, and appending `url=` left it with no `v` at all.
+    #[test]
+    fn a_template_with_a_differently_named_parameter_is_still_filled() {
+        let built = build_parser_request(
+            "https://huayong.net/999/?v=",
+            "https://cdn.example/a.m3u8",
+        )
+        .expect("a public template builds");
+        assert_eq!(
+            built.as_str(),
+            "https://huayong.net/999/?v=https%3A%2F%2Fcdn.example%2Fa.m3u8"
+        );
+        assert_eq!(built.query_pairs().count(), 1);
+    }
+
+    /// Parameters that already carry values are kept, and only the empty one is filled.
+    #[test]
+    fn existing_parameters_survive_and_the_empty_one_is_filled() {
+        let built = build_parser_request(
+            "https://vip.example.com:443/api/?key=q7mS&url=",
+            "https://cdn.example/a.m3u8",
+        )
+        .expect("a public template builds");
+        let pairs: Vec<(String, String)> = built
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("key".to_string(), "q7mS".to_string()),
+                ("url".to_string(), "https://cdn.example/a.m3u8".to_string()),
+            ]
+        );
+    }
+
+    /// A template that declares no placeholder at all gets the target appended, because there is
+    /// nowhere else to put it.
+    #[test]
+    fn a_template_without_a_placeholder_gets_the_parameter_appended() {
+        let built = build_parser_request("https://jx.example.com/parse", "https://cdn.example/a")
+            .expect("a public template builds");
+        assert_eq!(
+            built.as_str(),
+            "https://jx.example.com/parse?url=https%3A%2F%2Fcdn.example%2Fa"
+        );
+    }
+
+    /// The placeholder is the first empty-valued parameter, not simply the first one.
+    #[test]
+    fn the_placeholder_is_the_first_empty_parameter() {
+        assert_eq!(
+            parser_parameter_name(Some("key=abc&url=")),
+            Some("url".to_string())
+        );
+        assert_eq!(parser_parameter_name(Some("v=")), Some("v".to_string()));
+        assert_eq!(parser_parameter_name(Some("key=abc")), None);
+        assert_eq!(parser_parameter_name(None), None);
+        assert_eq!(parser_parameter_name(Some("")), None);
+    }
+
+    /// Encoding must escape the delimiters inside a URL, or the target's own query string would
+    /// split the parser request.
+    #[test]
+    fn a_target_url_is_percent_encoded_as_one_value() {
+        assert_eq!(
+            url_encode("https://cdn.example/a.m3u8?sign=b1&x=2"),
+            "https%3A%2F%2Fcdn.example%2Fa.m3u8%3Fsign%3Db1%26x%3D2"
+        );
+        // Unreserved characters stay literal.
+        assert_eq!(url_encode("aZ0-._~"), "aZ0-._~");
+    }
+
+    /// A parser URL is a prefix, so a local one must be refused before it is contacted.
+    #[test]
+    fn a_local_parser_template_is_refused() {
+        assert!(build_parser_request("http://127.0.0.1:9978/proxy?url=", "https://a.example/x").is_err());
+    }
+
+    /// The service list in a real configuration is dozens of entries, most of them dead. Only the
+    /// head is attempted, so one dead host cannot hold the whole result.
+    #[test]
+    fn only_the_head_of_the_parser_list_is_attempted() {
+        let services: Vec<super::ParseServiceInput> = (0..50)
+            .map(|index| super::ParseServiceInput {
+                key: format!("parse-{index}"),
+                url: format!("https://parser{index}.example.com/?url="),
+                method: "GET".to_string(),
+                headers: Default::default(),
+                body: None,
+                enabled: true,
+                capability: "supported".to_string(),
+            })
+            .collect();
+        assert_eq!(services.len(), 50, "the fixture must exceed the cap");
+        let attempted: Vec<_> = services
+            .into_iter()
+            .filter(super::is_usable_parse_service)
+            .take(MAX_PARSE_SERVICES)
+            .collect();
+        assert_eq!(attempted.len(), MAX_PARSE_SERVICES);
+    }
+
+    /// Only enabled, supported, GET/POST services are attempted.
+    #[test]
+    fn unusable_parser_services_are_skipped() {
+        let make = |enabled: bool, capability: &str, method: &str| super::ParseServiceInput {
+            key: "k".to_string(),
+            url: "https://parser.example.com/?url=".to_string(),
+            method: method.to_string(),
+            headers: Default::default(),
+            body: None,
+            enabled,
+            capability: capability.to_string(),
+        };
+        assert!(super::is_usable_parse_service(&make(true, "supported", "GET")));
+        assert!(super::is_usable_parse_service(&make(true, "supported", "post")));
+        assert!(!super::is_usable_parse_service(&make(false, "supported", "GET")));
+        assert!(!super::is_usable_parse_service(&make(true, "blocked", "GET")));
+        assert!(!super::is_usable_parse_service(&make(true, "supported", "PUT")));
     }
 
     #[test]
@@ -544,5 +895,42 @@ mod tests {
             .collect();
         let targets = super::probe_targets(urls);
         assert_eq!(targets.len(), super::MAX_PROBE_URLS);
+    }
+
+    /// The page scan, against the real pages the author's sources return.
+    ///
+    /// Ignored by default because it needs the network, and a third-party page going away must not
+    /// fail a build. Run it with `cargo test -- --ignored` when the scan is suspected of having
+    /// stopped matching reality — the shapes it depends on are other people's markup, so this is
+    /// the only test that can notice them changing.
+    #[test]
+    #[ignore]
+    fn the_real_share_pages_still_yield_a_manifest() {
+        let cases = [
+            // A relative address in a `var` assignment.
+            "https://vip.lz-cdn11.com/share/0c72cb7ee1512f800abe27823a792d03",
+            // An absolute address in a `const`, served by a different source family.
+            "https://play.hhuus.com/play/epYkgmma",
+        ];
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for case in cases {
+                let url = reqwest::Url::parse(case).unwrap();
+                let resolution = super::scan_episode_page(&url)
+                    .await
+                    .unwrap_or_else(|| panic!("{case} yielded no playable address"));
+                assert_eq!(resolution.adapter_id, "page-scan");
+                assert_eq!(resolution.media_kind, "hls", "{case}");
+                assert!(
+                    resolution.url.contains(".m3u8"),
+                    "{case} resolved to {}",
+                    resolution.url
+                );
+                println!("{case}\n  -> {}", resolution.url);
+            }
+        });
     }
 }

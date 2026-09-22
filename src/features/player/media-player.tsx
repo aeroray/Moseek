@@ -17,6 +17,10 @@ import { cn } from "@/lib/utils";
 import { fetchMediaResource, isTauriRuntime } from "@/lib/tauri";
 import { getByteRangeHeader, isEmptyFragmentResponse } from "@/features/player/media-range";
 import {
+  clearsFailureNote,
+  decideLiveWatchdog,
+} from "@/features/player/live-watchdog";
+import {
   createDiagnosticRecorder,
   describeHlsError,
   describeMediaElement,
@@ -84,6 +88,25 @@ export function usesHlsPipeline(kind: MediaKind, isLive: boolean, url: string) {
   if (kind === "mp4") return false;
   return isLive || kind === "hls" || url.toLowerCase().includes(".m3u8");
 }
+
+/**
+ * How long one live load attempt is given to produce its first picture.
+ *
+ * This is a *fixed* budget for the attempt, deliberately not extended by request activity. An
+ * extendable deadline would reintroduce a defect already fixed here once: a source that keeps
+ * serving playlists and fragments that never buffer would push the deadline out for ever and the
+ * player would sit on the spinner instead of ever reporting a failure.
+ *
+ * The value is sized against measurement rather than taste. The stream this was diagnosed from
+ * delivered its first fragment after 12.4 seconds (1.9 MB at 1.28 Mbps), so a 10-second deadline
+ * could never have succeeded; 35 seconds leaves room for a source twice that slow while still
+ * reporting a genuinely dead stream promptly.
+ */
+const LIVE_STARTUP_BUDGET_MS = 35_000;
+
+/** How often the stalled-pipeline check runs. Kept coarse so it cannot flood the event ring. */
+const LIVE_STALL_CHECK_MS = 5_000;
+
 
 function shouldStartWithTransmuxWorker() {
   return cachedTransmuxWorkerSupport !== false;
@@ -405,16 +428,21 @@ export function MediaPlayer({
     };
     const report = (nextStatus: MediaStatus, message?: string) => {
       status = nextStatus;
-      lastMessage = message ?? null;
-      if (liveMode && nextStatus === "error") setIsBuffering(false);
-      if (nextStatus === "error") setHasFailed(true);
+      // A success clears the failure text. Without this, a recovery that succeeded after the
+      // watchdog had already given up left the page still holding "直播流长时间没有收到可播放分片"
+      // while the picture was playing — the diagnostic report then contradicted itself, saying
+      // 播放状态：正在播放 and 失败信息：无 next to a stale 前置提示.
+      const isFailure = !clearsFailureNote(nextStatus);
+      lastMessage = isFailure ? (message ?? null) : null;
+      if (liveMode && isFailure) setIsBuffering(false);
+      if (isFailure) setHasFailed(true);
       if (nextStatus === "playing") {
         setHasFailed(false);
         setHasStarted(true);
       }
       recorder.push(`播放状态：${mediaStatusLabels[nextStatus]}`, message);
-      callbackRef.current.onStatus?.(nextStatus, message);
-      scheduleDiagnosticFlush(nextStatus === "error");
+      callbackRef.current.onStatus?.(nextStatus, isFailure ? message : undefined);
+      scheduleDiagnosticFlush(isFailure);
     };
 
     // Plyr wraps the <video> element in its own DOM and hls.js attaches a MediaSource
@@ -650,24 +678,59 @@ export function MediaPlayer({
         }
         startBufferedLivePlayback();
       };
+      /**
+       * Whether a fragment request is currently outstanding.
+       *
+       * This is what makes the watchdog safe to run at all. It used to fire a flat 10 seconds after
+       * `armStartupWatchdog`, with no idea whether the pipeline was stalled or merely slow, and its
+       * recovery called `stopLoad()` — which aborts the in-flight request. On the stream this was
+       * diagnosed from, each fragment took 12.4 seconds, so the watchdog cancelled every request
+       * about 2.4 seconds before it would have arrived, then blamed the source and showed a failure
+       * overlay. The third attempt was never cancelled because the recovery budget had run out, it
+       * arrived normally, and playback started — which is exactly the "it said it failed and then
+       * started playing by itself" the user saw.
+       */
+      let fragmentRequestInFlight = false;
+      /**
+       * The deadline for the current load attempt. Fixed, not extended by request activity: see
+       * `LIVE_STARTUP_BUDGET_MS`.
+       */
+      let startupDeadlineAt = 0;
       const armStartupWatchdog = () => {
         if (!liveMode || disposed || hasBufferedFragment) return;
         if (startupWatchdog !== null) clearTimeout(startupWatchdog);
-        startupWatchdog = setTimeout(() => {
+        startupDeadlineAt = Date.now() + LIVE_STARTUP_BUDGET_MS;
+        startupWatchdog = setTimeout(function check() {
           startupWatchdog = null;
-          if (!hasBufferedFragment) {
+          if (disposed) return;
+          const decision = decideLiveWatchdog({
+            hasBufferedFragment,
+            requestInFlight: fragmentRequestInFlight,
+            now: Date.now(),
+            deadlineAt: startupDeadlineAt,
+          });
+          if (decision === "stop") return;
+          const waited = LIVE_STARTUP_BUDGET_MS - (startupDeadlineAt - Date.now());
+          if (decision === "postpone") {
             recorder.push(
-              "启动看门狗触发",
-              "10 秒内没有收到可播放分片",
+              "看门狗推迟",
+              `分片仍在下载，已等待 ${Math.round(waited / 1000)} 秒`,
             );
-            if (!recoverLiveWindow()) {
-              report(
-                "error",
-                "直播流长时间没有收到可播放分片，请切换频道或稍后重试。",
-              );
-            }
+            scheduleDiagnosticFlush();
+            startupWatchdog = setTimeout(check, LIVE_STALL_CHECK_MS);
+            return;
           }
-        }, 10_000);
+          recorder.push(
+            "启动看门狗触发",
+            `${Math.round(waited / 1000)} 秒内没有可播放的画面`,
+          );
+          if (!recoverLiveWindow()) {
+            report(
+              "error",
+              "直播流长时间没有可播放的画面，请切换频道或稍后重试。",
+            );
+          }
+        }, LIVE_STALL_CHECK_MS);
       };
       function recoverLiveWindow() {
         const instance = hls;
@@ -701,6 +764,20 @@ export function MediaPlayer({
           data.fatal ? "HLS 致命错误" : "HLS 非致命错误",
           describeHlsError(data),
         );
+        // A fragment-level error settles the request that was in flight. Leaving the flag set
+        // would make the watchdog believe a request is still running forever, and it would then
+        // postpone until the loader's own timeout instead of recovering.
+        if (
+          [
+            "fragLoadError",
+            "fragLoadTimeOut",
+            "fragParsingError",
+            "fragLoadAborted",
+            "bufferAppendError",
+          ].includes(data.details)
+        ) {
+          fragmentRequestInFlight = false;
+        }
         if (!data.fatal) {
           // hls.js only clears its own `enableWorker` flag when the injected
           // transmuxer worker fails asynchronously (a CSP without `worker-src blob:`
@@ -801,12 +878,16 @@ export function MediaPlayer({
         });
         instance.on(Hls.Events.FRAG_LOADING, (_event, data) => {
           recorder.push("请求分片", `序号 ${data.frag?.sn ?? "未知"}`);
+          // From here until the fragment settles, a quiet pipeline is expected rather than
+          // suspicious: a slow source is still delivering, and the loader's own timeout bounds it.
+          fragmentRequestInFlight = true;
         });
         instance.on(Hls.Events.FRAG_LOADED, (_event, data) => {
           recorder.push(
             "分片已返回",
             `序号 ${data.frag?.sn ?? "未知"} · ${data.payload?.byteLength ?? 0} 字节`,
           );
+          fragmentRequestInFlight = false;
         });
         instance.on(Hls.Events.MEDIA_ATTACHED, (_event, data) => {
           attachedMediaSource = data.mediaSource ?? null;
@@ -823,7 +904,10 @@ export function MediaPlayer({
         // 直播窗口 第 1 次" and the counter never reached its limit, so the player stayed on the
         // loading spinner forever instead of ever reporting a failure. `FRAG_BUFFERED` means the
         // fragment was demuxed and buffered, which is the only signal worth treating as success.
-        instance.on(Hls.Events.FRAG_BUFFERED, markMediaBuffered);
+        instance.on(Hls.Events.FRAG_BUFFERED, () => {
+          fragmentRequestInFlight = false;
+          markMediaBuffered();
+        });
         instance.on(Hls.Events.ERROR, handleHlsError);
         if (!playerCreated) {
           createPlayer();
@@ -850,6 +934,10 @@ export function MediaPlayer({
         playbackRequested = liveMode;
         sourceVersion += 1;
         attachedMediaSource = null;
+        // The old instance is destroyed below, so whatever it had in flight is gone with it.
+        // Leaving this set would make the new attempt's watchdog wait for a request that will never
+        // settle.
+        fragmentRequestInFlight = false;
         setIsBuffering(liveMode);
         previous?.destroy();
         if (disposed) return;
@@ -885,6 +973,9 @@ export function MediaPlayer({
         playbackAttempts = 0;
         playbackAttemptInFlight = false;
         hasBufferedFragment = false;
+        // `loadSource` abandons whatever the previous address had in flight, so the outstanding
+        // marker must not survive into the new source.
+        fragmentRequestInFlight = false;
         playbackRequested = source.isLive;
         setIsBuffering(source.isLive);
         setHasFailed(false);
@@ -892,6 +983,7 @@ export function MediaPlayer({
         recorder.push("切换播放地址", truncateForDiagnostics(source.url));
         instance.loadSource(source.url);
         instance.startLoad(-1);
+        armStartupWatchdog();
         scheduleDiagnosticFlush(true);
       };
     } else if (isHls && !video.canPlayType("application/vnd.apple.mpegurl")) {

@@ -43,7 +43,7 @@ import {
   isTauriRuntime,
   type PlaybackResolution,
 } from "@/lib/tauri";
-import { cn } from "@/lib/utils";
+import { cn, errorMessage } from "@/lib/utils";
 import type {
   MediaKind,
   SourceRecord,
@@ -184,9 +184,7 @@ export function PlayerView({
       })
       .catch((error) => {
         if (cancelled) return;
-        setDiagnostic(
-          error instanceof Error ? error.message : "播放地址未通过安全检查",
-        );
+        setDiagnostic(errorMessage(error, "播放地址未通过安全检查"));
         setStatus("error");
       });
     return () => {
@@ -197,14 +195,13 @@ export function PlayerView({
   const selectEpisode = (line: VodPlayLine, episode: VodEpisode) => {
     setActiveLineId(line.id);
     setActiveEpisodeId(episode.id);
-    addVodFootprint({
-      item: detail,
-      lineId: line.id,
-      episodeId: episode.id,
-      episodeName: episode.name,
-      progress: playbackProgress[`${detail.id}:${episode.id}`] ?? 0,
-    });
     setDiagnostic(null);
+    // Mirrored here rather than only in the resolve effect below. Effects run in declaration
+    // order, and the footprint effect reads `status` from the render it was created in — so a
+    // switch during playback would still see "playing" and record the new episode before it has
+    // produced a frame. Resetting in the same batch as the episode id closes that window.
+    setStatus("loading");
+    setIsPlayable(false);
   };
 
   const stepEpisode = (direction: -1 | 1) => {
@@ -214,17 +211,21 @@ export function PlayerView({
   };
 
   /**
-   * Records the footprint on entry, not only when an episode is picked.
+   * Records the footprint once this episode has actually started playing.
    *
-   * This is the fix for the empty timeline: `selectEpisode` runs only when the user actively
-   * switches episodes, so opening a film and watching it through left no record at all. The entry
-   * episode is what is playing, so it is what gets recorded.
+   * Deliberately not on entry. Opening a work used to write a footprint immediately — before a
+   * single byte of media had been fetched and without the user pressing play — so 足迹 filled up
+   * with works that were merely looked at, and the record's position was always 0. Opening a page
+   * is not watching something, and the user's own reading was that the app had started playing
+   * without them.
    *
-   * Guarded on the episode id so the arrival of the detail request — which rebuilds the play
-   * lines with new objects for the same episodes — does not record the same thing twice.
+   * `playing` is the event that means a picture is on screen and advancing, so it is the earliest
+   * honest moment to count it. The guard is keyed on the episode rather than a boolean so switching
+   * episodes records the new one, and returning to an earlier episode records it again.
    */
   const recordedRef = useRef("");
   useEffect(() => {
+    if (status !== "playing") return;
     if (!activeEpisode || !activeLine) return;
     const key = `${detail.id}:${activeEpisode.id}`;
     if (recordedRef.current === key) return;
@@ -236,7 +237,7 @@ export function PlayerView({
       episodeName: activeEpisode.name,
       progress: playbackProgress[key] ?? 0,
     });
-  }, [activeEpisode, activeLine, addVodFootprint, detail, playbackProgress]);
+  }, [activeEpisode, activeLine, addVodFootprint, detail, playbackProgress, status]);
 
   const canRenderPlayer =
     Boolean(activeEpisode) &&

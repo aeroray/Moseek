@@ -44,7 +44,7 @@ import {
   catalogCardOverlayClassName,
   columnGridClassName,
 } from "@/lib/card-styles";
-import { cn } from "@/lib/utils";
+import { cn, errorMessage } from "@/lib/utils";
 import type { ViewKey } from "@/types/moseek";
 import type {
   LiveFavorite,
@@ -925,9 +925,7 @@ function ResolvedEpisodePlayer({
       })
       .catch((cause) => {
         if (cancelled) return;
-        setResolveError(
-          cause instanceof Error ? cause.message : "播放地址未通过安全检查",
-        );
+        setResolveError(errorMessage(cause, "播放地址未通过安全检查"));
       });
     return () => {
       cancelled = true;

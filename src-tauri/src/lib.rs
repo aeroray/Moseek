@@ -6,6 +6,7 @@ mod download;
 mod html;
 mod live;
 mod models;
+mod page_stream;
 mod policy;
 mod resolver;
 mod script_runtime;

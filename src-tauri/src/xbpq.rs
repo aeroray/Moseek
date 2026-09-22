@@ -798,65 +798,12 @@ fn sniff_tokens(config: &XbpqConfig) -> Vec<String> {
 /// pages embed directly, which is the common case; it does not find one that only appears after
 /// the page's own scripts run, and in that case the episode keeps its page URL and fails with a
 /// message instead of a fabricated address.
+///
+/// The scanning primitives live in [`crate::page_stream`] because the resolver needs exactly the
+/// same technique for CMS episodes whose address is a player page. Two copies of a scanner would
+/// drift, and the drift would show up as "this source works in one place but not the other".
 fn sniff_media_urls(html: &str, base_url: &reqwest::Url, tokens: &[String]) -> Vec<String> {
-    if tokens.is_empty() {
-        return Vec::new();
-    }
-    let mut out: Vec<String> = Vec::new();
-    for candidate in candidate_urls(html) {
-        let lowered = candidate.to_ascii_lowercase();
-        if !tokens.iter().any(|token| lowered.contains(token.as_str())) {
-            continue;
-        }
-        if let Some(url) = resolve(base_url, &candidate) {
-            let url = url.to_string();
-            if !out.contains(&url) {
-                out.push(url);
-            }
-        }
-    }
-    out
-}
-
-/// Pulls URL-looking strings out of raw page text: quoted attribute values and `http(s)://`
-/// literals. Deliberately a scan, not a parse, because these pages embed streams in attributes,
-/// inline scripts, and JSON blobs alike.
-fn candidate_urls(html: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let bytes = html.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() {
-        // Quoted values: href="...", src='...', "url":"..."
-        if let Some(quote) = html[index..].find(['"', '\'']) {
-            let start = index + quote + 1;
-            if let Some(end) = html[start..].find(['"', '\'']) {
-                let value = &html[start..start + end];
-                if looks_like_media_candidate(value) {
-                    out.push(unescape_slashes(value));
-                }
-                index = start + end + 1;
-                continue;
-            }
-        }
-        break;
-    }
-    out
-}
-
-fn looks_like_media_candidate(value: &str) -> bool {
-    let lowered = value.to_ascii_lowercase();
-    value.len() > 4
-        && !value.contains(' ')
-        && (lowered.contains(".m3u8")
-            || lowered.contains(".mp4")
-            || lowered.starts_with("http://")
-            || lowered.starts_with("https://")
-            || lowered.starts_with("//"))
-}
-
-/// These pages routinely carry escaped slashes (`https:\/\/host\/a.m3u8`) inside inline JSON.
-fn unescape_slashes(value: &str) -> String {
-    value.replace("\\/", "/").replace("\\u0026", "&")
+    crate::page_stream::media_urls_matching(html, base_url, tokens)
 }
 
 pub(crate) async fn get_detail(
