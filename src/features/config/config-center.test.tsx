@@ -3195,4 +3195,119 @@ describe("config center", () => {
       expect(screen.getByText(/都没有取到内容/)).toBeInTheDocument();
     });
   });
+
+  it("shows how far the bulk import has got", async () => {
+    // The loop is sequential across however many hosts the list names, so without a count the only
+    // sign of life was a button reading "合并中…" — indistinguishable from a freeze when one host is
+    // slow. The count is what tells the user it is working.
+    renderCenter();
+    const list = JSON.stringify({
+      urls: [
+        { name: "甲仓", url: "https://one.example/config.json" },
+        { name: "乙仓", url: "https://two.example/config.json" },
+      ],
+    });
+
+    // Held open, so the progress is observable while the batch is in flight rather than after.
+    const pending: Array<(value: unknown) => void> = [];
+    vi.mocked(fetchConfigUrl).mockImplementation((url: string) => {
+      if (url === "https://list.example/dc") {
+        return Promise.resolve({ text: list, kind: "config", note: null, pageTitle: null });
+      }
+      return new Promise((resolve) => {
+        pending.push(() =>
+          resolve({
+            text: JSON.stringify({
+              sites: [{ key: url, name: url, api: "https://a.example/api.php/provide/vod" }],
+            }),
+            kind: "config",
+            note: null,
+            pageTitle: null,
+          }),
+        );
+      });
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+    const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+    fireEvent.change(input, { target: { value: "https://list.example/dc" } });
+    fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /全部合并导入/ }));
+
+    // The first address is in flight: the progress names it and counts from zero.
+    const progress = await screen.findByRole("status", { name: "批量导入进度" });
+    expect(progress.textContent).toContain("甲仓");
+    expect(progress.textContent).toContain("0 / 2");
+    // And the picker stays open, so the progress is somewhere the user is looking.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    // Let the first finish: the count advances and the name moves to the second.
+    await act(async () => {
+      pending[0]?.(undefined);
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("status", { name: "批量导入进度" }).textContent).toContain("乙仓");
+    });
+
+    // Finish the batch; the progress goes away with it.
+    await act(async () => {
+      pending[1]?.(undefined);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("status", { name: "批量导入进度" })).not.toBeInTheDocument();
+    });
+  });
+
+  it("caps a long section and offers the rest on request", () => {
+    // Measured on the owner's configuration: 影视源 holds 695 entries, and every one was mounted the
+    // moment the dialog opened — that is the delay before it appears and the unresponsiveness inside
+    // it, and it is not a parsing cost. A section that long is not read top to bottom either; it is
+    // searched, or scrolled to a name the user already has in mind.
+    renderCenter();
+    const sites = Array.from({ length: 120 }, (_, index) => ({
+      key: `k${index}`,
+      name: `源 ${index}`,
+      api: `https://s${index}.example/api.php/provide/vod`,
+    }));
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({ sites }),
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+
+    // 50 of the 120 are mounted, and the rest are one click away.
+    expect(screen.getByRole("button", { name: "编辑 源 0" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑 源 49" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑 源 50" })).not.toBeInTheDocument();
+    expect(screen.getByText(/已显示 50 \/ 120 条/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "显示全部" }));
+    expect(screen.getByRole("button", { name: "编辑 源 119" })).toBeInTheDocument();
+    expect(screen.queryByText(/已显示/)).not.toBeInTheDocument();
+  });
+
+  it("never caps a search, because that is when a cap would hide what was asked for", () => {
+    // The one case where showing only part of the matches is actively wrong.
+    renderCenter();
+    const sites = Array.from({ length: 120 }, (_, index) => ({
+      key: `k${index}`,
+      name: `匹配源 ${index}`,
+      api: `https://s${index}.example/api.php/provide/vod`,
+    }));
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({ sites }),
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+
+    fireEvent.change(screen.getByLabelText("搜索配置项"), { target: { value: "匹配源" } });
+
+    // All 120 matches are rendered, with no "显示全部" in the way.
+    expect(screen.getByRole("button", { name: "编辑 匹配源 119" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "显示全部" })).not.toBeInTheDocument();
+  });
 });

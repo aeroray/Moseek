@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -35,6 +35,16 @@ import {
 import { cn } from "@/lib/utils";
 import { isTestableSource } from "@/lib/adapters";
 import type { SourceRecord, SourceTestStatus } from "@/types/moseek";
+
+/**
+ * How many rows a section shows before it offers 显示全部.
+ *
+ * Measured on the owner's configuration: 影视源 holds 695 entries, and mounting all of them is what
+ * made the dialog slow to open and unresponsive inside. 50 is more than fills the visible area, so
+ * nothing is lost by not rendering the rest until asked for — and a search always renders every
+ * match, because that is the case where a cap would hide what the user is looking for.
+ */
+const INITIAL_ROWS = 50;
 
 /**
  * The visual editor for a configuration.
@@ -95,7 +105,7 @@ export function ConfigVisualEditor({
     );
   }
 
-  const hasComments = hasUnpreservedSyntax(value);
+  const hasComments = useMemo(() => hasUnpreservedSyntax(value), [value]);
   const normalizedQuery = query.trim().toLowerCase();
 
   const apply = (next: string, error: string | null) => {
@@ -202,13 +212,53 @@ function SectionBlock({
   rawText: string;
   testByKey: Map<string, SourceRecord>;
 }) {
-  const matching = query
-    ? section.entries.filter(
-        (entry) =>
-          entry.label.toLowerCase().includes(query) ||
-          entry.summary.toLowerCase().includes(query),
-      )
-    : section.entries;
+  // Reset when the section is collapsed or the query changes, so a "显示全部" in one section does not
+  // silently apply to the next one the user opens.
+  const [showAll, setShowAll] = useState(false);
+  useEffect(() => {
+    setShowAll(false);
+  }, [query, expanded, section.key]);
+  const matching = useMemo(
+    () =>
+      query
+        ? section.entries.filter(
+            (entry) =>
+              entry.label.toLowerCase().includes(query) ||
+              entry.summary.toLowerCase().includes(query),
+          )
+        : section.entries,
+    [query, section.entries],
+  );
+
+  // A search is never capped, so the cap only ever applies to browsing the whole section.
+  const visible = query || showAll ? matching : matching.slice(0, INITIAL_ROWS);
+
+  // Which rows repeat an address already listed above them. Computed only for 解析服务: it is the
+  // one section the resolver consumes in order and under a cap, so it is the one where a repeat
+  // costs something.
+  //
+  // Memoised, and that is not a micro-optimisation: this parses the whole document, and it used to run
+  // in the render body — so it re-parsed the configuration on EVERY render, including the render
+  // caused by each keystroke. Measured on the owner's 266 KB configuration, one parse is ~22 ms, which
+  // is what made typing feel stuck.
+  //
+  // It sits ABOVE the early return below, and that placement is required rather than stylistic: a hook
+  // after a conditional return runs on some renders and not others, which React reports as "rendered
+  // fewer hooks than expected". A test caught exactly that.
+  const duplicateIndexes = useMemo(
+    () =>
+      section.key === "parses"
+        ? new Set(findDuplicateParseServices(rawText))
+        : new Set<number>(),
+    [section.key, rawText],
+  );
+  // Counted over the whole section rather than the filtered rows: the button acts on the document,
+  // so its number has to describe the document. A search would otherwise make it say "去掉 0 条"
+  // while the file still holds eighteen.
+  const duplicateCount =
+    section.key === "parses"
+      ? section.entries.filter((entry) => duplicateIndexes.has(entry.index)).length
+      : 0;
 
   // A search that matches nothing in a section hides it, so the results are the only thing on
   // screen. A section with no entries at all is still shown, because it is where the add button is.
@@ -219,21 +269,6 @@ function SectionBlock({
   // to have open. A search that reports nothing found while the match sits behind a closed heading
   // is worse than no search at all.
   const isOpen = expanded || Boolean(query);
-
-  // Which rows repeat an address already listed above them. Computed only for 解析服务: it is the
-  // one section the resolver consumes in order and under a cap, so it is the one where a repeat
-  // costs something.
-  const duplicateIndexes =
-    section.key === "parses"
-      ? new Set(findDuplicateParseServices(rawText))
-      : new Set<number>();
-  // Counted over the whole section rather than the filtered rows: the button acts on the document,
-  // so its number has to describe the document. A search would otherwise make it say "去掉 0 条"
-  // while the file still holds eighteen.
-  const duplicateCount =
-    section.key === "parses"
-      ? section.entries.filter((entry) => duplicateIndexes.has(entry.index)).length
-      : 0;
 
   return (
     <section className="rounded-lg border border-border/70 bg-card/40">
@@ -269,22 +304,50 @@ function SectionBlock({
               {query ? "没有匹配的条目。" : `还没有${section.title}，可以添加一条。`}
             </p>
           ) : (
-            matching.map((entry) => (
-              <EntryRow
-                key={entry.index}
-                entry={entry}
-                source={entry.sourceKey ? testByKey.get(entry.sourceKey) : undefined}
-                section={section.key}
-                sectionTitle={section.title}
-                editing={editingIndex === entry.index}
-                duplicate={duplicateIndexes.has(entry.index)}
-                onEdit={() =>
-                  onEdit(editingIndex === entry.index ? null : entry.index)
-                }
-                onApply={onApply}
-                rawText={rawText}
-              />
-            ))
+            <>
+              {visible.map((entry) => (
+                <EntryRow
+                  key={entry.index}
+                  entry={entry}
+                  source={entry.sourceKey ? testByKey.get(entry.sourceKey) : undefined}
+                  section={section.key}
+                  sectionTitle={section.title}
+                  editing={editingIndex === entry.index}
+                  duplicate={duplicateIndexes.has(entry.index)}
+                  onEdit={() =>
+                    onEdit(editingIndex === entry.index ? null : entry.index)
+                  }
+                  onApply={onApply}
+                  rawText={rawText}
+                />
+              ))}
+              {/* The rest of the section, on request.
+                  
+                  Measured on the owner's configuration: the 影视源 section holds 695 entries, and
+                  every one of them was mounted the moment the dialog opened — that is the delay
+                  before the dialog appears and the unresponsiveness inside it, and it has nothing to
+                  do with parsing. A section this long is also not something anyone reads top to
+                  bottom; they search or they scroll to a name they already have in mind, and both
+                  work on the first page.
+                  
+                  A search is never capped: when the user is looking for something specific, showing
+                  only part of the matches is the one case where a cap is actively wrong. */}
+              {!query && matching.length > visible.length && (
+                <div className="flex items-center justify-between gap-2 px-2 py-2">
+                  <span className="text-xs text-muted-foreground">
+                    已显示 {visible.length} / {matching.length} 条
+                  </span>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowAll(true)}
+                  >
+                    显示全部
+                  </Button>
+                </div>
+              )}
+            </>
           )}
 
           <div className="flex flex-col gap-2 border-t border-border/60 p-2">

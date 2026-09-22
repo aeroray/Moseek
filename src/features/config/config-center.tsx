@@ -269,6 +269,18 @@ export function ConfigCenter() {
   /** Whether the 多仓 bulk import is running, so its button can report progress. */
   const [isImportingAll, setIsImportingAll] = useState(false);
   /**
+   * How far the bulk import has got: `{ done, total }`.
+   *
+   * The loop is sequential — eighteen addresses over eighteen hosts — so with no progress the dialog
+   * sat on a button reading "合并中…" for as long as the slowest hosts took, which reads as frozen.
+   * A count is the difference between "working" and "stuck".
+   */
+  const [importProgress, setImportProgress] = useState<{
+    done: number;
+    total: number;
+    current: string;
+  } | null>(null);
+  /**
    * Which tab is open.
    *
    * Controlled rather than left to Radix's `defaultValue`, because the health rows navigate: a row
@@ -1085,13 +1097,23 @@ export function ConfigCenter() {
   const handleImportAllMultiRepo = async () => {
     const request = multiRepo;
     if (!request) return;
-    setMultiRepo(null);
+    // The picker stays open while the batch runs, and that is deliberate: it is where the progress
+    // belongs, and closing it left the user looking at a dialog with a button that said "合并中…" and
+    // nothing else for as long as eighteen hosts took.
     setIsImportingAll(true);
+    setImportProgress({ done: 0, total: request.entries.length, current: request.entries[0]?.name ?? "" });
     try {
       const documents: string[] = [];
       const failed: string[] = [];
 
-      for (const entry of request.entries) {
+      for (const [index, entry] of request.entries.entries()) {
+        // Reported before the await, not after: the point is to say what is being waited on, and
+        // after the fetch returns the wait is already over.
+        setImportProgress({
+          done: index,
+          total: request.entries.length,
+          current: entry.name,
+        });
         try {
           const fetched = await fetchConfigUrl(entry.url);
           if (!fetched?.text) {
@@ -1159,6 +1181,9 @@ export function ConfigCenter() {
             ? `；${failed.length} 个地址没有取到配置：${failed.slice(0, 3).join("、")}${failed.length > 3 ? " 等" : ""}。`
             : "。"),
       });
+      // Closed only on success: on a failure the picker is where the user can retry or pick one
+      // address by hand, so closing it would take that away.
+      setMultiRepo(null);
     } catch (error) {
       setParseState({
         type: "error",
@@ -1166,6 +1191,7 @@ export function ConfigCenter() {
       });
     } finally {
       setIsImportingAll(false);
+      setImportProgress(null);
     }
   };
 
@@ -2696,6 +2722,7 @@ export function ConfigCenter() {
                       variant="ghost"
                       size="sm"
                       className="shrink-0"
+                      disabled={isImportingAll}
                       onClick={() => setMultiRepo(null)}
                     >
                       <X className="size-3.5" aria-hidden="true" />
@@ -2703,6 +2730,37 @@ export function ConfigCenter() {
                     </Button>
                   </div>
                 </div>
+                {/* What the batch is doing, as it does it.
+                    
+                    The loop is sequential across eighteen hosts, so without this the only sign of life
+                    was a button reading "合并中…" — indistinguishable from a freeze when one host is
+                    slow. The bar is deliberately indeterminate-looking while the count moves: the
+                    count is the information, and a percentage would imply a predictable speed these
+                    hosts do not have. */}
+                {importProgress && (
+                  <div
+                    role="status"
+                    aria-label="批量导入进度"
+                    className="flex flex-col gap-1.5 rounded-md border border-border/60 bg-background px-3 py-2"
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <span className="min-w-0 truncate text-muted-foreground">
+                        正在取回「{importProgress.current}」
+                      </span>
+                      <span className="shrink-0 tabular-nums text-foreground">
+                        {importProgress.done} / {importProgress.total}
+                      </span>
+                    </div>
+                    <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-[width] duration-200"
+                        style={{
+                          width: `${Math.round((importProgress.done / Math.max(1, importProgress.total)) * 100)}%`,
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
                 <ScrollArea className="min-h-0 flex-1 rounded-md border bg-background">
                   <div className="flex flex-col">
                     {multiRepo.entries.map((entry) => (

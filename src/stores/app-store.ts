@@ -13,6 +13,11 @@ import {
   defaultSourceFilter,
   type SourceFilterState,
 } from "@/features/config/source-filter";
+import {
+  pruneCacheToActive,
+  rehydrateCache,
+  stripCacheForStorage,
+} from "@/stores/config-cache-persistence";
 import type {
   CapabilityStatus,
   FavoriteProgress,
@@ -728,12 +733,18 @@ export const useAppStore = create<AppStore>()(
           sourceFilter: migrateSourceFilter(persisted?.sourceFilter),
           isSourceFilterOpen: persisted?.isSourceFilterOpen ?? false,
           configDocuments: persisted?.configDocuments ?? [],
-          // The cache holds each document's own source list, which carries the same legacy values.
-          configDocumentCache: Object.fromEntries(
-            Object.entries(persisted?.configDocumentCache ?? {}).map(([id, document]) => [
-              id,
-              { ...document, sources: migrateSources(document?.sources) },
-            ]),
+          // The cache is stored stripped, so the active document's payload is put back from the top
+          // level — which is where it lives and what it describes. See
+          // `src/stores/config-cache-persistence.ts` for why it is stored that way.
+          configDocumentCache: rehydrateCache(
+            (persisted as { configDocumentCache?: Record<number, never> } | undefined)
+              ?.configDocumentCache,
+            {
+              activeConfigId: persisted?.activeConfigId ?? null,
+              rawConfig: persisted?.rawConfig ?? "",
+              normalizedConfig: persisted?.normalizedConfig ?? "",
+              sources: migrateSources(persisted?.sources),
+            },
           ),
           activeConfigId: persisted?.activeConfigId ?? null,
           activeView:
@@ -760,7 +771,14 @@ export const useAppStore = create<AppStore>()(
         sourceFilter: state.sourceFilter,
         isSourceFilterOpen: state.isSourceFilterOpen,
         configDocuments: state.configDocuments,
-        configDocumentCache: state.configDocumentCache,
+        // Stripped and pruned. The cache used to persist each document's text and source list as well,
+        // which duplicated what the top level already holds and — because every save produces a new
+        // document id while the cache only ever added — grew by a full copy per save. Measured at
+        // 2233 KB an entry against a 5120 KB quota, that is what raised the storage-quota error.
+        configDocumentCache: pruneCacheToActive(
+          stripCacheForStorage(state.configDocumentCache),
+          state.activeConfigId,
+        ),
         activeConfigId: state.activeConfigId,
         sources: state.sources,
         rawConfig: state.rawConfig,
