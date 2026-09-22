@@ -7,10 +7,12 @@ import {
   Play,
   Radio,
   RotateCw,
+  Trash2,
   TriangleAlert,
 } from "lucide-react";
 
 import { ChannelLogo } from "@/components/channel-logo";
+import { ClearRecordsDialog } from "@/components/clear-records-dialog";
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
 import {
@@ -73,8 +75,10 @@ import type {
 export function FavoritesView({ onNavigate }: FavoritesViewProps) {
   const favorites = useAppStore((state) => state.favorites);
   const liveFavorites = useAppStore((state) => state.liveFavorites);
+  const clearFavorites = useAppStore((state) => state.clearFavorites);
   const [openVodKey, setOpenVodKey] = useState<string | null>(null);
   const [openLiveKey, setOpenLiveKey] = useState<string | null>(null);
+  const [clearOpen, setClearOpen] = useState(false);
 
   // Opening one kind closes the other, so the page never shows two players at once.
   const openVod = (key: string) => {
@@ -132,7 +136,38 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
             我的收藏
           </h1>
         </div>
+        {/* The same header action as 足迹, opening the same dialog, so the two collection pages
+            are cleared the same way. Ghost-with-destructive-text rather than a filled danger
+            button: this is a page-level utility, and a solid red block in the title bar would make
+            deleting everything the most conspicuous thing on a page about keeping things. */}
+        {!isEmpty && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            onClick={() => setClearOpen(true)}
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+            清除收藏
+          </Button>
+        )}
       </header>
+
+      <ClearRecordsDialog
+        open={clearOpen}
+        onOpenChange={setClearOpen}
+        title="清除收藏"
+        description="选择要清除的收藏。清除后无法恢复，影视与电视直播各自独立。"
+        targets={[
+          { kind: "vod", label: "影视收藏", count: favorites.length },
+          { kind: "live", label: "电视直播收藏", count: liveFavorites.length },
+        ]}
+        onConfirm={(kinds) => {
+          for (const kind of kinds) clearFavorites(kind);
+          setClearOpen(false);
+        }}
+      />
 
       <ScrollArea
         className="min-h-0 flex-1"

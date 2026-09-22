@@ -25,8 +25,8 @@ function renderSettings(overrides: Partial<Parameters<typeof SettingsView>[0]> =
     onThemeChange: vi.fn(),
     autoEpgEnabled: true,
     onAutoEpgEnabledChange: vi.fn(),
-    historyCount: 3,
-    favoriteCount: 2,
+    historyCounts: { vod: 2, live: 1 },
+    favoriteCounts: { vod: 1, live: 1 },
     progressCount: 1,
     onClearHistory: vi.fn(),
     onClearFavorites: vi.fn(),
@@ -112,9 +112,14 @@ describe("settings page", () => {
   it("reports real local data instead of invented paths", () => {
     // The storage tab used to print two directory paths that nothing wrote to, and a "clear
     // cache" button with no handler at all.
-    renderSettings({ historyCount: 7, favoriteCount: 4, progressCount: 2 });
+    renderSettings({
+      historyCounts: { vod: 5, live: 2 },
+      favoriteCounts: { vod: 3, live: 1 },
+      progressCount: 2,
+    });
     openTab("存储");
 
+    // Totals are summed from the per-kind counts the dialog lists, so they cannot disagree.
     expect(screen.getByText("7")).toBeInTheDocument();
     expect(screen.getByText("4")).toBeInTheDocument();
     expect(screen.getByText("2")).toBeInTheDocument();
@@ -122,28 +127,75 @@ describe("settings page", () => {
     expect(screen.queryByText("清理请求缓存")).not.toBeInTheDocument();
   });
 
-  it("clears history through the store rather than pretending to", () => {
+  it("asks before clearing, in the same dialog the collection pages use", () => {
+    // The button no longer clears on press: it opens the checkbox dialog, so the two lists are
+    // chosen rather than assumed. A `window.confirm` could not show how many records each kind
+    // held, and it was the only surface left asking in a browser prompt.
     const props = renderSettings();
     openTab("存储");
 
     fireEvent.click(screen.getByRole("button", { name: "清除足迹" }));
 
-    expect(props.onClearHistory).toHaveBeenCalledTimes(1);
+    // Nothing is cleared merely by opening the dialog.
+    expect(props.onClearHistory).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "影视足迹" })).toHaveAttribute(
+      "data-state",
+      "checked",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "清空全部" }));
+
+    expect(props.onClearHistory).toHaveBeenCalledWith("vod");
+    expect(props.onClearHistory).toHaveBeenCalledWith("live");
   });
 
-  it("clears favourites separately from history", () => {
-    // The two lists are independent; clearing one must not silently take the other.
+  it("clears favourites through the same dialog, without touching history", () => {
     const props = renderSettings();
     openTab("存储");
 
     fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
+    fireEvent.click(screen.getByRole("button", { name: "清空全部" }));
 
-    expect(props.onClearFavorites).toHaveBeenCalledTimes(1);
+    expect(props.onClearFavorites).toHaveBeenCalledWith("vod");
+    expect(props.onClearFavorites).toHaveBeenCalledWith("live");
     expect(props.onClearHistory).not.toHaveBeenCalled();
   });
 
+  it("clears only the favourite kind left selected", () => {
+    // The two favourite lists are separate store fields; the settings page must be able to clear
+    // one without the other, which the previous no-argument call could not express.
+    const props = renderSettings();
+    openTab("存储");
+
+    fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "影视收藏" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "清空电视直播收藏" }),
+    );
+
+    expect(props.onClearFavorites).toHaveBeenCalledWith("live");
+    expect(props.onClearFavorites).not.toHaveBeenCalledWith("vod");
+  });
+
+  it("offers the clear actions in the danger style", () => {
+    // Clearing local data is destructive and irreversible; an outline button does not say so.
+    renderSettings();
+    openTab("存储");
+
+    for (const name of ["清除足迹", "清除收藏"]) {
+      expect(screen.getByRole("button", { name })).toHaveAttribute(
+        "data-variant",
+        "destructive",
+      );
+    }
+  });
+
   it("disables a clear action when there is nothing to clear", () => {
-    renderSettings({ historyCount: 0, favoriteCount: 0 });
+    renderSettings({
+      historyCounts: { vod: 0, live: 0 },
+      favoriteCounts: { vod: 0, live: 0 },
+    });
     openTab("存储");
 
     expect(screen.getByRole("button", { name: "清除足迹" })).toBeDisabled();
@@ -201,6 +253,7 @@ describe("settings page", () => {
       within(boundary as HTMLElement).getByText(/远程 JavaScript、JAR 和 spider 默认阻止/),
     ).toBeInTheDocument();
   });
+
   it("names the page once, without a badge repeating the product name", () => {
     // The header carried a "拾影 · 偏好设置" badge next to the 系统设置 heading. It named the
     // product and the page in the same breath as the heading, which had already said both.
@@ -208,6 +261,35 @@ describe("settings page", () => {
 
     expect(screen.getByRole("heading", { name: "系统设置" })).toBeInTheDocument();
     expect(screen.queryByText("拾影 · 偏好设置")).not.toBeInTheDocument();
+  });
+
+  it("gives every setting row vertical padding, including a lone one", () => {
+    // The appearance and player tabs hold a single row. It used `py-3.5 first:pt-0 last:pb-0`, and
+    // on a one-row card both rules match at once, so the row got no vertical padding at all and the
+    // control was squeezed flat against the card's header and footer — reported as "上下没有任何
+    // 高度，被压得很紧". jsdom performs no layout, so this asserts the class contract that produces
+    // the height rather than the computed pixels; the rendered result was checked in a browser.
+    renderSettings();
+
+    for (const tab of ["外观", "播放器"]) {
+      openTab(tab);
+      const card = document.querySelector("[data-slot='card']");
+      const row = card?.querySelector("[data-slot='card-content'] > div > div");
+      expect(row, tab).toBeTruthy();
+      expect(row?.className, tab).toContain("py-3.5");
+      expect(row?.className, tab).not.toContain("first:pt-0");
+      expect(row?.className, tab).not.toContain("last:pb-0");
+    }
+  });
+
+  it("keeps the row's control from touching the card edge", () => {
+    // The padding has to be on the row the control lives in, not only on the card that wraps it.
+    renderSettings();
+    openTab("播放器");
+
+    const toggle = screen.getByRole("switch", { name: "自动获取节目单" });
+    const row = toggle.closest("div.flex.items-start.justify-between");
+    expect(row?.className).toContain("py-3.5");
   });
 
   it("gives every tab an icon", () => {
@@ -246,5 +328,4 @@ describe("settings page", () => {
     expect(screen.getByRole("button", { name: "清除收藏" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "清除" })).not.toBeInTheDocument();
   });
-
 });

@@ -2,17 +2,9 @@ import { useState } from "react";
 import { Clapperboard, Footprints, Radio, Trash2 } from "lucide-react";
 
 import { ChannelLogo } from "@/components/channel-logo";
+import { ClearRecordsDialog } from "@/components/clear-records-dialog";
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import {
   Empty,
   EmptyContent,
@@ -35,8 +27,7 @@ import {
   groupByDay,
 } from "@/features/browse/timeline";
 import { useAppStore } from "@/stores/app-store";
-import { cn } from "@/lib/utils";
-import type { FootprintKind, FootprintRecord, ViewKey } from "@/types/moseek";
+import type { FootprintRecord, ViewKey } from "@/types/moseek";
 
 interface HistoryViewProps {
   onNavigate: (view: ViewKey) => void;
@@ -59,57 +50,12 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
   const history = useAppStore((state) => state.history);
   const clearHistory = useAppStore((state) => state.clearHistory);
   const [clearOpen, setClearOpen] = useState(false);
-  /**
-   * Which kinds the dialog will clear. Both start selected so the ordinary case — clear
-   * everything — stays a single click, and a partial clear is an explicit deselection.
-   */
-  const [selected, setSelected] = useState<FootprintKind[]>(["vod", "live"]);
 
   // The store keeps one ordered list; each column filters it, so both stay newest-first without
   // a second sort or a second stored order that could drift.
   const vodRecords = history.filter((record) => record.kind === "vod");
   const liveRecords = history.filter((record) => record.kind === "live");
   const isEmpty = history.length === 0;
-
-  const toggleKind = (kind: FootprintKind, checked: boolean) =>
-    setSelected((current) =>
-      checked
-        ? [...new Set([...current, kind])]
-        : current.filter((item) => item !== kind),
-    );
-
-  /**
-   * The kinds that will actually be cleared: what is selected, intersected with what has records.
-   *
-   * A kind with nothing in it is shown as unavailable, so counting it here would make the button
-   * promise more than it can do — with only films recorded, selecting both would label the action
-   * 清空全部 while it clears one column.
-   */
-  const clearedKinds = selected.filter((kind) =>
-    kind === "vod" ? vodRecords.length > 0 : liveRecords.length > 0,
-  );
-
-  const confirmClear = () => {
-    // One `clearHistory` call per selected kind, so the store keeps owning the rule that progress
-    // is dropped with the record it belongs to — passing a combined set would need a second rule
-    // here that could drift from the store's.
-    for (const kind of clearedKinds) clearHistory(kind);
-    setClearOpen(false);
-  };
-
-  /**
-   * Opens the dialog with a fresh selection.
-   *
-   * The reset happens here rather than in an effect so it is tied to the moment of opening: leaving
-   * a previous deselection in place would make the next visit clear less than the dialog appears to
-   * promise, and an effect would also fight the user's first click on each open.
-   */
-  const onClearOpenChange = (open: boolean) => {
-    if (open) setSelected(["vod", "live"]);
-    setClearOpen(open);
-  };
-
-  const clearActionLabel = clearActionText(clearedKinds);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -129,7 +75,7 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
             variant="ghost"
             size="sm"
             className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
-            onClick={() => onClearOpenChange(true)}
+            onClick={() => setClearOpen(true)}
           >
             <Trash2 className="size-3.5" aria-hidden="true" />
             清空足迹
@@ -137,81 +83,25 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
         )}
       </header>
 
-      {/* Clearing is a choice of *what* to clear, so the two kinds are checkboxes that start
-          selected rather than two buttons that fire on click.
-
-          The old dialog offered each kind as a button and ran the clear the instant it was pressed,
-          which read as "choose what you want to remove" and behaved as "remove this now" — a user
-          who meant to deselect 影视足迹 wiped it by trying to select it. Defaulting both to checked
-          also means the common case (clear everything) is one click on 清除, and a partial clear is
-          an explicit deselection rather than a blind pick. */}
-      <Dialog open={clearOpen} onOpenChange={onClearOpenChange}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>清空足迹</DialogTitle>
-            <DialogDescription>
-              选择要清空的记录。清空后无法恢复，影视与电视直播各自独立。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-1">
-            {(
-              [
-                ["vod", "影视足迹", vodRecords.length],
-                ["live", "电视直播足迹", liveRecords.length],
-              ] as const
-            ).map(([kind, label, count]) => {
-              const selectable = count > 0;
-              // A kind with nothing in it is shown unchecked as well as unavailable: a disabled
-              // checkbox that appears ticked would claim it is about to have something cleared.
-              const checked = selectable && selected.includes(kind);
-              return (
-                <label
-                  key={kind}
-                  className={cn(
-                    "flex items-center gap-3 rounded-md border border-transparent px-3 py-2.5 transition-colors",
-                    selectable
-                      ? "cursor-pointer hover:bg-muted/50"
-                      : "cursor-not-allowed opacity-50",
-                  )}
-                >
-                  <Checkbox
-                    checked={checked}
-                    disabled={!selectable}
-                    onCheckedChange={(value) => toggleKind(kind, value === true)}
-                    aria-label={label}
-                  />
-                  <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="text-sm text-foreground">{label}</span>
-                    <span className="text-xs text-muted-foreground">
-                      {selectable ? `${count} 条记录` : "没有可清空的记录"}
-                    </span>
-                  </span>
-                </label>
-              );
-            })}
-          </div>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setClearOpen(false)}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              // Nothing that would actually be cleared means there is nothing to do, so the action
-              // is unavailable rather than silently doing nothing when pressed. The test is on the
-              // cleared set, not the selected one: a selected kind with no records clears nothing.
-              disabled={clearedKinds.length === 0}
-              onClick={confirmClear}
-            >
-              {clearActionLabel}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* The shared confirmation dialog, also opened by 我的收藏 and 系统设置. Keeping one copy is
+          what makes "the same dialog" true rather than merely similar. */}
+      <ClearRecordsDialog
+        open={clearOpen}
+        onOpenChange={setClearOpen}
+        title="清空足迹"
+        description="选择要清空的记录。清空后无法恢复，影视与电视直播各自独立。"
+        targets={[
+          { kind: "vod", label: "影视足迹", count: vodRecords.length },
+          { kind: "live", label: "电视直播足迹", count: liveRecords.length },
+        ]}
+        onConfirm={(kinds) => {
+          // One `clearHistory` call per selected kind, so the store keeps owning the rule that
+          // progress is dropped with the record it belongs to — passing a combined set would need a
+          // second rule here that could drift from the store's.
+          for (const kind of kinds) clearHistory(kind);
+          setClearOpen(false);
+        }}
+      />
 
       <ScrollArea
         className="min-h-0 flex-1"
@@ -476,16 +366,4 @@ function Poster({ record }: { record: FootprintRecord }) {
 const NOMINAL_EPISODE_SECONDS = 45 * 60;
 function progressPercent(seconds: number) {
   return Math.min(100, Math.round((seconds / NOMINAL_EPISODE_SECONDS) * 100));
-}
-
-/**
- * The confirm button's word, naming exactly what it is about to remove.
- *
- * A fixed "全部清空" sitting next to a deselected checkbox would contradict the control above it.
- * The action states its own scope, so the button and the checkboxes can never disagree.
- */
-export function clearActionText(selected: FootprintKind[]) {
-  if (selected.length === 0) return "清空";
-  if (selected.length === 2) return "清空全部";
-  return selected[0] === "vod" ? "清空影视足迹" : "清空电视直播足迹";
 }

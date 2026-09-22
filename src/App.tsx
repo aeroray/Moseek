@@ -55,6 +55,7 @@ function App() {
   const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
   const history = useAppStore((state) => state.history);
   const favorites = useAppStore((state) => state.favorites);
+  const liveFavorites = useAppStore((state) => state.liveFavorites);
   const playbackProgress = useAppStore((state) => state.playbackProgress);
   const clearHistory = useAppStore((state) => state.clearHistory);
   const clearFavorites = useAppStore((state) => state.clearFavorites);
@@ -117,8 +118,14 @@ function App() {
                 onThemeChange={setTheme}
                 autoEpgEnabled={autoEpgEnabled}
                 onAutoEpgEnabledChange={setAutoEpgEnabled}
-                historyCount={history.length}
-                favoriteCount={favorites.length}
+                historyCounts={{
+                  vod: history.filter((record) => record.kind === "vod").length,
+                  live: history.filter((record) => record.kind === "live").length,
+                }}
+                favoriteCounts={{
+                  vod: favorites.length,
+                  live: liveFavorites.length,
+                }}
                 progressCount={Object.keys(playbackProgress).length}
                 onClearHistory={clearHistory}
                 onClearFavorites={clearFavorites}

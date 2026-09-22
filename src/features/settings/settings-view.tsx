@@ -37,6 +37,10 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  ClearRecordsDialog,
+  type ClearTarget,
+} from "@/components/clear-records-dialog";
+import {
   deleteScriptArchive,
   executeScriptArchive,
   isTauriRuntime,
@@ -49,18 +53,29 @@ import {
 } from "@/lib/tauri";
 import type { ScriptExecutionLog } from "@/lib/tauri";
 import { cn, errorMessage } from "@/lib/utils";
-import type { ScriptArchiveSummary, ThemeMode } from "@/types/moseek";
+import type {
+  FootprintKind,
+  ScriptArchiveSummary,
+  ThemeMode,
+} from "@/types/moseek";
 
 interface SettingsViewProps {
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
   autoEpgEnabled: boolean;
   onAutoEpgEnabledChange: (enabled: boolean) => void;
-  historyCount: number;
-  favoriteCount: number;
+  /**
+   * Counts per kind rather than per list.
+   *
+   * The clear dialogs name each kind separately, and the totals shown above them are derived from
+   * these, so a total can never claim more than its parts — the previous pair of flat counts let
+   * the page promise it would clear both favourite lists while the store removed only one.
+   */
+  historyCounts: Record<FootprintKind, number>;
+  favoriteCounts: Record<FootprintKind, number>;
   progressCount: number;
-  onClearHistory: () => void;
-  onClearFavorites: () => void;
+  onClearHistory: (kind: FootprintKind) => void;
+  onClearFavorites: (kind: FootprintKind) => void;
 }
 
 /**
@@ -81,13 +96,28 @@ export function SettingsView({
   onThemeChange,
   autoEpgEnabled,
   onAutoEpgEnabledChange,
-  historyCount,
-  favoriteCount,
+  historyCounts,
+  favoriteCounts,
   progressCount,
   onClearHistory,
   onClearFavorites,
 }: SettingsViewProps) {
   const [storageMessage, setStorageMessage] = useState("");
+  /** Which clear dialog is open, if any. `null` means neither. */
+  const [clearKind, setClearKind] = useState<"history" | "favorites" | null>(
+    null,
+  );
+
+  const historyCount = historyCounts.vod + historyCounts.live;
+  const favoriteCount = favoriteCounts.vod + favoriteCounts.live;
+  const historyTargets: ClearTarget<FootprintKind>[] = [
+    { kind: "vod", label: "影视足迹", count: historyCounts.vod },
+    { kind: "live", label: "电视直播足迹", count: historyCounts.live },
+  ];
+  const favoriteTargets: ClearTarget<FootprintKind>[] = [
+    { kind: "vod", label: "影视收藏", count: favoriteCounts.vod },
+    { kind: "live", label: "电视直播收藏", count: favoriteCounts.live },
+  ];
   /**
    * The script-archive tooling is off by default. It is a power-user feature — most sources work
    * without it, and the fields it asks for (entry function, HTTP allowlist, module map) are not
@@ -723,20 +753,10 @@ export function SettingsView({
                           control={
                             <Button
                               type="button"
-                              variant="outline"
+                              variant="destructive"
                               size="sm"
                               disabled={historyCount === 0}
-                              onClick={() => {
-                                if (
-                                  !window.confirm(
-                                    "清除全部足迹与观看进度？收藏会保留。",
-                                  )
-                                ) {
-                                  return;
-                                }
-                                onClearHistory();
-                                setStorageMessage("已清除足迹与观看进度。");
-                              }}
+                              onClick={() => setClearKind("history")}
                             >
                               清除足迹
                             </Button>
@@ -749,20 +769,10 @@ export function SettingsView({
                           control={
                             <Button
                               type="button"
-                              variant="outline"
+                              variant="destructive"
                               size="sm"
                               disabled={favoriteCount === 0}
-                              onClick={() => {
-                                if (
-                                  !window.confirm(
-                                    "清除全部收藏？播放记录会保留。",
-                                  )
-                                ) {
-                                  return;
-                                }
-                                onClearFavorites();
-                                setStorageMessage("已清除收藏。");
-                              }}
+                              onClick={() => setClearKind("favorites")}
                             >
                               清除收藏
                             </Button>
@@ -783,6 +793,33 @@ export function SettingsView({
         </Tabs>
       </div>
 
+      {/* The same dialog 足迹 and 我的收藏 open. The window previously used `window.confirm`,
+          which could not show how many records each kind holds, and the two pages it was meant to
+          match had a checkbox dialog the user had already asked for — so the settings page was the
+          one surface still asking in a browser prompt. One dialog, opened with a different list. */}
+      <ClearRecordsDialog
+        open={clearKind !== null}
+        onOpenChange={(open) => {
+          if (!open) setClearKind(null);
+        }}
+        title={clearKind === "favorites" ? "清除收藏" : "清除足迹"}
+        description={
+          clearKind === "favorites"
+            ? "选择要清除的收藏。清除后无法恢复，影视与电视直播各自独立。"
+            : "选择要清除的记录。清除后无法恢复，影视与电视直播各自独立。"
+        }
+        targets={clearKind === "favorites" ? favoriteTargets : historyTargets}
+        onConfirm={(kinds) => {
+          if (clearKind === "favorites") {
+            for (const kind of kinds) onClearFavorites(kind);
+            setStorageMessage("已清除收藏。");
+          } else {
+            for (const kind of kinds) onClearHistory(kind);
+            setStorageMessage("已清除足迹与观看进度。");
+          }
+          setClearKind(null);
+        }}
+      />
     </div>
   );
 }
@@ -871,7 +908,12 @@ function SettingsSection({
  * The label and the control are given the same row so the eye pairs them without reading; the
  * description sits under the label because it explains the label, not the control.
  *
- * The row sits flush inside a divided list, so its edge padding is dropped rather than doubled.
+ * The row carries its own vertical padding, unconditionally. It previously used `py-3.5
+ * first:pt-0 last:pb-0` to sit flush inside a divided list, but on the appearance and player tabs
+ * the row is simultaneously the first *and* the last child, so both rules applied and it got no
+ * vertical padding at all — the control was squeezed flat against the card's header and footer,
+ * which is exactly how it was reported. Edge padding on a divided list is a cosmetic nicety; losing
+ * all height on a single-row card is a defect, so the unconditional value wins.
  */
 function SettingRow({
   icon,
@@ -885,7 +927,7 @@ function SettingRow({
   control: React.ReactNode;
 }) {
   return (
-    <div className="flex items-start justify-between gap-6 py-3.5 first:pt-0 last:pb-0">
+    <div className="flex items-start justify-between gap-6 py-3.5">
       <div className="flex min-w-0 items-start gap-3">
         <span
           className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground"

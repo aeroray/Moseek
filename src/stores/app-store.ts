@@ -317,7 +317,16 @@ interface AppStore {
    * own action.
    */
   clearHistory: (kind?: FootprintKind) => void;
-  clearFavorites: () => void;
+  /**
+   * Clears favourites of one kind, or all of them.
+   *
+   * Takes the kind for the same reason `clearHistory` does, and for a second one: the two lists are
+   * independent — a work favourite and a channel favourite live in different fields — so a single
+   * no-argument clear could only ever remove one of them while appearing to remove both. That is
+   * exactly what it did: the settings page offered 清除收藏 with a description promising it removed
+   * 影视收藏 and 电视直播收藏, and the implementation dropped only `favorites`.
+   */
+  clearFavorites: (kind?: FootprintKind) => void;
   toggleFavorite: (item: VodItem) => void;
   setPlaybackProgress: (historyId: string, seconds: number) => void;
   /** Records where the user left off in a favourite, so the page can resume it later. */
@@ -588,7 +597,14 @@ export const useAppStore = create<AppStore>()(
             playbackProgress,
           };
         }),
-      clearFavorites: () => set({ favorites: [] }),
+      clearFavorites: (kind) =>
+        // One field per kind, so a partial clear leaves the other list untouched rather than
+        // rebuilding it from the same source and risking a silent drop.
+        kind === undefined
+          ? set({ favorites: [], liveFavorites: [] })
+          : kind === "vod"
+            ? set({ favorites: [] })
+            : set({ liveFavorites: [] }),
       /**
        * Adds or removes a favourite, storing the item whole.
        *

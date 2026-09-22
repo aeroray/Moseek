@@ -2,7 +2,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FavoritesView } from "@/features/browse/favorites-view";
-import type { SourceRecord, VodFavorite, VodItem } from "@/types/moseek";
+import type {
+  LiveFavorite,
+  SourceRecord,
+  VodFavorite,
+  VodItem,
+} from "@/types/moseek";
 
 const getVodDetail = vi.fn();
 const searchVod = vi.fn();
@@ -126,6 +131,26 @@ function favorite(overrides: Partial<VodFavorite> = {}): VodFavorite {
     savedAt: "2026-01-01T00:00:00.000Z",
     progress: null,
     ...overrides,
+  };
+}
+
+function liveFavorite(): LiveFavorite {
+  return {
+    key: "live-main:News:City News",
+    channel: {
+      id: "live-main:News:City News",
+      name: "City News",
+      groupId: "news",
+      groupName: "新闻",
+      logoUrl: "",
+      streamUrl: "https://stream.example/news.m3u8",
+      streamUrls: ["https://stream.example/news.m3u8"],
+      mediaKind: "hls",
+      sourceKey: "live-main",
+    },
+    sourceKey: "live-main",
+    sourceName: "直播源",
+    savedAt: "2026-01-01T00:00:00.000Z",
   };
 }
 
@@ -701,5 +726,48 @@ describe("FavoritesView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "浏览影视库" }));
     expect(onNavigate).toHaveBeenCalledWith("browse");
+  });
+
+  it("clears the whole collection from the header, after asking", () => {
+    // The same header action and the same dialog as 足迹, so the two collection pages are cleared
+    // the same way. Nothing is removed merely by opening the dialog.
+    useAppStore.setState({
+      favorites: [favorite()],
+      liveFavorites: [liveFavorite()],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
+    expect(useAppStore.getState().favorites).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "清空全部" }));
+
+    expect(useAppStore.getState().favorites).toHaveLength(0);
+    expect(useAppStore.getState().liveFavorites).toHaveLength(0);
+  });
+
+  it("clears only the channel favourites when the works are unticked", () => {
+    // The two lists are separate store fields. Clearing one must leave the other alone, which the
+    // previous no-argument clear could not do — it dropped only the works while the caller
+    // believed both were gone.
+    useAppStore.setState({
+      favorites: [favorite()],
+      liveFavorites: [liveFavorite()],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "影视收藏" }));
+    fireEvent.click(screen.getByRole("button", { name: "清空电视直播收藏" }));
+
+    expect(useAppStore.getState().favorites).toHaveLength(1);
+    expect(useAppStore.getState().liveFavorites).toHaveLength(0);
+  });
+
+  it("hides the header clear action when there is nothing to clear", () => {
+    // A control that would clear nothing is one the user cannot act on.
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    expect(screen.queryByRole("button", { name: "清除收藏" })).not.toBeInTheDocument();
   });
 });
