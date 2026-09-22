@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleAlert,
   CircleX,
+  CopyMinus,
   Info,
   Plus,
   Search,
@@ -18,9 +19,13 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
 import {
   addVisualEntry,
+  dedupeParseServices,
+  findDuplicateParseServices,
   hasUnpreservedSyntax,
   readVisualConfig,
   removeVisualEntry,
+  removeVisualSetting,
+  removeVisualSettings,
   updateVisualEntryField,
   updateVisualSetting,
   type VisualEntry,
@@ -215,6 +220,21 @@ function SectionBlock({
   // is worse than no search at all.
   const isOpen = expanded || Boolean(query);
 
+  // Which rows repeat an address already listed above them. Computed only for 解析服务: it is the
+  // one section the resolver consumes in order and under a cap, so it is the one where a repeat
+  // costs something.
+  const duplicateIndexes =
+    section.key === "parses"
+      ? new Set(findDuplicateParseServices(rawText))
+      : new Set<number>();
+  // Counted over the whole section rather than the filtered rows: the button acts on the document,
+  // so its number has to describe the document. A search would otherwise make it say "去掉 0 条"
+  // while the file still holds eighteen.
+  const duplicateCount =
+    section.key === "parses"
+      ? section.entries.filter((entry) => duplicateIndexes.has(entry.index)).length
+      : 0;
+
   return (
     <section className="rounded-lg border border-border/70 bg-card/40">
       {/* `px-2`, not `px-3`. The section box already sits 16px inside the card (the content's own
@@ -257,6 +277,7 @@ function SectionBlock({
                 section={section.key}
                 sectionTitle={section.title}
                 editing={editingIndex === entry.index}
+                duplicate={duplicateIndexes.has(entry.index)}
                 onEdit={() =>
                   onEdit(editingIndex === entry.index ? null : entry.index)
                 }
@@ -266,7 +287,26 @@ function SectionBlock({
             ))
           )}
 
-          <div className="border-t border-border/60 p-2">
+          <div className="flex flex-col gap-2 border-t border-border/60 p-2">
+            {/* 解析服务 only. The resolver tries the first 12 usable services in the file's own
+                order, so an entry repeating an earlier address spends one of those places on an
+                attempt that has already been made — measured, 18 of the author's 75 entries are
+                repeats of 12 addresses. Offered only when there is something to remove, so the
+                button's presence answers "is there anything to tidy". */}
+            {section.key === "parses" && duplicateCount > 0 && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full gap-1.5"
+                onClick={() =>
+                  onApply(dedupeParseServices(rawText), null)
+                }
+              >
+                <CopyMinus className="size-3.5" aria-hidden="true" />
+                去掉 {duplicateCount} 条重复地址
+              </Button>
+            )}
             <Button
               type="button"
               variant="ghost"
@@ -393,6 +433,7 @@ function EntryRow({
   onEdit,
   onApply,
   rawText,
+  duplicate,
 }: {
   entry: VisualEntry;
   /** The parsed record for this entry, when one matches. */
@@ -403,6 +444,8 @@ function EntryRow({
   onEdit: () => void;
   onApply: (next: string, error: string | null) => void;
   rawText: string;
+  /** Whether an earlier row already lists this address. */
+  duplicate: boolean;
 }) {
   return (
     <div className="border-b border-border/40 last:border-b-0">
@@ -420,6 +463,16 @@ function EntryRow({
               address is one click away in the fields below. What the space is worth is the answer
               to "does this one work", which is what a badge carries. */}
           <TestResultBadge source={source} />
+          {duplicate && (
+            <Badge
+              variant="outline"
+              className="shrink-0 gap-1 px-1.5 py-0 text-[10px] text-muted-foreground"
+              title="这个地址在上面已经有一条了。播放时会按顺序尝试解析服务，重复的一条会占掉一次尝试机会。"
+            >
+              <CopyMinus className="size-2.5" aria-hidden="true" />
+              重复
+            </Badge>
+          )}
         </button>
         <Button
           type="button"
@@ -548,7 +601,20 @@ function FieldRow({
   );
 }
 
-/** The scalar settings: a label and its value. */
+/**
+ * The top-level settings that are not sources or parser services.
+ *
+ * These belong to the TVBox client: `ijk` picks a decoder, `ads` and `rules` filter advertising,
+ * `wallpaper` is its backdrop, `spider` names a remote JAR it loads. Moseek reads none of them —
+ * verified across the Rust and frontend code — and its export writes the normalized snapshot, which
+ * carries only the sources and the parser services, so these values do not leave the application
+ * either. Measured on the author's configuration, 9,134 of 50,419 bytes are here and are dropped by
+ * an export.
+ *
+ * That is why clearing them is offered directly rather than hidden behind an empty text box: a user
+ * who wants a configuration describing what Moseek actually uses has nothing to lose, and the only
+ * way to find that out today was to read the source.
+ */
 function SettingsBlock({
   settings,
   rawText,
@@ -567,7 +633,36 @@ function SettingsBlock({
 
   return (
     <section className="rounded-lg border border-border/70 bg-card/40 p-3">
-      <h3 className="mb-2 text-sm font-medium text-foreground">其他设置</h3>
+      <div className="mb-2 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-sm font-medium text-foreground">其他设置</h3>
+          <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
+            TVBox 客户端的设置：解码器、广告过滤、壁纸等。Moseek 不读取它们，导出时也不会带上。
+          </p>
+        </div>
+        {/* Acts on every setting in the document, so the count is the section's own — not the
+            filtered rows'. Offered only when there is something to clear. */}
+        {settings.length > 0 && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0 gap-1.5 text-destructive hover:text-destructive"
+            onClick={() =>
+              onApply(
+                removeVisualSettings(
+                  rawText,
+                  settings.map((setting) => setting.key),
+                ),
+                null,
+              )
+            }
+          >
+            <Trash2 className="size-3.5" aria-hidden="true" />
+            清理全部 {settings.length} 项
+          </Button>
+        )}
+      </div>
       <div className="flex flex-col gap-2.5">
         {matching.map((setting) => (
           <SettingRow
@@ -579,6 +674,7 @@ function SettingsBlock({
                 return [result.text, result.error] as const;
               })())
             }
+            onRemove={() => onApply(removeVisualSetting(rawText, setting.key), null)}
           />
         ))}
       </div>
@@ -589,9 +685,11 @@ function SettingsBlock({
 function SettingRow({
   setting,
   onCommit,
+  onRemove,
 }: {
   setting: { key: string; value: string; kind: "text" | "json" };
   onCommit: (value: string) => void;
+  onRemove: () => void;
 }) {
   const [draft, setDraft] = useState(setting.value);
   const [lastValue, setLastValue] = useState(setting.value);
@@ -601,8 +699,9 @@ function SettingRow({
   }
 
   return (
-    <label className="flex flex-col gap-1">
-      <span className="font-mono text-xs text-muted-foreground">{setting.key}</span>
+    <div className="flex items-end gap-1.5">
+      <label className="flex min-w-0 flex-1 flex-col gap-1">
+        <span className="font-mono text-xs text-muted-foreground">{setting.key}</span>
       {setting.kind === "json" ? (
         <textarea
           value={draft}
@@ -628,6 +727,19 @@ function SettingRow({
           aria-label={setting.key}
         />
       )}
-    </label>
+      </label>
+      {/* Clearing the box already removes the key, but nothing said so. The button states it. */}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className="shrink-0 text-muted-foreground hover:text-destructive"
+        aria-label={`删除设置 ${setting.key}`}
+        title={`从配置中删除 ${setting.key}`}
+        onClick={onRemove}
+      >
+        <Trash2 className="size-3.5" aria-hidden="true" />
+      </Button>
+    </div>
   );
 }

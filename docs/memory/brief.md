@@ -12,4 +12,8 @@
 
 配置采用**合并**模型：删除一个源只把它从当前配置（原始文本 + 源快照）移除，**不记录「这个源是用户不要的」**，因此之后导入的文件里若仍有该源，它会作为新源被加回来；导入时同一源仍在则跳过、不产生第二行。清理源时要同时过滤 `favorites`、`liveFavorites` 与 `history`（三者都以 sourceKey 关联）。
 
+配置中心里**列表计数与原文条数不必然相等**：没有 `url`/`api` 的条目（如只有嵌套 `channels` 的 TVBox 重定向项）被解析器判为 `invalid`，不进列表。列表显示的是**可用（`enabled && supported`）**的源数。
+
+`normalized_config` **只保留 6 个顶层键**（`sites`/`lives`/`parses`/`blockedFields`/`configDialect`/`schemaVersion`），**导出用的就是它**，所以 `ads`/`flags`/`doh`/`rules`/`ijk`/`hosts`/`proxy`/`wallpaper`/`warningText`/`spider`/`logo` 这 11 项**Moseek 不读取、导出也不带**（实测占原文 18% 字节）。它们只对 TVBox 客户端有意义，可在「原始配置 → 可视化 → 其他设置」一键清理。`parses` 则**必须保留**——它是播放兜底链路的一环（地址是播放页而非媒体文件时由 Rust `resolve_playback` 使用），但每次解析**按文件顺序最多试 12 个**，重复地址会白占名额，可用「去掉重复地址」清理。
+
 删除源时**按身份（`api + ext`）匹配原文条目，不按 `key`**：raw 与源列表的 `key` 是两套独立生成、且已经分叉的命名空间（无 key 的条目被解析器编号为 `live-1`，被合并后缀成 `-2`，两边零重叠），按 `key` 匹配会让删除漏掉原文，用户看到的就是「删了但原始配置里还在」。身份相同时**先比 key、再比 name，每个原文条目最多被认领一次**（身份并不唯一：`xgapp` 与 `骑骑影院` 就是同一 `api + ext`）。原文里「列表早已没有」的残留也会一并清理，但只在列表确实描述着这份原文时才做。**合并不得为没有 `key` 的条目生成 key**——那会把 keyless site 的 `capability` 从 `invalid` 静默升级为 `supported`（`classifySource` 的 `hasRequiredFields` 读原始 `key`），等于让导入把不可用的源变成可执行。

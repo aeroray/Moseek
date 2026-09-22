@@ -416,6 +416,110 @@ export function updateVisualSetting(
 }
 
 /**
+ * Removes one top-level setting.
+ *
+ * Clearing a setting's box already removes it (see `updateVisualSetting`), but that fact is
+ * invisible: an empty field reads as "no value" rather than "this key is gone". A row-level delete
+ * says what it does.
+ */
+export function removeVisualSetting(rawText: string, key: string): string {
+  return removeVisualSettings(rawText, [key]);
+}
+
+/**
+ * Removes several top-level settings at once.
+ *
+ * One parse and one serialisation for the whole set, so clearing eleven keys cannot reorder or
+ * reformat the document eleven times over. A key that is not present is skipped rather than treated
+ * as an error, so the caller can pass whatever the section is showing.
+ */
+export function removeVisualSettings(rawText: string, keys: readonly string[]): string {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON5.parse(rawText) as Record<string, unknown>;
+  } catch {
+    return rawText;
+  }
+  let removed = false;
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(parsed, key)) continue;
+    delete parsed[key];
+    removed = true;
+  }
+  return removed ? serialize(parsed) : rawText;
+}
+
+/**
+ * The parser services that repeat an address already listed.
+ *
+ * The resolver attempts at most `MAX_PARSE_SERVICES` (12) services per playback, in the
+ * configuration's own order, so a duplicate occupies one of those places with an attempt that has
+ * already been made. Measured on the author's configuration: 75 entries, 57 distinct addresses, and
+ * the twelfth usable one sits at position 14 — the later entries are never reached at all.
+ *
+ * Only the address is compared, because that is what an attempt is: the resolver builds its request
+ * from the URL and the method, and across every duplicate group in the real configuration the
+ * method, headers and body are identical.
+ */
+export function findDuplicateParseServices(rawText: string): number[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON5.parse(rawText);
+  } catch {
+    return [];
+  }
+  if (!isPlainObject(parsed)) return [];
+  const list = parsed.parses;
+  if (!Array.isArray(list)) return [];
+
+  const seen = new Set<string>();
+  const duplicates: number[] = [];
+  list.forEach((item, index) => {
+    const record = isPlainObject(item) ? item : {};
+    const url = foldAddress(record.url);
+    if (!url) return;
+    if (seen.has(url)) {
+      duplicates.push(index);
+      return;
+    }
+    seen.add(url);
+  });
+  return duplicates;
+}
+
+/** The first entry of each address, dropping the repeats. */
+export function dedupeParseServices(rawText: string): string {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON5.parse(rawText) as Record<string, unknown>;
+  } catch {
+    return rawText;
+  }
+  const list = parsed.parses;
+  if (!Array.isArray(list)) return rawText;
+
+  const seen = new Set<string>();
+  const kept = list.filter((item) => {
+    const record = isPlainObject(item) ? item : {};
+    const url = foldAddress(record.url);
+    // An entry with no address is kept: it is already its own problem, and dropping it here would
+    // make this button quietly delete something the user cannot see a duplicate of.
+    if (!url) return true;
+    if (seen.has(url)) return false;
+    seen.add(url);
+    return true;
+  });
+  if (kept.length === list.length) return rawText;
+  parsed.parses = kept;
+  return serialize(parsed);
+}
+
+/** An address folded for comparison: padded and cased differences are the same address. */
+function foldAddress(value: unknown): string {
+  return fieldText(value).trim().toLowerCase().replace(/\/+$/, "");
+}
+
+/**
  * Whether the text holds comments or a layout the visual editor would not preserve.
  *
  * JSON5 allows both, and re-serialising drops them. Telling the user before they edit is the

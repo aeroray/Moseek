@@ -3,9 +3,13 @@ import { describe, expect, it } from "vitest";
 import {
   addVisualEntry,
   canSaveVisualConfig,
+  dedupeParseServices,
+  findDuplicateParseServices,
   hasUnpreservedSyntax,
   readVisualConfig,
   removeVisualEntry,
+  removeVisualSetting,
+  removeVisualSettings,
   updateVisualEntryField,
   updateVisualSetting,
 } from "@/features/config/config-visual";
@@ -264,10 +268,130 @@ describe("editing through the visual model", () => {
     expect(parsed).not.toHaveProperty("wallpaper");
   });
 
+  it("removes one setting by name, leaving the others", () => {
+    // Clearing the box already did this, but nothing in the interface said an empty box means the
+    // key is deleted. The row's delete button makes it explicit, so it needs its own operation.
+    const parsed = JSON.parse(removeVisualSetting(sample, "ads"));
+    expect(parsed).not.toHaveProperty("ads");
+    expect(parsed.wallpaper).toBe("https://wall.example/1.jpg");
+    expect(parsed.sites).toHaveLength(2);
+  });
+
+  it("removes several settings in one pass and touches nothing else", () => {
+    const parsed = JSON.parse(removeVisualSettings(sample, ["ads", "wallpaper"]));
+    expect(parsed).not.toHaveProperty("ads");
+    expect(parsed).not.toHaveProperty("wallpaper");
+    // The entry arrays and the parser services are what Moseek actually uses, so a settings cleanup
+    // must not touch them.
+    expect(parsed.sites).toHaveLength(2);
+    expect(parsed.lives).toHaveLength(1);
+    expect(parsed.parses).toHaveLength(1);
+  });
+
+  it("skips a setting that is not present rather than failing", () => {
+    // The caller passes whatever the section is showing, which may include a key already gone.
+    const text = removeVisualSettings(sample, ["wallpaper", "not-here"]);
+    expect(JSON.parse(text)).not.toHaveProperty("wallpaper");
+    expect(JSON.parse(text)).not.toHaveProperty("not-here");
+    // Removing nothing at all returns the input untouched, so an empty cleanup is not a write.
+    expect(removeVisualSettings(text, ["not-here", "also-not-here"])).toBe(text);
+  });
+
+  it("leaves an unreadable document alone instead of emptying it", () => {
+    // The same rule the entry operations follow: a removal must never destroy a file it cannot read.
+    expect(removeVisualSettings("{ not json", ["ads"])).toBe("{ not json");
+    expect(removeVisualSetting("{ not json", "ads")).toBe("{ not json");
+  });
+
   it("leaves an out-of-range entry alone instead of throwing", () => {
     // A row can be deleted while its editor is open, so the index may no longer exist.
     expect(removeVisualEntry(sample, "sites", 9)).toBe(sample);
     expect(updateVisualEntryField(sample, "sites", 9, "name", "x").text).toBe(sample);
+  });
+});
+
+describe("duplicate parser services", () => {
+  // The resolver attempts at most 12 services per playback, in the file's own order, so a repeat
+  // spends one of those places on an attempt already made. Measured on the author's configuration:
+  // 75 entries, 57 distinct addresses, and the twelfth usable one sits at position 14.
+  const withDuplicates = JSON.stringify({
+    sites: [],
+    parses: [
+      { name: "一", type: 1, url: "https://jx.example/?url=" },
+      { name: "二", type: 1, url: "https://other.example/?url=" },
+      { name: "一的重复", type: 1, url: "https://jx.example/?url=" },
+      { name: "三", type: 1, url: "https://jx.example/?url=" },
+    ],
+  });
+
+  it("names the repeats and keeps the first of each", () => {
+    expect(findDuplicateParseServices(withDuplicates)).toEqual([2, 3]);
+
+    const parsed = JSON.parse(dedupeParseServices(withDuplicates));
+    expect(parsed.parses.map((item: { name: string }) => item.name)).toEqual(["一", "二"]);
+  });
+
+  it("compares the address without case or a trailing slash", () => {
+    // The resolver parses the URL, so `HTTPS://JX.EXAMPLE/?url=` and `https://jx.example/?url=` are
+    // the same attempt and must not both be tried.
+    const text = JSON.stringify({
+      parses: [
+        { name: "一", type: 1, url: "https://jx.example/?url=" },
+        { name: "二", type: 1, url: "HTTPS://JX.EXAMPLE/?url=" },
+      ],
+    });
+    expect(findDuplicateParseServices(text)).toEqual([1]);
+    expect(JSON.parse(dedupeParseServices(text)).parses).toHaveLength(1);
+  });
+
+  it("keeps entries that have no address", () => {
+    // They are already unusable, and dropping them here would make this button delete something the
+    // user cannot see a duplicate of.
+    const text = JSON.stringify({
+      parses: [
+        { name: "空一", type: 1, url: "" },
+        { name: "空二", type: 1, url: "" },
+        { name: "好的", type: 1, url: "https://jx.example/?url=" },
+      ],
+    });
+    expect(findDuplicateParseServices(text)).toEqual([]);
+    expect(dedupeParseServices(text)).toBe(
+      JSON.stringify({
+        parses: [
+          { name: "空一", type: 1, url: "" },
+          { name: "空二", type: 1, url: "" },
+          { name: "好的", type: 1, url: "https://jx.example/?url=" },
+        ],
+      }),
+    );
+  });
+
+  it("changes nothing when there are no duplicates", () => {
+    const text = JSON.stringify({
+      parses: [
+        { name: "一", type: 1, url: "https://a.example/?url=" },
+        { name: "二", type: 1, url: "https://b.example/?url=" },
+      ],
+    });
+    expect(findDuplicateParseServices(text)).toEqual([]);
+    // Returns the input unchanged rather than a re-serialised copy, so "nothing to do" is not a write.
+    expect(dedupeParseServices(text)).toBe(text);
+  });
+
+  it("leaves the other sections and an unreadable document alone", () => {
+    const text = JSON.stringify({
+      sites: [{ key: "a", name: "甲", api: "https://a.example/api" }],
+      parses: [
+        { name: "一", type: 1, url: "https://jx.example/?url=" },
+        { name: "二", type: 1, url: "https://jx.example/?url=" },
+      ],
+    });
+    const parsed = JSON.parse(dedupeParseServices(text));
+    expect(parsed.sites).toHaveLength(1);
+    expect(parsed.parses).toHaveLength(1);
+
+    expect(findDuplicateParseServices("{ not json")).toEqual([]);
+    expect(dedupeParseServices("{ not json")).toBe("{ not json");
   });
 });
 

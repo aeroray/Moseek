@@ -224,6 +224,11 @@ function openReportTab() {
   fireEvent.click(tab);
 }
 
+/** Expands one section of the visual editor. Sections start collapsed. */
+function openVisualSection(title: string) {
+  fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${title}`) }));
+}
+
 /**
  * The adapter card. The tab and the card title are both 适配器, so matching the text alone is
  * ambiguous; scope to the card that holds the adapter table or its empty state.
@@ -1689,6 +1694,118 @@ describe("config center", () => {
 
     expect(screen.getByText("无法以可视化方式打开")).toBeInTheDocument();
     expect(screen.getByText(/切换到「代码模式」/)).toBeInTheDocument();
+  });
+
+  it("clears the settings Moseek does not read, in one action", () => {
+    // These belong to the TVBox client — a decoder choice, ad filters, a wallpaper — and no code
+    // path in Moseek reads any of them; the export writes the normalized snapshot, which drops them
+    // anyway. Measured on the owner's configuration: 9,134 of 50,419 bytes never leave the app.
+    // So clearing them is offered directly instead of leaving the user to work it out.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
+          wallpaper: "https://wall.example/1.jpg",
+          ads: ["ad.example"],
+          ijk: [{ group: "软解码" }],
+        }),
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+
+    expect(screen.getByText("其他设置")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /清理全部 3 项/ }));
+
+    // Gone from the settings, and the sources the application does use are untouched.
+    expect(screen.queryByLabelText("wallpaper")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("ads")).not.toBeInTheDocument();
+    expect(screen.queryByText("其他设置")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑 可用的源" })).toBeInTheDocument();
+  });
+
+  it("removes one setting without touching the others", () => {
+    // Clearing a setting's box already deleted the key, but an empty box reads as "no value" rather
+    // than "this key is gone" — so the row states it.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
+          wallpaper: "https://wall.example/1.jpg",
+          ads: ["ad.example"],
+        }),
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "删除设置 wallpaper" }));
+
+    expect(screen.queryByLabelText("wallpaper")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("ads")).toBeInTheDocument();
+  });
+
+  it("marks repeated parser addresses and can drop them", () => {
+    // The resolver tries the first 12 usable services in the file's own order, so a repeat spends
+    // one of those places on an attempt already made. Measured on the owner's configuration: 75
+    // entries, 57 distinct addresses, and the twelfth usable one sits at position 14.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
+          parses: [
+            { name: "解析甲", type: 1, url: "https://jx.example/?url=" },
+            { name: "解析乙", type: 1, url: "https://other.example/?url=" },
+            { name: "解析甲的重复", type: 1, url: "https://jx.example/?url=" },
+          ],
+        }),
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+    openVisualSection("解析服务");
+
+    // One row is marked, and the marker carries the reason rather than just the word.
+    expect(screen.getAllByText("重复")).toHaveLength(1);
+    expect(screen.getByText("重复")).toHaveAttribute(
+      "title",
+      expect.stringContaining("占掉一次尝试机会"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /去掉 1 条重复地址/ }));
+
+    // The first of each address survives, the repeat is gone, and the button goes with it.
+    expect(screen.getByRole("button", { name: "编辑 解析甲" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "编辑 解析乙" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑 解析甲的重复" })).not.toBeInTheDocument();
+    expect(screen.queryByText("重复")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /去掉 .* 条重复地址/ })).not.toBeInTheDocument();
+  });
+
+  it("offers no cleanup when there is nothing to clean", () => {
+    // A control that would remove nothing cannot be acted on, so its absence is also information:
+    // it is how a user learns the file has no repeats.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
+          parses: [
+            { name: "解析甲", type: 1, url: "https://jx.example/?url=" },
+            { name: "解析乙", type: 1, url: "https://other.example/?url=" },
+          ],
+        }),
+        normalizedConfig: "{}",
+      });
+    });
+    openRawTab();
+    openVisualSection("解析服务");
+
+    expect(screen.queryByRole("button", { name: /去掉 .* 条重复地址/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /清理全部/ })).not.toBeInTheDocument();
   });
 
   it("gives the adapter list the same toolbar as the source list", () => {
