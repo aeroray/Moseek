@@ -376,8 +376,14 @@ export const useAppStore = create<AppStore>()(
             (source) => !removing.has(source.key),
           ),
           // Favourites and history are keyed by source too; a source that no longer exists
-          // should not leave entries pointing at nothing.
+          // should not leave entries pointing at nothing. `liveFavorites` is a separate list —
+          // works and channels are stored apart — so it needs its own filter: without it a
+          // removed live source left its channel favourites behind, and the confirmation says
+          // "相关收藏和播放记录会一并清理".
           favorites: current.favorites.filter(
+            (favorite) => !removing.has(favorite.sourceKey),
+          ),
+          liveFavorites: current.liveFavorites.filter(
             (favorite) => !removing.has(favorite.sourceKey),
           ),
           history: current.history.filter((record) =>

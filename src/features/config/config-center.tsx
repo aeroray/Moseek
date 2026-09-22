@@ -2618,7 +2618,17 @@ export function ConfigCenter() {
                 <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
                   <li>
                     <span className="text-foreground">原始配置会被一起修改</span>
-                    ，不是只在这里隐藏。之后重新导入同一份配置，这些源不会回来。
+                    ，不是只在这里隐藏。这个源会从当前配置里移除。
+                  </li>
+                  {/* This used to say "之后重新导入同一份配置，这些源不会回来", which was never true
+                      after imports became a merge. Removing a source drops it from this
+                      configuration and records nothing about the source being unwanted, so a later
+                      import that contains it adds it back as a new source. That is the behaviour a
+                      user wants — prune one configuration's clutter, then import a different file
+                      that legitimately carries the same source — so the sentence is corrected
+                      rather than the behaviour. */}
+                  <li>
+                    以后导入的文件里如果还有这个源，它会作为新源重新加回来。
                   </li>
                   <li>该配置的导出结果里也不会再包含它们。</li>
                   <li>

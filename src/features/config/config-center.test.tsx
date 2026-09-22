@@ -2123,6 +2123,11 @@ describe("config center", () => {
     expect(removeSources).not.toHaveBeenCalled();
     expect(screen.getByText("从配置中删除这些源？")).toBeInTheDocument();
     expect(screen.getByText(/原始配置会被一起修改/)).toBeInTheDocument();
+    // The dialog must not promise that a deleted source stays gone. It only removes the entry from
+    // this configuration, so a later import containing that source adds it back — which is what the
+    // user wants when the source legitimately exists in another file.
+    expect(screen.queryByText(/这些源不会回来/)).not.toBeInTheDocument();
+    expect(screen.getByText(/会作为新源重新加回来/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
@@ -2637,6 +2642,62 @@ describe("config center", () => {
     expect(saved!.sources).toHaveLength(3);
     const identities = saved!.sources.map((s) => `${s.api}|${s.ext ?? ""}`);
     expect(new Set(identities).size).toBe(identities.length);
+  });
+
+  it("re-adds a source the user had deleted, when it arrives in another configuration", async () => {
+    // The deletion dialog used to promise the opposite — "之后重新导入同一份配置，这些源不会回来" —
+    // but a deletion only drops the entry from this configuration. It records nothing about the
+    // source being unwanted, so a source the user pruned arrives again as a new one. That is the
+    // behaviour a user wants: they prune one configuration's clutter, then import a different file
+    // that legitimately contains that source.
+    renderCenter();
+    const pruned = JSON.stringify({
+      sites: [{ key: "ok", name: "可用的源", api: supported.api }],
+    });
+    useAppStore.setState({
+      sources: [supported],
+      rawConfig: pruned,
+      normalizedConfig: pruned,
+    });
+
+    await importConfigText(
+      JSON.stringify({
+        sites: [
+          { key: "ok", name: "可用的源", api: supported.api },
+          { key: "回来了", name: "回来了", type: 1, api: "https://back.example/api.php/provide/vod" },
+        ],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const keys = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites.map(
+      (site) => site.key,
+    );
+    expect(keys).toContain("回来了");
+    // Rule 1 held for the source that never left: one row, not two.
+    expect(keys.filter((key) => key === "ok")).toHaveLength(1);
+    // And the re-added source is in the snapshot as well, not only the raw text.
+    expect(saved!.sources.map((s) => s.api)).toContain(
+      "https://back.example/api.php/provide/vod",
+    );
+  });
+
+  it("skips a source that is already present and identical", async () => {
+    // Rule 1, stated on its own: importing the same file twice changes nothing.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [{ key: "ok", name: "可用的源", api: supported.api }],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const keys = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites.map(
+      (site) => site.key,
+    );
+    // The fixture has two sites; the import repeats one, so three entries would mean it appended.
+    expect(keys).toHaveLength(2);
+    expect(keys.filter((key) => key === "ok")).toHaveLength(1);
   });
 
   it("keeps the user's own switch when the same source is imported again", async () => {
