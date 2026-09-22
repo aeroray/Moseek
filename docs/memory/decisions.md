@@ -812,6 +812,13 @@
   - **④ 多仓导入改并发**，`IMPORT_CONCURRENCY = 4` 有界工作池（与测速同宽），**结果按原顺序保留**，进度计数在每次完成时递增。**变异验证**：把工作池退化成串行 → 批量测试失败（`pending` 长度 1 ≠ 2）。
   - **测试教训（值得单独记）**：用永不 resolve 的 mock 时 **`waitFor` 会被饿死**——`waitFor(() => expect(pending.length).toBeGreaterThan(1))` 实测 **20 秒**（测试超时失败），而 `pending` 是同步填好的数组、断言根本不需要等。**元素已在 DOM 里就用同步断言。** 另外那条依赖开发者本机数据库的配额测试已改为**按实测尺寸合成文档**：用户把文档从 1701 源换成 351 源后，它因与代码无关的原因失败了。
 - 本轮最终：前端 **config-center 139 项**、`src/features/config` + `src/stores` 共 **351 项**全部通过。
+- **HTTP-FLV 直播（用户：有些直播网页能放、软件放不出来）**：
+  - **根因是两个故障，不是缺检测。** ① `usesHlsPipeline` 对所有直播返回 true，而该频道实测是 `301 → .flv → 302 → 200 video/x-flv`、body 以 `FLV\x01` 开头，**根本不是 HLS**，交给 hls.js 必然 `manifestLoadError`。② `fetch_media_resource` 的 `reqwest` `.timeout()` 约束**整个 body**，直播 body 永不结束 → 必然超时，而 **reqwest 把它报成 `Kind::Decode`**，这正是用户看到的 `error decoding response body`。实测 1MiB 16441ms 失败、512KiB 5630ms 失败；**只约束每次读取**后首 64KiB **92ms** 到达。**所以只改管线检测是把失败换个地方，不是修好。**
+  - 修法：`policy.rs` 的 `ClientMode::{Buffered,Streaming}` + `fetch_media_prefix` + `open_media_response`；`resolver.rs` 的 `classify_media_container`（纯字节：FLV magic / MPEG-TS `0x47` 步进 / `#EXTM3U` / HTML，**Content-Type 仅作 tiebreak**）+ `probe_media_container` + Channel 版 `stream_media_resource`/`cancel_media_stream`；前端 `media-pipeline.ts` 纯函数 + mpegts.js 管线 + `TauriFlvLoader`（Rust channel 喂数据，避开 CORS 且让请求走本项目策略）；`live-view.tsx` 的 key 从布尔改为**管线字符串**（否则 FLV 与 native 同键，切换不重建播放器）。
+  - **端到端真机实测**：`MEDIA_INFO = avc1.64001e,mp4a.40.2`（H.264 High 3.0 / 640×360 / 25fps + AAC），`readyState 4`、缓冲 **9.48s**、**解码 31 帧**、**零错误**；并用 Node 解析流自身 FLV tag 独立确认 **AVC(7) + AAC(10)**，正是 mpegts.js 原生支持组合。**「检测对了」≠「能放」。**
+  - 开发中被测试抓到的真 bug：mpegts.js 实例只存在闭包里，cleanup 永远无法 destroy，**离开页面后直播会继续下载**；改为 `mpegtsRef` 持有并在 effect cleanup 销毁。
+- **流程教训（代价真实）**：FLV 改动**未提交**留在工作区时，我为隔离跑门禁执行了 `git stash push --keep-index --include-untracked`，**把另一位作者正在改的文件从它脚下移走**（`--include-untracked` 正是其两个新文件消失的原因）。它从 `stash@{0}` 完整恢复，我事后逐字节比对确认无损失。**两条改动线并行时应各自提交，而不是移动别人的在制品。**
+- 本轮最终：前端 **673 项**（49 文件）、Rust **178 项**、`tsc` / `eslint` / `clippy` / `pnpm build` 全部零警告。
 
 
 
