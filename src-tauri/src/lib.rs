@@ -34,7 +34,9 @@ pub fn run() {
         .setup(|app| {
             let connection =
                 db::initialize_database(app.handle()).map_err(std::io::Error::other)?;
-            app.manage(AppDatabase(std::sync::Mutex::new(connection)));
+            app.manage(AppDatabase(std::sync::Arc::new(std::sync::Mutex::new(
+                connection,
+            ))));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -1,9 +1,15 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-pub(crate) struct AppDatabase(pub(crate) Mutex<Connection>);
+/// The application's database handle.
+///
+/// The `Arc` is what lets a command hand the connection to a background thread. A command that must
+/// not block the main thread has to move its state into `spawn_blocking`, which requires `'static`,
+/// and `State<'_, _>` borrows from the app — so the handle has to be cheap to clone and share. Every
+/// existing `state.0.lock()` call is unaffected, because `Arc` derefs to the `Mutex`.
+pub(crate) struct AppDatabase(pub(crate) Arc<Mutex<Connection>>);
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

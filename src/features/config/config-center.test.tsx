@@ -223,6 +223,33 @@ function openVisualSection(title: string) {
 }
 
 /**
+ * Starts a batch test through the 测速 control.
+ *
+ * The toolbar used to have one 全部测速 button and clicking it started the run. It is now that button
+ * plus a caret that opens a scope picker, so 全部测速 is still one click and the narrower scope is
+ * reachable. Tests name the scope rather than just clicking, which is the point of the change.
+ */
+function startBatchTest(scope: "全部测速" | "只测未测过的" = "全部测速") {
+  if (scope === "全部测速") {
+    // The main button, which is the common case and stays a single click.
+    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    return;
+  }
+  const trigger = screen.getByLabelText("测速范围");
+  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+  fireEvent.click(trigger);
+  const option = screen
+    .getAllByRole("option")
+    .find((node) => new RegExp(scope).test(node.textContent ?? ""));
+  if (!option) {
+    throw new Error(
+      `no option matching ${scope}; saw ${screen.getAllByRole("option").map((n) => n.textContent).join(" | ")}`,
+    );
+  }
+  fireEvent.click(option);
+}
+
+/**
  * The adapter card. The tab and the card title are both 适配器, so matching the text alone is
  * ambiguous; scope to the card that holds the adapter table or its empty state.
  */
@@ -2254,9 +2281,11 @@ describe("config center", () => {
     expect(
       screen.getByRole("button", { name: /导入配置/ }),
     ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /全部测速/ }),
-    ).toBeInTheDocument();
+    // The 测速 control is now the button plus a scope caret. The button keeps its old label, and the
+    // caret carries a label of its own because a `SelectValue` would otherwise name it after the
+    // chosen scope, which changes as the user picks.
+    expect(screen.getByRole("button", { name: /全部测速/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("测速范围")).toBeInTheDocument();
   });
 
   it("keeps the list searchable", () => {
@@ -2506,7 +2535,7 @@ describe("config center", () => {
     );
     renderCenter();
 
-    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    startBatchTest();
     fireEvent.click(await screen.findByRole("button", { name: /取消测速/ }));
 
     await waitFor(() => {
@@ -2595,11 +2624,14 @@ describe("config center", () => {
     });
     renderPage(<ConfigCenter />);
 
-    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    startBatchTest();
 
-    await waitFor(() => {
-      expect(pending.length).toBeGreaterThan(1);
-    });
+    // Asserted synchronously, NOT through `waitFor`. Measured: the batch's worker pool calls
+    // `testSource` before its first await, so `pending` already holds every request by the time
+    // `startBatchTest()` returns. A `waitFor` around it cost **20 seconds** — because the mocked
+    // `testSource` promises never settle, `waitFor`'s polling is starved and only advances on its own
+    // timeout. The assertion never needed to wait for anything.
+    expect(pending.length).toBeGreaterThan(1);
     expect(maxConcurrent).toBeGreaterThan(1);
 
     // Let every outstanding request finish so the run can settle.
@@ -2617,7 +2649,7 @@ describe("config center", () => {
     );
     renderCenter();
 
-    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    startBatchTest();
 
     const cancel = await screen.findByRole("button", { name: /取消测速/ });
     expect(cancel).toBeInTheDocument();
@@ -2639,7 +2671,7 @@ describe("config center", () => {
     );
     renderCenter();
 
-    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    startBatchTest();
 
     await waitFor(() => {
       const blurred = document.querySelectorAll("tr.opacity-60");
@@ -2656,7 +2688,7 @@ describe("config center", () => {
     );
     renderCenter();
 
-    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    startBatchTest();
 
     const rowCancel = await screen.findByRole("button", {
       name: /取消测试 可用的源/,
@@ -3234,19 +3266,23 @@ describe("config center", () => {
     fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
     fireEvent.click(await screen.findByRole("button", { name: /全部合并导入/ }));
 
-    // The first address is in flight: the progress names it and counts from zero.
+    // Both addresses are fetched at once, so the count starts at 0 and BOTH requests are in flight.
+    // This is the concurrency the user asked for: eighteen addresses no longer cost the sum of
+    // eighteen round trips.
     const progress = await screen.findByRole("status", { name: "批量导入进度" });
-    expect(progress.textContent).toContain("甲仓");
     expect(progress.textContent).toContain("0 / 2");
+    expect(pending).toHaveLength(2);
     // And the picker stays open, so the progress is somewhere the user is looking.
     expect(screen.getByRole("dialog")).toBeInTheDocument();
 
-    // Let the first finish: the count advances and the name moves to the second.
+    // Finishing one advances the count to 1. Which NAME is shown is deliberately not asserted: with
+    // concurrent fetches the "current" label is whichever finished last, so pinning it to a specific
+    // address would be asserting the absence of concurrency.
     await act(async () => {
       pending[0]?.(undefined);
     });
     await waitFor(() => {
-      expect(screen.getByRole("status", { name: "批量导入进度" }).textContent).toContain("乙仓");
+      expect(screen.getByRole("status", { name: "批量导入进度" }).textContent).toContain("1 / 2");
     });
 
     // Finish the batch; the progress goes away with it.
@@ -3258,8 +3294,85 @@ describe("config center", () => {
     });
   });
 
-  it("caps a long section and offers the rest on request", () => {
-    // Measured on the owner's configuration: 影视源 holds 695 entries, and every one was mounted the
+  it("offers a narrower test scope for the sources that have never been tested", async () => {
+    // The user asked for this: a configuration is largely tested already, so re-testing all of it
+    // spends the wait on sources whose result is known while the ones actually in doubt are the ones
+    // with no result at all.
+    const tested = { ...supported, key: "tested", name: "测过的源", testStatus: "passed" as const };
+    const untested = { ...supported, key: "fresh", name: "没测过的源", testStatus: "untested" as const };
+    const testedKeys: string[] = [];
+    vi.mocked(testSourceCommand).mockImplementation(async (source: { key: string }) => {
+      testedKeys.push(source.key);
+      return testResult();
+    });
+    useAppStore.setState({
+      sources: [tested, untested],
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 2, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    renderPage(<ConfigCenter />);
+
+    // The caret opens the scope picker, and the option carries its own count so the user can see
+    // whether the narrower scope is worth choosing.
+    const caret = screen.getByLabelText("测速范围");
+    fireEvent.pointerDown(caret, { button: 0, ctrlKey: false });
+    fireEvent.click(caret);
+    const option = screen.getByRole("option", { name: /只测未测过的（1）/ });
+
+    fireEvent.click(option);
+
+    await waitFor(() => {
+      expect(testedKeys).toContain("fresh");
+    });
+    // And only that one: the already-tested source is left alone.
+    expect(testedKeys).not.toContain("tested");
+  });
+
+  it("disables the narrower scope when everything has been tested", () => {
+    // The count is the answer to "is this worth opening", so a scope with nothing in it is disabled
+    // rather than offered and then doing nothing.
+    const tested = { ...supported, key: "tested", name: "测过的源", testStatus: "passed" as const };
+    useAppStore.setState({
+      sources: [tested],
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 1, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    renderPage(<ConfigCenter />);
+
+    const caret = screen.getByLabelText("测速范围");
+    fireEvent.pointerDown(caret, { button: 0, ctrlKey: false });
+    fireEvent.click(caret);
+
+    expect(screen.getByRole("option", { name: /只测未测过的（0）/ })).toHaveAttribute(
+      "data-disabled",
+    );
+  });
+
+  it("keeps 全部测速 a single click, because a Select cannot re-fire its own value", () => {
+    // Measured: a Radix `Select` does NOT call `onValueChange` when the already-selected option is
+    // chosen again. That is right for a picker but would make the commonest action unreachable, so the
+    // main button stayed a button and only the caret is a Select.
+    vi.mocked(testSourceCommand).mockImplementation(() => new Promise(() => {}));
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+
+    expect(screen.getByRole("button", { name: /取消测速/ })).toBeInTheDocument();
+  });
+
+  it("caps a long section and offers the rest on request", () => {    // Measured on the owner's configuration: 影视源 holds 695 entries, and every one was mounted the
     // moment the dialog opened — that is the delay before it appears and the unresponsiveness inside
     // it, and it is not a parsing cost. A section that long is not read top to bottom either; it is
     // searched, or scrolled to a name the user already has in mind.

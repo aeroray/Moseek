@@ -15,6 +15,7 @@ import {
   Blocks,
   Braces,
   Check,
+  ChevronDown,
   CircleAlert,
   Code2,
   CircleCheck,
@@ -209,6 +210,19 @@ type AdapterFilter = "all" | AdapterExecution;
  */
 const TEST_CONCURRENCY = 4;
 
+/**
+ * How many addresses of a 多仓 list are fetched at once.
+ *
+ * Matched to `TEST_CONCURRENCY` rather than raised, because the constraint is the same one: the
+ * backend bounds each request individually, so the batch width is what decides how many sockets are
+ * opened at a time against hosts that owe this client nothing. Four already turns eighteen serial
+ * round trips into five waves.
+ */
+const IMPORT_CONCURRENCY = 4;
+
+/** Which sources a batch test covers. */
+type TestScope = "all" | "untested";
+
 export function ConfigCenter() {
   const toast = useToast();
   const configDocuments = useAppStore((state) => state.configDocuments);
@@ -369,6 +383,22 @@ export function ConfigCenter() {
     () => sources.filter(isTestableSource),
     [sources],
   );
+  /** The testable sources with no result yet, which is the narrower test scope. */
+  const untestedSources = useMemo(
+    () =>
+      testableSources.filter(
+        (source) => (source.testStatus ?? "untested") === "untested",
+      ),
+    [testableSources],
+  );
+  /**
+   * Which test scope the 测速 下拉框 is showing.
+   *
+   * The control is a scope picker that also acts: choosing an option starts that run immediately, so
+   * the stored value is really "the scope most recently chosen". It is kept rather than reset so the
+   * trigger does not snap back to 全部测速 the moment a narrower run starts.
+   */
+  const [testScope, setTestScope] = useState<TestScope>("all");
   /**
    * The sources that cannot currently work: no adapter exists for them, or a test found them
    * broken or empty. A source that passed, or that has simply not been tested yet, is left alone
@@ -694,9 +724,19 @@ export function ConfigCenter() {
     keys: string[];
     description: string;
   } | null>(null);
+  /**
+   * Whether a removal is in flight, so the dialog can say so instead of appearing frozen.
+   *
+   * The button used to look inert while the work happened: the config rewrite is a single blocking
+   * call, and on a large document that was measured at ~2 seconds before it was made fast. Even now
+   * it is not instant, and a destructive action with no acknowledgement is the one place a user is
+   * most likely to click again.
+   */
+  const [isRemoving, setIsRemoving] = useState(false);
 
   const performRemoveSources = useCallback(
     async (keys: string[]) => {
+      setIsRemoving(true);
       try {
         await removeSources(keys);
         if (inspectedSourceKey && keys.includes(inspectedSourceKey)) {
@@ -713,6 +753,8 @@ export function ConfigCenter() {
           title: "删除失败",
           description: error instanceof Error ? error.message : "删除源失败",
         });
+      } finally {
+        setIsRemoving(false);
       }
     },
     [removeSources, inspectedSourceKey, toast],
@@ -921,8 +963,16 @@ export function ConfigCenter() {
     }
   };
 
-  const handleTestAll = async () => {
-    if (testableSources.length === 0) {
+  /**
+   * Runs a batch test over `targets`.
+   *
+   * `targets` is passed in rather than read from `testableSources` so the caller decides the scope:
+   * "全部测速" and "只测未测过的" differ only in which sources they hand over, and everything else —
+   * the worker pool, the cancel path, the summary — is identical. Duplicating the batch machinery for
+   * the second scope would mean two cancel paths and two summaries to keep in step.
+   */
+  const runTestBatch = async (targets: SourceRecord[]) => {
+    if (targets.length === 0) {
       setParseState({
         type: "error",
         message: "当前配置里没有可测试的源。",
@@ -946,7 +996,7 @@ export function ConfigCenter() {
     };
     cancelRunRef.current = cancelRequested;
 
-    const queue = [...testableSources];
+    const queue = [...targets];
     const results: SourceTestResult[] = [];
     // A small worker pool rather than one request at a time or all at once: testing serially made
     // a 70-source configuration take as long as the sum of every source's latency, while firing
@@ -982,12 +1032,12 @@ export function ConfigCenter() {
       toast({
         variant: "info",
         title: "测速已取消",
-        description: `已测试 ${results.length}/${testableSources.length} 个源，其中 ${passedCount} 个通过。其余未测试的源保持原状态。`,
+        description: `已测试 ${results.length}/${targets.length} 个源，其中 ${passedCount} 个通过。其余未测试的源保持原状态。`,
       });
       return;
     }
     toast({
-      variant: passedCount === testableSources.length ? "success" : "info",
+      variant: passedCount === targets.length ? "success" : "info",
       title: "测速完成",
       description:
         `已测试 ${results.length} 个源，${passedCount} 个通过` +
@@ -996,6 +1046,22 @@ export function ConfigCenter() {
           : "。"),
     });
   };
+
+  /** Every testable source, whether or not it has been tested before. */
+  const handleTestAll = () => void runTestBatch(testableSources);
+
+  /**
+   * Only the testable sources that have never been tested.
+   *
+   * The user asked for this because a configuration is largely tested already, and re-testing all of
+   * it spends the wait on sources whose result is known — while the ones actually in doubt are the
+   * ones with no result at all. `untested` is the absence of evidence, which is exactly the set worth
+   * spending a request on.
+   */
+  const handleTestUntested = () =>
+    void runTestBatch(
+      testableSources.filter((source) => (source.testStatus ?? "untested") === "untested"),
+    );
 
   const handleCancelTestAll = useCallback(() => {
     cancelRunRef.current?.();
@@ -1144,37 +1210,74 @@ export function ConfigCenter() {
       const documents: string[] = [];
       const failed: string[] = [];
 
-      for (const [index, entry] of request.entries.entries()) {
-        // Reported before the await, not after: the point is to say what is being waited on, and
-        // after the fetch returns the wait is already over.
-        setImportProgress({
-          done: index,
-          total: request.entries.length,
-          current: entry.name,
-        });
-        try {
-          const fetched = await fetchConfigUrl(entry.url);
-          if (!fetched?.text) {
-            failed.push(entry.name);
-            continue;
+      /**
+       * Concurrently, because serial was measurably slow.
+       *
+       * The eighteen addresses in the owner's list live on eighteen different hosts, so fetching them
+       * one at a time costs the SUM of eighteen round trips and eighteen TLS handshakes while the
+       * client sits idle between each. They do not depend on each other in any way — each is fetched,
+       * repaired and kept as its own document, and only the merge afterwards needs them all — so the
+       * only thing serialising them bought was a longer wait.
+       *
+       * The pool is bounded rather than `Promise.all` over every address: eighteen simultaneous
+       * requests to eighteen hosts is fine, but a list of a hundred is not, and the backend bounds
+       * each request individually rather than the batch. `IMPORT_CONCURRENCY` is the same width the
+       * source tester already uses for the same reason.
+       *
+       * Order is preserved in the result even though the fetches finish out of order, so the merged
+       * document's source order still follows the list the user was shown.
+       */
+      const outcomes: Array<{ name: string; text: string | null }> = new Array(
+        request.entries.length,
+      );
+      let completed = 0;
+      let cursor = 0;
+      const workers = Array.from(
+        { length: Math.min(IMPORT_CONCURRENCY, request.entries.length) },
+        async () => {
+          for (;;) {
+            const index = cursor;
+            cursor += 1;
+            const entry = request.entries[index];
+            if (!entry) return;
+            let text: string | null = null;
+            try {
+              const fetched = await fetchConfigUrl(entry.url);
+              if (fetched?.text) {
+                const source = readConfigSource(fetched.text, fetched.note);
+                if (source.kind === "config") {
+                  // Each address is repaired on its own, because a publisher's typo should not cost
+                  // the whole batch — this is the same pass the single-address path runs.
+                  const parsed = parseConfigText(source.text, entry.url);
+                  const repaired = parsed.ok ? null : repairConfigText(source.text);
+                  text =
+                    repaired?.ok === true && repaired.text !== source.text
+                      ? repaired.text
+                      : source.text;
+                }
+              }
+            } catch {
+              // Collected below, not thrown: with eighteen addresses some are dead, and aborting the
+              // batch would give the user nothing and no explanation of which one broke.
+              text = null;
+            }
+            outcomes[index] = { name: entry.name, text };
+            completed += 1;
+            // The count advances as each finishes rather than as each starts, which is the only
+            // progress figure that is true when several are in flight at once.
+            setImportProgress({
+              done: completed,
+              total: request.entries.length,
+              current: entry.name,
+            });
           }
-          const source = readConfigSource(fetched.text, fetched.note);
-          if (source.kind !== "config") {
-            // A nested 多仓 list or a landing page: not an error worth stopping for, but it did not
-            // contribute anything, so it is named.
-            failed.push(entry.name);
-            continue;
-          }
-          // Each address is repaired on its own, because a publisher's typo should not cost the whole
-          // batch — this is the same pass the single-address path runs.
-          const parsed = parseConfigText(source.text, entry.url);
-          const repaired = parsed.ok ? null : repairConfigText(source.text);
-          documents.push(
-            repaired?.ok === true && repaired.text !== source.text ? repaired.text : source.text,
-          );
-        } catch {
-          failed.push(entry.name);
-        }
+        },
+      );
+      await Promise.all(workers);
+
+      for (const outcome of outcomes) {
+        if (outcome?.text) documents.push(outcome.text);
+        else if (outcome) failed.push(outcome.name);
       }
 
       if (documents.length === 0) {
@@ -1910,23 +2013,57 @@ export function ConfigCenter() {
                         取消测速 ({testingKeys.size}/{testableSources.length})
                       </Button>
                     ) : (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="gap-1.5"
-                        disabled={
-                          testableSources.length === 0 || testingKeys.size > 0
-                        }
-                        onClick={() => void handleTestAll()}
-                      >
-                        <FlaskConical
-                          className="size-3.5"
-                          data-icon="inline-start"
-                          aria-hidden="true"
-                        />
-                        {`全部测速 (${testableSources.length})`}
-                      </Button>
+                      /* Two controls, because "run the wider scope" and "let me choose a scope" are
+                         different intents and a `Select` alone cannot express the first.
+                         
+                         Measured: a Radix `Select` does NOT fire `onValueChange` when the already
+                         selected option is chosen again — correct for a picker, but it makes 全部测速
+                         unreachable as a repeat action, which is the thing the user does most. So the
+                         main button stays what it always was (one click runs 全部测速) and the caret
+                         beside it opens the scope picker. Nothing is lost from the old behaviour and
+                         the narrower scope is now expressible. */
+                      <div className="flex items-center">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5 rounded-r-none border-r-0"
+                          disabled={testableSources.length === 0 || testingKeys.size > 0}
+                          onClick={handleTestAll}
+                        >
+                          <FlaskConical
+                            className="size-3.5"
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                          {`全部测速 (${testableSources.length})`}
+                        </Button>
+                        <Select
+                          value={testScope}
+                          onValueChange={(value) => {
+                            const scope = value as TestScope;
+                            setTestScope(scope);
+                            if (scope === "untested") handleTestUntested();
+                          }}
+                          disabled={testableSources.length === 0 || testingKeys.size > 0}
+                        >
+                          <SelectTrigger
+                            size="sm"
+                            className="w-7 rounded-l-none px-0"
+                            aria-label="测速范围"
+                          >
+                            <ChevronDown className="size-3.5" aria-hidden="true" />
+                          </SelectTrigger>
+                          <SelectContent align="end">
+                            <SelectItem value="all">
+                              {`全部测速（${testableSources.length}）`}
+                            </SelectItem>
+                            <SelectItem value="untested" disabled={untestedSources.length === 0}>
+                              {`只测未测过的（${untestedSources.length}）`}
+                            </SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
                     )}
                     <Button
                       type="button"
@@ -2756,6 +2893,7 @@ export function ConfigCenter() {
             <Button
               type="button"
               variant="outline"
+              disabled={isRemoving}
               onClick={() => setRemoveRequest(null)}
             >
               取消
@@ -2763,9 +2901,14 @@ export function ConfigCenter() {
             <Button
               type="button"
               variant="destructive"
+              className="gap-1.5"
+              disabled={isRemoving}
               onClick={() => void confirmRemoveSources()}
             >
-              确认删除
+              {isRemoving && (
+                <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+              )}
+              {isRemoving ? "正在删除…" : "确认删除"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3905,13 +4048,25 @@ const SourceTable = memo(function SourceTable({
 
   return (
     <ScrollArea className="min-h-0 flex-1" viewportRef={viewportRef}>
-      <Table containerClassName="overflow-visible">
+      {/* `table-fixed`, and this is a virtualisation requirement rather than a style choice.
+          
+          Measured before it: with the default `table-layout: auto` the browser derives column widths
+          from the cells it can see, and virtualisation changes which rows those are as you scroll, so
+          the columns slid sideways under the cursor. Measured across six scroll positions, the first
+          column's width went 494 → 333 → 348 → 559 → 333 → 532px and the second column's left edge
+          moved 679 → 518 → 533 → 744 → 518 → 717px. The widths are now declared once and do not
+          depend on which rows are mounted.
+          
+          The explicit widths also replace what `auto` was inferring: the name column takes the
+          remaining space, and the four narrow ones are sized to their content — the switch, the two
+          icon buttons and the two-word headings. */}
+      <Table containerClassName="overflow-visible" className="table-fixed">
         <TableHeader className="sticky top-0 z-10 bg-card">
           <TableRow className="hover:bg-transparent">
             <TableHead className="w-[30%] pl-6">资源名称</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead>适配器</TableHead>
-            <TableHead>连接测试</TableHead>
+            <TableHead className="w-[13%]">状态</TableHead>
+            <TableHead className="w-[22%]">适配器</TableHead>
+            <TableHead className="w-[15%]">连接测试</TableHead>
             <TableHead className="w-16 text-center">启用</TableHead>
             <TableHead className="w-20 pr-6 text-center">
               操作

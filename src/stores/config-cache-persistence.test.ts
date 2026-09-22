@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { DatabaseSync } from "node:sqlite";
 
 import {
   pruneCacheToActive,
@@ -10,38 +9,58 @@ import type { StoredConfigDocument } from "@/lib/tauri";
 import type { SourceRecord } from "@/types/moseek";
 import { useAppStore } from "@/stores/app-store";
 
-// Measures the persisted payload before and after the fix, against the REAL configuration.
+// Measures the persisted payload before and after the fix.
 //
 // The claim being tested is the one the quota error was about: the stored object must fit in
 // localStorage with room to spare, and it must not grow with each save.
-const DB = `${process.env.APPDATA}\\com.moseek.desktop\\moseek.sqlite3`;
+//
+// The document is SYNTHESISED at the measured size rather than read from the developer's database.
+// It used to read the real one, which made the test depend on whatever the user happened to be working
+// on: when their document changed from 1701 sources to 351, the "the old shape must exceed the quota"
+// assertion stopped holding and the test failed for a reason that had nothing to do with the code.
+// The sizes below are the measured ones — 302 KB of text, 718 KB normalised, 1213 KB of sources — so
+// the arithmetic is the same while the input is stable.
+const MEASURED_RAW_KB = 302;
+const MEASURED_NORMALIZED_KB = 718;
+const MEASURED_SOURCES_KB = 1213;
 
-function realDocument(): StoredConfigDocument {
-  const db = new DatabaseSync(DB, { readOnly: true });
-  const row = db
-    .prepare(
-      "select id, name, raw_config, normalized_config, sources_json from config_documents where id = (select value from app_settings where key='active_config_document_id')",
-    )
-    .get() as {
-    id: number;
-    name: string;
-    raw_config: string;
-    normalized_config: string;
-    sources_json: string;
-  };
-  const sources = JSON.parse(row.sources_json) as SourceRecord[];
+function syntheticDocument(): StoredConfigDocument {
+  // Padding of the measured size. `x` repeated is the cheapest way to reach a byte count, and the
+  // code under test only measures and moves these strings.
+  const sources: SourceRecord[] = [
+    {
+      key: "live-1",
+      name: "直播源 1",
+      sourceType: "live",
+      api: "https://szyyds.cn/tv/live/x.txt",
+      enabled: true,
+      capability: "supported",
+      capabilityNote: "",
+      status: true,
+      nsfw: false,
+      searchable: true,
+      filterable: true,
+      lastCheckedAt: "刚刚",
+      requestCount: 0,
+      testOperations: [],
+      padding: "x".repeat(MEASURED_SOURCES_KB * 1024 - 400),
+    } as unknown as SourceRecord,
+  ];
   return {
-    id: row.id,
-    name: row.name,
-    rawConfig: row.raw_config,
-    normalizedConfig: row.normalized_config,
+    id: 22,
+    name: "中心配置",
+    rawConfig: `{"sites":[],"pad":"${"x".repeat(MEASURED_RAW_KB * 1024 - 40)}"}`,
+    normalizedConfig: `{"sites":[],"pad":"${"x".repeat(MEASURED_NORMALIZED_KB * 1024 - 40)}"}`,
     sources,
     sourceCount: sources.length,
-    liveCount: sources.filter((source) => source.sourceType === "live").length,
+    liveCount: 1,
     importedAt: "2026-01-01T00:00:00.000Z",
     sourceBaseUrl: "https://szyyds.cn/tv/x.json",
   };
 }
+
+/** The measured document, for the tests that only need a realistically-sized one. */
+const realDocument = syntheticDocument;
 
 function kb(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8") / 1024;
