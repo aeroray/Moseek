@@ -556,6 +556,10 @@ fn update_normalized_source_test(
 /// appearing in the library, stop being probed, and stop being exported. So the removal is
 /// applied to both the normalized snapshot and the raw text the user imported — leaving the raw
 /// text untouched would resurrect the source on the next import or export.
+///
+/// Which entry to drop is decided by the source's identity rather than its `key`, because the two
+/// representations generate keys independently and the raw text is written by the author, who often
+/// declares none at all. See `remove_sources_from_config`.
 pub(super) fn remove_sources_in_connection(
     connection: &mut Connection,
     document_id: i64,
@@ -567,8 +571,7 @@ pub(super) fn remove_sources_in_connection(
     let document = load_config_document(connection, document_id)?
         .ok_or_else(|| "配置不存在或已被删除".to_string())?;
 
-    let removing: std::collections::HashSet<&str> =
-        source_keys.iter().map(String::as_str).collect();
+    let removing: HashSet<&str> = source_keys.iter().map(String::as_str).collect();
     let sources: Vec<SourceRecord> = document
         .sources
         .iter()
@@ -578,11 +581,27 @@ pub(super) fn remove_sources_in_connection(
     if sources.len() == document.sources.len() {
         return Err("配置中找不到要删除的源".to_string());
     }
+    let removed: Vec<SourceRecord> = document
+        .sources
+        .iter()
+        .filter(|source| removing.contains(source.key.as_str()))
+        .cloned()
+        .collect();
+
+    // Both texts are matched against the identity the merge uses. The base URL is what makes a
+    // relative address (`./libs/tv/tvlive.txt`) comparable to the one the import resolved, so it is
+    // required for the match and is simply absent on a document imported without one.
+    let base_url = document
+        .source_base_url
+        .as_deref()
+        .and_then(|value| Url::parse(value.trim()).ok())
+        .filter(|url| matches!(url.scheme(), "http" | "https"));
 
     let sources_json = serialize_sources(&sources)?;
     let normalized_config =
-        remove_sources_from_config(&document.normalized_config, &removing);
-    let raw_config = remove_sources_from_config(&document.raw_config, &removing);
+        remove_sources_from_config(&document.normalized_config, base_url.as_ref(), &removed, &sources);
+    let raw_config =
+        remove_sources_from_config(&document.raw_config, base_url.as_ref(), &removed, &sources);
     // `source_count` is derived from `sources_json` when the document is read, so only the live
     // tally is stored alongside it.
     let live_count = sources
@@ -609,13 +628,187 @@ pub(super) fn remove_sources_in_connection(
     load_config_document(connection, document_id)?.ok_or_else(|| "配置更新后无法读取".to_string())
 }
 
-/// Drops matching entries from the `sites` / `lives` arrays of a configuration text.
+/// True when a value names its own scheme, i.e. is an absolute address rather than a relative path.
+///
+/// Mirrors the parser's `/^[a-z][a-z\d+.-]*:/i`. A dialect token is not one (`csp_Bili` has no
+/// colon), while `https://…`, `./libs/x.js` is not, and `javascript:` is.
+fn has_url_scheme(value: &str) -> bool {
+    let mut characters = value.chars();
+    match characters.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    for character in characters {
+        if character == ':' {
+            return true;
+        }
+        if character.is_ascii_alphanumeric() || matches!(character, '+' | '.' | '-') {
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+/// One canonical spelling of an address, so the raw text and the source list can be compared.
+///
+/// The two representations store the same address differently. The raw text holds it as the author
+/// wrote it (`csp_Bili`, `./libs/tv/tvlive.txt`, sometimes still wrapped in the TVBox loopback
+/// proxy); the source list holds whatever the import resolved it to, and a document imported before
+/// a base URL was set keeps the unresolved spelling. Resolving both sides against the document base
+/// and folding case and trailing slashes is what makes the same source compare equal on both sides.
+fn canonical_address(value: &str, base_url: Option<&Url>) -> String {
+    let unwrapped = unwrap_local_proxy_url(value);
+    let trimmed = unwrapped.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let resolved = if has_url_scheme(trimmed) {
+        trimmed.to_string()
+    } else {
+        match base_url.and_then(|base| base.join(trimmed).ok()) {
+            Some(joined) => joined.to_string(),
+            None => trimmed.to_string(),
+        }
+    };
+    resolved.trim().trim_end_matches('/').to_lowercase()
+}
+
+/// A canonical spelling of a JSON value, so two equal values compare equal.
+///
+/// A configuration writes `ext` as an object while the source record stores it as a string, and the
+/// same mapping must not look like two different ones just because of key order or whitespace.
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            let inner = entries
+                .iter()
+                .map(|(key, item)| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string()),
+                        canonical_json(item)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{inner}}}")
+        }
+        Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        other => serde_json::to_string(other)
+            .unwrap_or_default()
+            .to_lowercase(),
+    }
+}
+
+/// A canonical spelling of an `ext`, whether it arrives as text, a JSON object, or nothing.
+fn canonical_ext(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => {
+            let trimmed = text.trim();
+            let looks_like_json = (trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']'));
+            if looks_like_json {
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(parsed) => canonical_json(&parsed),
+                    Err(_) => trimmed.to_lowercase(),
+                }
+            } else {
+                trimmed.to_lowercase()
+            }
+        }
+        Some(other) => canonical_json(other),
+    }
+}
+
+/// The identity of a source: which source this is, independent of the display key.
+///
+/// This is the same pair the merge uses to decide whether two configurations describe the same
+/// source. Removal has to use it too: `key` is generated independently on each side — the parser
+/// numbers an entry that declares no key (`live-1`) while the merge suffixes the blank key it sees
+/// (`-2`) — so the two never agree, and a removal that matched on `key` left the raw entry behind.
+fn source_identity(api: &str, ext: Option<&Value>, base_url: Option<&Url>) -> String {
+    format!(
+        "{}|{}",
+        canonical_address(api, base_url),
+        canonical_ext(ext)
+    )
+}
+
+/// The identity of a stored source record.
+fn record_identity(source: &SourceRecord, base_url: Option<&Url>) -> String {
+    let ext = source.ext.as_ref().map(|text| Value::String(text.clone()));
+    source_identity(&source.api, ext.as_ref(), base_url)
+}
+
+/// The address a raw entry carries: `url` for a live source, `api` for a site, falling back to the
+/// spellings a configuration may use instead.
+fn entry_address(item: &Value, is_live: bool) -> &str {
+    let Some(map) = item.as_object() else {
+        return "";
+    };
+    let fields: &[&str] = if is_live {
+        &["url", "source", "api"]
+    } else {
+        &["api"]
+    };
+    fields
+        .iter()
+        .find_map(|field| map.get(*field).and_then(Value::as_str))
+        .unwrap_or("")
+}
+
+/// The identity of an entry inside a configuration text.
+fn entry_identity(item: &Value, is_live: bool, base_url: Option<&Url>) -> String {
+    source_identity(
+        entry_address(item, is_live),
+        item.get("ext"),
+        base_url,
+    )
+}
+
+/// The display name of an entry, folded so casing and padding cannot make it look absent.
+fn entry_label(item: &Value) -> String {
+    item.get("name")
+        .and_then(Value::as_str)
+        .map(|name| name.trim().to_lowercase())
+        .unwrap_or_default()
+}
+
+/// Drops the removed sources from the `sites` / `lives` arrays of a configuration text.
+///
+/// Entries are matched by identity — the same `api + ext` pair the merge dedupes on — and only then
+/// by `key`, because the two representations generate keys independently and the raw text is
+/// written by the author, who often declares no key at all. Matching on `key` alone silently missed
+/// those entries, so a deleted source stayed in the raw configuration and came back on the next
+/// import or export.
+///
+/// Several entries can legitimately share one identity (`xgapp` and `骑骑影院` are the same adapter
+/// with the same `ext`), so a match is refined by `key`, then by name, and each raw entry is claimed
+/// at most once — otherwise deleting one of a pair would remove both.
+///
+/// When the text holds more entries than the list, the surplus ones the list no longer has are
+/// dropped as well. That is what clears a source deleted before this matching existed — the user's
+/// own configuration held eleven such live entries — and it runs only when the list is shown to
+/// describe this same text, so an unrelated text is never pruned.
 ///
 /// Returns the input unchanged when it is not parseable, so an unparseable configuration is never
 /// silently emptied by a removal.
 fn remove_sources_from_config(
     config_text: &str,
-    removing: &std::collections::HashSet<&str>,
+    base_url: Option<&Url>,
+    removed: &[SourceRecord],
+    remaining: &[SourceRecord],
 ) -> String {
     let Ok(mut value) = serde_json::from_str::<Value>(config_text) else {
         return config_text.to_string();
@@ -623,17 +816,138 @@ fn remove_sources_from_config(
     let Some(object) = value.as_object_mut() else {
         return config_text.to_string();
     };
-    for section in ["sites", "lives"] {
+
+    for (section, is_live) in [("sites", false), ("lives", true)] {
         let Some(items) = object.get_mut(section).and_then(Value::as_array_mut) else {
             continue;
         };
-        items.retain(|item| {
-            item.get("key")
-                .and_then(Value::as_str)
-                .map(|key| !removing.contains(key))
-                .unwrap_or(true)
+        let wanted: Vec<&SourceRecord> = remaining
+            .iter()
+            .filter(|source| (source.source_type == "live") == is_live)
+            .collect();
+        let kept_identities: HashSet<String> = wanted
+            .iter()
+            .map(|source| record_identity(source, base_url))
+            .collect();
+        let kept_labels: HashSet<String> = wanted
+            .iter()
+            .map(|source| source.name.trim().to_lowercase())
+            .collect();
+
+        let mut drop: HashSet<usize> = HashSet::new();
+
+        for source in removed
+            .iter()
+            .filter(|source| (source.source_type == "live") == is_live)
+        {
+            let identity = record_identity(source, base_url);
+            let label = source.name.trim().to_lowercase();
+            // Rank the candidates so an exact key wins, then a matching name, then order. Without
+            // the ranking, two entries sharing an identity (`Aid` / `Aid-2`) would let a deletion
+            // take whichever came first in the text.
+            let best = items
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !drop.contains(index))
+                .filter(|(_, item)| {
+                    // Only an addressable entry can be identified; one without an address would
+                    // otherwise match a source whose address is equally empty.
+                    !entry_address(item, is_live).trim().is_empty()
+                        && entry_identity(item, is_live, base_url) == identity
+                })
+                .min_by_key(|(_, item)| {
+                    let same_key = item.get("key").and_then(Value::as_str) == Some(source.key.as_str());
+                    if same_key {
+                        0
+                    } else if entry_label(item) == label {
+                        1
+                    } else {
+                        2
+                    }
+                })
+                .map(|(index, _)| index)
+                .or_else(|| {
+                    // An entry that carries no usable address cannot be matched by identity, so the
+                    // key is still tried — it is what the previous implementation relied on.
+                    items
+                        .iter()
+                        .enumerate()
+                        .find(|(index, item)| {
+                            !drop.contains(index)
+                                && item.get("key").and_then(Value::as_str)
+                                    == Some(source.key.as_str())
+                        })
+                        .map(|(index, _)| index)
+                });
+            if let Some(index) = best {
+                drop.insert(index);
+            }
+        }
+
+        // The list holds fewer sources than the text holds entries, so the text still describes
+        // sources that were deleted. Pruning them is what clears a source removed before this
+        // matching existed — otherwise it would stay in the user's configuration forever, which is
+        // the very thing they reported.
+        //
+        // It is also the only part of a removal that can drop an entry nobody asked about, so before
+        // it runs the two must be shown to describe the same document: most of the list's OWN
+        // sources have to be traceable in this text, by identity or by name. When they are, the
+        // entries left over are deletions; when they are not, the text and the list are unrelated
+        // and nothing is pruned.
+        //
+        // The check uses the list as it stood BEFORE this removal (remaining plus removed), which is
+        // the state that was in sync with the text — after a removal that took the last match the
+        // remainder would explain nothing, and cleaning up is precisely what is wanted then.
+        let known: Vec<&SourceRecord> = wanted
+            .iter()
+            .copied()
+            .chain(
+                removed
+                    .iter()
+                    .filter(|source| (source.source_type == "live") == is_live),
+            )
+            .collect();
+        let traceable = known
+            .iter()
+            .filter(|source| {
+                let identity = record_identity(source, base_url);
+                let label = source.name.trim().to_lowercase();
+                items.iter().any(|item| {
+                    entry_identity(item, is_live, base_url) == identity
+                        || (!label.is_empty() && entry_label(item) == label)
+                })
+            })
+            .count();
+
+        if items.len() > wanted.len() && traceable * 2 >= known.len() && traceable > 0 {
+            for (index, item) in items.iter().enumerate() {
+                if drop.contains(&index) {
+                    continue;
+                }
+                // An entry that names no address cannot be identified — a live entry may carry only
+                // `channels`, for instance — so it is left exactly as it was rather than guessed at.
+                if entry_address(item, is_live).trim().is_empty() {
+                    continue;
+                }
+                if kept_identities.contains(&entry_identity(item, is_live, base_url)) {
+                    continue;
+                }
+                let label = entry_label(item);
+                if !label.is_empty() && kept_labels.contains(&label) {
+                    continue;
+                }
+                drop.insert(index);
+            }
+        }
+
+        let mut position = 0usize;
+        items.retain(|_| {
+            let keep = !drop.contains(&position);
+            position += 1;
+            keep
         });
     }
+
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| config_text.to_string())
 }
 
@@ -1812,5 +2126,438 @@ mod tests {
         )
         .unwrap()
         .is_none());
+    }
+
+    /// A site whose address is distinct, so identity-matching tests can tell entries apart.
+    fn test_site(key: &str, name: &str, api: &str) -> SourceRecord {
+        let mut source = test_source_with_key(key, true);
+        source.name = name.to_string();
+        source.api = api.to_string();
+        source
+    }
+
+    /// A live source whose address is distinct.
+    fn test_live(key: &str, name: &str, api: &str) -> SourceRecord {
+        let mut source = test_source_with_key(key, true);
+        source.name = name.to_string();
+        source.source_type = "live".to_string();
+        source.api = api.to_string();
+        source.site_type = None;
+        source.site_protocol = None;
+        source
+    }
+
+    fn insert_document_with_records(
+        connection: &Connection,
+        raw_config: &str,
+        sources: &[SourceRecord],
+        source_base_url: Option<&str>,
+    ) -> i64 {
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, source_base_url, live_count) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+                params![
+                    "配置",
+                    raw_config,
+                    "{}",
+                    serialize_sources(sources).unwrap(),
+                    source_base_url
+                ],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    #[test]
+    fn removing_a_source_whose_key_the_parser_invented_clears_the_raw_entry() {
+        // The reported bug. A live entry that declares no `key` is named `live-1` by the parser but
+        // `-2` by the merge (which suffixes the blank key it sees), so a removal matched on `key`
+        // found nothing and the entry stayed in the raw configuration — the user deleted a source
+        // and it was still there.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"lives":[{"name":"直播","url":"http://a.example/list.txt"},{"name":"肥猫","url":"http://b.example/tv.txt"},{"name":"SAO0","url":"http://c.example/tv.txt"}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                test_live("live-1", "直播", "http://a.example/list.txt"),
+                test_live("live-2", "肥猫", "http://b.example/tv.txt"),
+                test_live("live-3", "SAO0", "http://c.example/tv.txt"),
+            ],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["live-2".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let names: Vec<&str> = raw_value["lives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["直播", "SAO0"],
+            "the deleted live entry must leave the raw configuration: {}",
+            updated.raw_config
+        );
+        assert_eq!(updated.sources.len(), 2);
+    }
+
+    #[test]
+    fn removing_a_site_whose_raw_key_differs_by_whitespace_clears_the_raw_entry() {
+        // The second shape of the same symptom: the author's key carried padding (`"一起看 "`), so
+        // the stored key and the parser's trimmed key were different strings and the removal missed.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"key":"一起看 ","name":"一起看","api":"csp_YQKan"},{"key":"keep","name":"保留","api":"csp_Keep"}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                test_site("一起看", "一起看", "csp_YQKan"),
+                test_site("keep", "保留", "csp_Keep"),
+            ],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["一起看".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let keys: Vec<&str> = raw_value["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["key"].as_str())
+            .collect();
+
+        assert_eq!(keys, vec!["keep"], "raw config was: {}", updated.raw_config);
+    }
+
+    #[test]
+    fn removing_a_relative_source_matches_the_resolved_spelling_in_the_raw_text() {
+        // The raw text keeps the address as written (`./libs/tv/tvlive.txt`); the source list holds
+        // what the import resolved against the base URL. Matching has to canonicalise both, or a
+        // relative source can never be deleted from the raw configuration.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"key":"relative","name":"相对","api":"./libs/tv/tvlive.txt"},{"key":"keep","name":"保留","api":"csp_Keep"}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                test_site("relative", "相对", "https://example.com/config/libs/tv/tvlive.txt"),
+                test_site("keep", "保留", "csp_Keep"),
+            ],
+            Some("https://example.com/config/config.json"),
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["relative".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let keys: Vec<&str> = raw_value["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["key"].as_str())
+            .collect();
+
+        assert_eq!(keys, vec!["keep"], "raw config was: {}", updated.raw_config);
+    }
+
+    /// The base URL of a document, for tests that check the identity invariant directly.
+    fn base_url_of(document: &ConfigDocument) -> Option<Url> {
+        document
+            .source_base_url
+            .as_deref()
+            .and_then(|value| Url::parse(value.trim()).ok())
+            .filter(|url| matches!(url.scheme(), "http" | "https"))
+    }
+
+    /// Every addressable entry left in a text that the list no longer claims, by section.
+    ///
+    /// This is the invariant a removal has to leave behind: a source the user deleted must not still
+    /// be sitting in their configuration. Returning the leftovers rather than a count keeps the
+    /// failure message useful — it names what survived.
+    fn unclaimed_entries(document: &ConfigDocument) -> Vec<String> {
+        let Ok(raw) = serde_json::from_str::<Value>(&document.raw_config) else {
+            return Vec::new();
+        };
+        let base = base_url_of(document);
+        let kept_identities: HashSet<String> = document
+            .sources
+            .iter()
+            .map(|source| record_identity(source, base.as_ref()))
+            .collect();
+        let kept_labels: HashSet<String> = document
+            .sources
+            .iter()
+            .map(|source| source.name.trim().to_lowercase())
+            .collect();
+
+        let mut leftovers = Vec::new();
+        for (section, is_live) in [("sites", false), ("lives", true)] {
+            let Some(items) = raw[section].as_array() else {
+                continue;
+            };
+            for item in items {
+                if entry_address(item, is_live).trim().is_empty() {
+                    continue;
+                }
+                if kept_identities.contains(&entry_identity(item, is_live, base.as_ref())) {
+                    continue;
+                }
+                let label = entry_label(item);
+                if !label.is_empty() && kept_labels.contains(&label) {
+                    continue;
+                }
+                leftovers.push(format!(
+                    "{section} key={:?} name={:?} api={:?}",
+                    item.get("key"),
+                    item.get("name"),
+                    entry_address(item, is_live)
+                ));
+            }
+        }
+        leftovers
+    }
+
+    #[test]
+    fn a_removal_leaves_no_entry_the_list_no_longer_claims() {
+        // The reported symptom, as an invariant rather than a single case: the raw text held entries
+        // the list had already lost (11 lives in the author's own configuration), which is exactly
+        // the "I deleted a source but it is still in the original configuration" report. A removal
+        // must clear them, not only the source being deleted now.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        // `live-1` declares no key and the text holds three more entries than the list, mirroring
+        // the author's document: 15 raw lives against 5 in the list.
+        let raw = r#"{"sites":[],"lives":[
+            {"name":"直播","url":"http://a.example/list.txt"},
+            {"key":"-2","name":"肥猫","url":"http://b.example/tv.txt"},
+            {"key":"-3","name":"SAO0","url":"http://c.example/tv.txt"},
+            {"key":"-4","name":"咪咕","url":"http://d.example/tv.txt"},
+            {"key":"-5","name":"一起看","url":"http://e.example/tv.txt"}
+        ]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                test_live("live-1", "直播", "http://a.example/list.txt"),
+                test_live("live-2", "SAO0", "http://c.example/tv.txt"),
+            ],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["live-1".to_string()],
+        )
+        .unwrap();
+
+        let leftovers = unclaimed_entries(&updated);
+        assert!(
+            leftovers.is_empty(),
+            "entries the list no longer claims survived the removal:\n{}",
+            leftovers.join("\n")
+        );
+    }
+
+    #[test]
+    fn removing_matches_by_identity_when_the_counts_are_equal() {
+        // Isolates the identity match from the leftover-pruning step. Pruning only runs when the
+        // text holds MORE entries than the list, so with the counts equal the removed source must be
+        // found by identity — the text here declares no keys at all, which is exactly the shape that
+        // used to survive a deletion.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"name":"要删的","api":"http://gone.example/api"},{"name":"保留的","api":"http://keep.example/api"}]}"#;
+        // The list holds one more source than the text, so after this removal the counts are equal.
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                test_site("site-3", "要删的", "http://gone.example/api"),
+                test_site("site-1", "保留的", "http://keep.example/api"),
+                test_site("site-2", "另一个", "http://other.example/api"),
+            ],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["site-3".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let names: Vec<&str> = raw_value["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["保留的"],
+            "identity matching must remove the entry the key cannot name: {}",
+            updated.raw_config
+        );
+    }
+
+    #[test]
+    fn an_unrelated_text_is_not_pruned() {
+        // The guard on the pruning step. When the list explains almost nothing about the text, the
+        // two are not the same document — pruning would then delete sources the user never removed.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"key":"a","name":"甲","api":"http://a.example/api"},{"key":"b","name":"乙","api":"http://b.example/api"},{"key":"c","name":"丙","api":"http://c.example/api"},{"key":"d","name":"丁","api":"http://d.example/api"}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[test_site("unrelated", "无关", "http://unrelated.example/api")],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["unrelated".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        assert_eq!(
+            raw_value["sites"].as_array().unwrap().len(),
+            4,
+            "an unrelated text must be left intact: {}",
+            updated.raw_config
+        );
+    }
+
+    #[test]
+    fn removing_one_of_two_sources_sharing_an_identity_keeps_the_other() {
+        // Identity is not unique: `xgapp` and `骑骑影院` are the same adapter with the same `ext`.
+        // Matching on identity alone would delete both, so the match has to be refined — a removal
+        // must claim exactly one raw entry per source.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"key":"xgapp","name":"西瓜","api":"csp_AppYsV2","ext":{"a":1}},{"key":"骑骑影院","name":"骑骑","api":"csp_AppYsV2","ext":{"a":1}}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                test_site("xgapp", "西瓜", "csp_AppYsV2"),
+                test_site("骑骑影院", "骑骑", "csp_AppYsV2"),
+            ],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["xgapp".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let keys: Vec<&str> = raw_value["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["key"].as_str())
+            .collect();
+
+        assert_eq!(
+            keys,
+            vec!["骑骑影院"],
+            "only the removed source may leave the text: {}",
+            updated.raw_config
+        );
+    }
+
+    #[test]
+    fn removing_also_prunes_an_entry_the_list_had_already_lost() {
+        // The user's actual report: the source was already gone from the list, yet the raw text
+        // still held it, so it reappeared on import. A later removal has to clear that leftover —
+        // not only the source being deleted now.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"sites":[{"key":"keep","name":"保留","api":"csp_Keep"},{"key":"gone","name":"已删除","api":"csp_Gone"}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[test_site("keep", "保留", "csp_Keep")],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["keep".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        assert_eq!(
+            raw_value["sites"].as_array().unwrap().len(),
+            0,
+            "a entry the list no longer has must not survive the removal: {}",
+            updated.raw_config
+        );
+    }
+
+    #[test]
+    fn an_entry_that_cannot_be_identified_is_left_alone() {
+        // A live entry may carry nested `channels` instead of an address. It cannot be matched to a
+        // source, so the prune must leave it rather than guess — deleting a user's configuration is
+        // worse than keeping an entry they may still want.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"lives":[{"name":"保留","url":"http://a.example/list.txt"},{"name":"重定向","group":"redirect","channels":[{"name":"live","urls":["proxy://do=live"]}]}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[test_live("live-1", "保留", "http://a.example/list.txt")],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["live-1".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let items = raw_value["lives"].as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "an entry without an address must survive: {}",
+            updated.raw_config
+        );
+        assert_eq!(items[0]["name"].as_str(), Some("重定向"));
     }
 }

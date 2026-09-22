@@ -9,6 +9,7 @@ import {
   sourceIdentity,
   stableStringify,
 } from "@/features/config/config-merge";
+import { parseConfigText } from "@/features/config/config-parser";
 
 const site = (over: Record<string, unknown> = {}) => ({
   key: "k",
@@ -350,6 +351,76 @@ describe("merging source lists", () => {
     const keys = result.sources.map((s) => s.key);
     expect(new Set(keys).size).toBe(keys.length);
     expect(keys).toEqual(["Bili", "Bili-2", "Bili-3"]);
+  });
+
+  it("leaves an entry that declares no key without one", () => {
+    // A generated key is not merely bookkeeping for these entries. `classifySource` requires a raw
+    // `key` for a site, so writing one in upgrades a source the parser refuses (`invalid`, never
+    // run) into one it will run (`supported`) — importing a configuration would make a source
+    // executable that Moseek had judged unusable. It also desynchronises the two key namespaces:
+    // the parser numbers such an entry by position (`live-2`) while a blank key becomes `-2`.
+    const merged = mergeRawConfigs(
+      {},
+      {
+        sites: [{ name: "无键", api: "https://example.com/api" }],
+        lives: [
+          { name: "直播一", url: "https://l.example/1.txt" },
+          { name: "直播二", url: "https://l.example/2.txt" },
+        ],
+      },
+    );
+
+    const site = (merged.raw.sites as { key?: unknown }[])[0];
+    expect(site.key).toBeUndefined();
+
+    const liveKeys = (merged.raw.lives as { key?: unknown }[]).map((live) => live.key);
+    expect(liveKeys).toEqual([undefined, undefined]);
+  });
+
+  it("does not change a source's capability by giving it a key", () => {
+    // The consequence that matters, measured through the parser exactly as an import experiences it.
+    // TWO keyless sites, because the upgrade happens on the entry that collides: the first stays
+    // keyless only if nothing writes a key at all, while the second is the one a generated key would
+    // hand `supported` to.
+    const raw = {
+      sites: [
+        { name: "无键一", api: "https://a.example/api" },
+        { name: "无键二", api: "https://b.example/api" },
+      ],
+      lives: [],
+    };
+
+    const parsed = parseConfigText(JSON.stringify(raw), undefined);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const before = parsed.sources.map((source) => source.capability);
+    expect(before).toEqual(["invalid", "invalid"]);
+
+    const merged = mergeRawConfigs({}, raw);
+    const after = parseConfigText(JSON.stringify(merged.raw), undefined);
+    expect(after.ok).toBe(true);
+    if (!after.ok) return;
+
+    expect(after.sources.map((source) => source.capability)).toEqual(before);
+  });
+
+  it("still gives a key to an entry that has one, so collisions stay resolved", () => {
+    // The guard above must not switch off the de-duplication it sits next to.
+    const merged = mergeRawConfigs(
+      {},
+      {
+        sites: [
+          { key: "k", api: "https://a.example/api" },
+          { key: "k", api: "https://b.example/api" },
+        ],
+        lives: [],
+      },
+    );
+
+    expect((merged.raw.sites as { key?: unknown }[]).map((site) => site.key)).toEqual([
+      "k",
+      "k-2",
+    ]);
   });
 
   it("is stable when the same merge is applied twice", () => {

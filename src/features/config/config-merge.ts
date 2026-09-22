@@ -546,6 +546,17 @@ export function mergeSourceLists<
  * `ensure_unique_source_keys` on every read, which renames those to `Bili-2`, `Bili-3`, … — so the
  * key the UI shows changed on every visit to the page. Assigning the suffixes here means the stored
  * data is already unique and the loader has nothing left to rename.
+ *
+ * An entry that declares **no** key is left exactly as it is, which is load-bearing twice over:
+ *
+ * 1. **Writing one in would change what the entry is.** `classifySource` requires a raw `key` for a
+ *    site (`hasRequiredFields`), so a generated key silently upgrades a source the parser refuses
+ *    (`invalid`, never run) into one it will run (`supported`). Importing a configuration would then
+ *    make a source executable that Moseek had judged unusable.
+ * 2. **It would put the text and the source list in different key namespaces.** The parser numbers
+ *    these entries by position (`live-1`, `live-2`, …) while this function would have suffixed the
+ *    blank key (`-2`, `-3`, …), so the same entry had two names and a removal that matched on `key`
+ *    could not find it in the raw configuration.
  */
 function ensureUniqueKeys<
   T extends { key?: string },
@@ -553,7 +564,8 @@ function ensureUniqueKeys<
   const used = new Set<string>();
   const nextSuffix = new Map<string, number>();
   return sources.map((source) => {
-    const original = source.key ?? "";
+    const original = source.key;
+    if (original === undefined || original === "") return source;
     let suffix = nextSuffix.get(original) ?? 2;
     let unique = original;
     while (used.has(unique)) {

@@ -11,3 +11,5 @@
 清除类的破坏性操作统一走 `src/components/clear-records-dialog.tsx`（足迹 / 我的收藏 / 系统设置三处共用）：默认全选的复选框 + 随选择范围变化的确认按钮文字。store 里 `clearHistory(kind?)` 与 `clearFavorites(kind?)` 对称——影视与电视直播各自是独立字段，**传 kind 只清那一边**。
 
 配置采用**合并**模型：删除一个源只把它从当前配置（原始文本 + 源快照）移除，**不记录「这个源是用户不要的」**，因此之后导入的文件里若仍有该源，它会作为新源被加回来；导入时同一源仍在则跳过、不产生第二行。清理源时要同时过滤 `favorites`、`liveFavorites` 与 `history`（三者都以 sourceKey 关联）。
+
+删除源时**按身份（`api + ext`）匹配原文条目，不按 `key`**：raw 与源列表的 `key` 是两套独立生成、且已经分叉的命名空间（无 key 的条目被解析器编号为 `live-1`，被合并后缀成 `-2`，两边零重叠），按 `key` 匹配会让删除漏掉原文，用户看到的就是「删了但原始配置里还在」。身份相同时**先比 key、再比 name，每个原文条目最多被认领一次**（身份并不唯一：`xgapp` 与 `骑骑影院` 就是同一 `api + ext`）。原文里「列表早已没有」的残留也会一并清理，但只在列表确实描述着这份原文时才做。**合并不得为没有 `key` 的条目生成 key**——那会把 keyless site 的 `capability` 从 `invalid` 静默升级为 `supported`（`classifySource` 的 `hasRequiredFields` 读原始 `key`），等于让导入把不可用的源变成可执行。
