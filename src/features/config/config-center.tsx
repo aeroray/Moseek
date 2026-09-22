@@ -119,6 +119,10 @@ import {
 } from "@/features/config/source-filter";
 import { resolveSavePayload } from "@/features/config/config-autosave";
 import {
+  readConfigSource,
+  type MultiRepoEntry,
+} from "@/features/config/config-source";
+import {
   SourceFilterFacets,
   SourceFilterTrigger,
 } from "@/features/config/source-filter-panel";
@@ -253,6 +257,16 @@ export function ConfigCenter() {
     title?: string;
   }>({ type: "idle", message: "" });
   const [isParsing, setIsParsing] = useState(false);
+  /**
+   * The 多仓 list the last fetch returned, when it returned one.
+   *
+   * Held in state rather than shown as an error because it is not a failure: the address lists other
+   * configurations and the user wanted one of them. Clearing it dismisses the picker.
+   */
+  const [multiRepo, setMultiRepo] = useState<{
+    entries: MultiRepoEntry[];
+    from: string;
+  } | null>(null);
   /**
    * Which tab is open.
    *
@@ -966,6 +980,15 @@ export function ConfigCenter() {
     await handleLocalFile(file);
   };
 
+  /**
+   * Fetches a configuration address and turns whatever it serves into something usable.
+   *
+   * Several of the addresses users paste do not serve a configuration at all. Measured across the ten
+   * the owner supplied: one serves a JPEG with the configuration appended to it, one serves JSON with
+   * an HTML footer, two serve a landing page, one is a 404, and two serve a 多仓 subscription list of
+   * other addresses. Reporting any of those as "invalid JSON" would be true and useless, so each gets
+   * the response it needs — and a 多仓 list gets a picker rather than being discarded.
+   */
   const handleFetchRemote = async () => {
     if (!sourceInput.trim()) {
       setParseState({ type: "error", message: "请输入配置 URL。" });
@@ -973,8 +996,8 @@ export function ConfigCenter() {
     }
     setIsFetchingRemote(true);
     try {
-      const text = await fetchConfigUrl(sourceInput.trim());
-      if (!text) {
+      const fetched = await fetchConfigUrl(sourceInput.trim());
+      if (!fetched) {
         setParseState({
           type: "error",
           message:
@@ -982,18 +1005,100 @@ export function ConfigCenter() {
         });
         return;
       }
+
+      // An address that served nothing but a picture. Saying which picture, and that it held no
+      // configuration, is more useful than a parse error about binary bytes.
+      if (!fetched.text) {
+        setParseState({
+          type: "error",
+          message: fetched.note ?? "这个地址没有返回配置内容。",
+        });
+        return;
+      }
+
+      const source = readConfigSource(fetched.text, fetched.note);
       setConfigBaseUrl(new URL(sourceInput.trim()).toString());
-      setImportText(text);
       setSelectedFileName("");
+
+      if (source.kind === "multi-repo") {
+        // Not a configuration, but not a failure either: it lists addresses, and the user wanted one
+        // of them. Offering the list is the whole point of recognising this shape.
+        setMultiRepo({ entries: source.entries, from: sourceInput.trim() });
+        setParseState({ type: "idle", message: "" });
+        return;
+      }
+
+      if (source.kind === "landing-page") {
+        setParseState({
+          type: "error",
+          message: source.note,
+        });
+        return;
+      }
+
+      // Repair before showing the text, because a downloaded configuration is not the user's own
+      // writing and a publisher's typo should not cost them the whole file. Measured: 肥猫's published
+      // document has two keys missing their opening quote, and without this the user sees
+      // `invalid character '"' at 125:4` and has to fix someone else's mistake by hand.
+      //
+      // Only a document that FAILS to parse is touched, so a working configuration is never rewritten
+      // on the way in — that would silently discard the author's comments and formatting.
+      const repaired = parseConfigText(source.text, sourceInput.trim()).ok
+        ? null
+        : repairConfigText(source.text);
+      const text =
+        repaired?.ok === true && repaired.text !== source.text ? repaired.text : source.text;
+      const repairNote =
+        repaired?.ok === true && repaired.text !== source.text
+          ? `已自动修正：${repaired.changes.join("、")}`
+          : null;
+
+      setImportText(text);
       setParseState({
         type: "success",
         message:
+          [source.note, repairNote].filter(Boolean).join("；") +
+          (source.note || repairNote ? "；" : "") +
           "远程配置已载入；其中 ./ 相对资源路径会按这个 URL 自动解析，请点击解析配置生成报告。",
       });
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "远程配置请求失败";
       setParseState({ type: "error", message });
+    } finally {
+      setIsFetchingRemote(false);
+    }
+  };
+
+  /** Loads one address from a 多仓 list, the way the user would have pasted it themselves. */
+  const handlePickMultiRepo = async (url: string) => {
+    setMultiRepo(null);
+    setSourceInput(url);
+    setIsFetchingRemote(true);
+    try {
+      const fetched = await fetchConfigUrl(url);
+      if (!fetched?.text) {
+        setParseState({ type: "error", message: fetched?.note ?? "这个地址没有返回配置内容。" });
+        return;
+      }
+      const source = readConfigSource(fetched.text, fetched.note);
+      setConfigBaseUrl(new URL(url).toString());
+      if (source.kind !== "config") {
+        // A 多仓 list pointing at another 多仓 list is possible, but nesting the picker would be a
+        // worse experience than saying so.
+        setParseState({ type: "error", message: source.note });
+        return;
+      }
+      setImportText(source.text);
+      setParseState({
+        type: "success",
+        message: `${source.note ? `${source.note}；` : ""}已载入「${url}」。`,
+      });
+    } catch (error) {
+      setParseState({
+        type: "error",
+        message: error instanceof Error ? error.message : "远程配置请求失败",
+      });
     } finally {
       setIsFetchingRemote(false);
     }
@@ -2423,6 +2528,46 @@ export function ConfigCenter() {
                   <FileUp data-icon="inline-start" aria-hidden="true" />
                   选择文件
                 </Button>
+              </div>
+            )}
+
+            {/* A 多仓 address lists OTHER configurations rather than being one. Rendering the list is
+                the whole reason for recognising the shape: the user wanted one of these, and asking
+                them to copy it out of the JSON by hand is the alternative. */}
+            {multiRepo && (
+              <div className="flex min-h-0 flex-1 flex-col gap-2 rounded-md border bg-muted/20 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">
+                    这份列表来自 {multiRepo.from}，共 {multiRepo.entries.length} 个配置，选一个导入：
+                  </p>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="shrink-0"
+                    onClick={() => setMultiRepo(null)}
+                  >
+                    <X className="size-3.5" aria-hidden="true" />
+                    关闭
+                  </Button>
+                </div>
+                <ScrollArea className="min-h-0 flex-1 rounded-md border bg-background">
+                  <div className="flex flex-col">
+                    {multiRepo.entries.map((entry) => (
+                      <button
+                        key={`${entry.name}|${entry.url}`}
+                        type="button"
+                        onClick={() => void handlePickMultiRepo(entry.url)}
+                        className="flex flex-col gap-0.5 border-b border-border/60 px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-accent/40"
+                      >
+                        <span className="text-sm text-foreground">{entry.name}</span>
+                        <span className="break-all font-mono text-[11px] text-muted-foreground">
+                          {entry.url}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </ScrollArea>
               </div>
             )}
             <p className="-mt-2 shrink-0 text-xs text-muted-foreground">

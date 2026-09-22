@@ -249,7 +249,9 @@ function adapterCard() {
  * importing by URL, so the test still exercises the real controls rather than component internals.
  */
 async function importConfigText(text: string, baseUrl = "https://imported.example/config.json") {
-  vi.mocked(fetchConfigUrl).mockResolvedValue(text);
+  // The fetch command returns a shape now, not a bare string: several real addresses serve a picture
+  // or a web page, and the caller has to know which arrived.
+  vi.mocked(fetchConfigUrl).mockResolvedValue({ text, kind: "config", note: null, pageTitle: null });
   fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
   const input = await screen.findByPlaceholderText("https://example.com/config.json5");
   fireEvent.change(input, { target: { value: baseUrl } });

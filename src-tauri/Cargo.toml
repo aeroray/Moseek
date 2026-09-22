@@ -31,6 +31,11 @@ linker_messages = "allow"
 
 [dependencies]
 base64 = "0.22"
+# Decodes configuration text that is not UTF-8. Several of the addresses the user supplied serve GBK
+# (and the picture-wrapper ones can carry any encoding inside), and rejecting those reported our
+# encoding guess as the file's fault. Already present transitively via reqwest; declared explicitly
+# because `config::decode` uses it directly.
+encoding_rs = "0.8"
 # Used to poll several live-stream probes concurrently instead of trying lines one by one.
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

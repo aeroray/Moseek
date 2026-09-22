@@ -2315,6 +2315,7 @@ name = "moseek"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "encoding_rs",
  "futures-util",
  "keyring",
  "quick-xml 0.41.0",

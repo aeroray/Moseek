@@ -377,6 +377,32 @@ export function repairConfigText(rawText: string): ConfigTextTransformResult {
     changes.push("移除根配置末尾分号");
   }
 
+  // A key that lost its opening quote.
+  //
+  // Measured on 肥猫's published file: exactly two keys read `ext": {` instead of `"ext": {`, on lines
+  // 124 and 143, and quoting those two makes the whole document parse into 39 sites and 2 lives. The
+  // publisher's typo otherwise costs the user the entire configuration, and the failure message —
+  // `invalid character '"' at 125:4` — points at the symptom rather than the cause.
+  //
+  // Narrow on purpose: only a bare identifier at the start of a line, immediately followed by `":`.
+  // That shape cannot occur in valid JSON (a key always opens with a quote, and a value on its own
+  // line is not followed by `:`), so this cannot corrupt a document that was already correct.
+  //
+  // This runs BEFORE the newline-escaping pass, and the order is load-bearing. Escaping first rewrote
+  // the malformed line (`ext": {` became `ext": {\n`, pulling the brace onto the next line) so that
+  // only one of the two keys still matched the pattern, and the document stayed unparseable with a
+  // new error at a new line — the same class of "the fix did not fix it" the user reported about the
+  // repair button. The quote repair has to see the text as published.
+  const quotedText = repairedText.replace(
+    /^(\s*)([A-Za-z_][A-Za-z0-9_]*)"(\s*:)/gm,
+    '$1"$2"$3',
+  );
+  if (quotedText !== repairedText) {
+    const count = (repairedText.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)"(\s*:)/gm) ?? []).length;
+    repairedText = quotedText;
+    changes.push(`补上 ${count} 处缺少左引号的字段名`);
+  }
+
   const escapedText = escapeNewlinesInsideStrings(repairedText);
   if (escapedText !== repairedText) {
     repairedText = escapedText;

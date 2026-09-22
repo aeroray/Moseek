@@ -239,8 +239,22 @@ export async function exportConfig(documentId?: number) {
   });
 }
 
+/**
+ * What fetching a configuration address produced.
+ *
+ * `text` is null when the address served only a picture, and `kind` says which of the four shapes came
+ * back — because several of the addresses users paste are landing pages or subscription lists rather
+ * than configurations, and each needs a different thing said about it.
+ */
+export interface FetchedConfig {
+  text: string | null;
+  kind: string;
+  note?: string | null;
+  pageTitle?: string | null;
+}
+
 export async function fetchConfigUrl(url: string) {
-  return invokeCommand<string>("fetch_config_url", { url });
+  return invokeCommand<FetchedConfig>("fetch_config_url", { url });
 }
 
 /** What checking one script address found. */

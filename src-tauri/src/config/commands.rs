@@ -7,7 +7,7 @@ use crate::{
     SaveConfigDocumentInput,
 };
 
-use super::storage;
+use super::{decode, storage};
 
 #[tauri::command]
 pub fn save_config_document(
@@ -316,10 +316,51 @@ pub fn export_config(
     Ok(document.normalized_config)
 }
 
+/// What fetching a configuration address produced.
+///
+/// The command used to return the body as a plain `String` and reject anything that was not UTF-8,
+/// which reported our encoding guess as the file's fault. It now also has to say WHICH kind of thing
+/// came back, because several of these addresses serve a web page or a subscription list rather than
+/// a configuration — and "invalid JSON at character 0" is a useless thing to tell someone who pasted
+/// a perfectly good address that happens to be a landing page.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchedConfig {
+    /// The text to show the user, or `None` when the address served only a picture.
+    pub text: Option<String>,
+    /// `config`, `image-only`, `landing-page` or `multi-repo`. The frontend decides what to offer,
+    /// because only it knows what the user can do next.
+    pub kind: String,
+    /// A sentence naming what had to be unwrapped, or why this is not a configuration.
+    pub note: Option<String>,
+    /// The title of a landing page, when there is one, so the message can name the page.
+    pub page_title: Option<String>,
+}
+
 #[tauri::command]
-pub async fn fetch_config_url(url: String) -> Result<String, String> {
+pub async fn fetch_config_url(url: String) -> Result<FetchedConfig, String> {
     let parsed_url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
-    policy::fetch_text(parsed_url, 10 * 1024 * 1024, "配置响应").await
+    // Raw bytes rather than `fetch_text`: an image wrapper is not text at all, and the decoding has
+    // to happen after the container is recognised.
+    let (body, _, _) =
+        policy::fetch_response_bytes_public(parsed_url, 10 * 1024 * 1024, "配置响应").await?;
+
+    match decode::decode_config_body(&body)? {
+        decode::DecodedBody::Text { text, unwrap_note } => Ok(FetchedConfig {
+            text: Some(text),
+            kind: "config".to_string(),
+            note: unwrap_note,
+            page_title: None,
+        }),
+        decode::DecodedBody::ImageOnly { kind, bytes } => Ok(FetchedConfig {
+            text: None,
+            kind: "image-only".to_string(),
+            note: Some(format!(
+                "这个地址返回的是一张 {kind} 图片（{bytes} 字节），图片里没有内嵌配置。请确认地址指向的是配置文件。"
+            )),
+            page_title: None,
+        }),
+    }
 }
 
 /// What checking one script address found.

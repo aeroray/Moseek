@@ -250,6 +250,19 @@ async fn fetch_bytes_with_request(
         .map(|(body, _, _)| body)
 }
 
+/// Fetches a body as raw bytes, following redirects, under the same policy as every other request.
+///
+/// The configuration fetch needs the bytes rather than text because some of the addresses the user
+/// supplied serve a picture with the configuration appended to it. Deciding that has to happen before
+/// any UTF-8 decoding, and `fetch_text` refuses non-UTF-8 outright.
+pub(crate) async fn fetch_response_bytes_public(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+) -> Result<(Vec<u8>, Option<String>, Url), String> {
+    fetch_response_bytes(url, Method::GET, max_bytes, resource_name, &[], None, 3).await
+}
+
 async fn fetch_response_bytes(
     url: Url,
     method: Method,
