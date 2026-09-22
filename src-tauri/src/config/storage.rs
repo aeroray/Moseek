@@ -349,17 +349,80 @@ pub(super) fn replace_known_live_source_urls(
     }
     let sources_json = serialize_sources(&sources)?;
     let normalized_config = update_normalized_source_urls(&document.normalized_config, &sources);
+    // `raw_config` has to move with the other two.
+    //
+    // It used to be left alone, so the document held three different spellings of one address: the
+    // raw text kept the relative `./libs/tv/tvlive.txt`, `normalized_config` kept whatever the base
+    // URL resolved that to, and only the list carried the recovered working URL. Measured on the
+    // author's configuration, that is exactly what the three stores said.
+    //
+    // The consequence is that any later pass which re-derives the normalised form from the raw text
+    // — an import, or a save from the raw tab — puts the old address back, silently undoing a repair
+    // the app performed by itself. Rewriting all three keeps them agreeing.
+    let raw_config = update_raw_source_urls(&document.raw_config, &sources);
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
     transaction
         .execute(
-            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2, source_base_url = NULL WHERE id = ?3",
-            params![sources_json, normalized_config, document_id],
+            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2, raw_config = ?3, source_base_url = NULL WHERE id = ?4",
+            params![sources_json, normalized_config, raw_config, document_id],
         )
         .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
     load_config_document(connection, document_id).map_err(|error| error.to_string())
+}
+
+/// Rewrites the address of a live entry in the raw text to match the source it describes.
+///
+/// Matched by name, because that is the only field the raw text and the source list reliably agree
+/// on: the raw text spells the key as the author wrote it (`-4`) while the list carries the parser's
+/// own key (`live-2-2`), so a key match finds nothing. Name is also what the recovery command itself
+/// keys on when it decides these are the same source.
+///
+/// Parses and re-serialises the whole document, so it returns the input unchanged when the text is
+/// unreadable rather than replacing a configuration with an empty one.
+fn update_raw_source_urls(raw_config: &str, sources: &[SourceRecord]) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(raw_config) else {
+        return raw_config.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return raw_config.to_string();
+    };
+    let Some(items) = object.get_mut("lives").and_then(Value::as_array_mut) else {
+        return raw_config.to_string();
+    };
+
+    let mut changed = false;
+    for item in items.iter_mut() {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(source) = sources
+            .iter()
+            .find(|source| source.source_type == "live" && source.name == name)
+        else {
+            continue;
+        };
+        let Some(object) = item.as_object_mut() else {
+            continue;
+        };
+        if object.get("url").and_then(Value::as_str) == Some(source.api.as_str()) {
+            continue;
+        }
+        if object.contains_key("url") {
+            object.insert("url".to_string(), Value::String(source.api.clone()));
+            changed = true;
+        } else if object.contains_key("api") {
+            object.insert("api".to_string(), Value::String(source.api.clone()));
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return raw_config.to_string();
+    }
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| raw_config.to_string())
 }
 
 fn resolve_configured_url(value: &str, base_url: &Url) -> Result<String, String> {
@@ -2281,6 +2344,126 @@ mod tests {
             .collect();
 
         assert_eq!(keys, vec!["keep"], "raw config was: {}", updated.raw_config);
+    }
+
+    #[test]
+    fn removing_a_recovered_live_source_clears_the_raw_entry_it_was_recovered_from() {
+        // The real shape, measured on the author's configuration. `replace_known_live_source_urls`
+        // rewrites the source list to a working absolute URL and, in the same statement, sets
+        // `source_base_url` to NULL — but it never touches `raw_config`, which still spells the
+        // address relatively (`./libs/tv/tvlive.txt`).
+        //
+        // So the two sides differ in a way the base URL can no longer bridge: there is no base to
+        // resolve the relative spelling against. The invariant is that deleting such a source must
+        // still clear its raw entry, or the user meets the "I deleted it but it is still in my
+        // configuration" bug again for exactly the entries the app itself repaired.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"lives":[{"key":"-4","name":"SAO0","url":"./libs/tv/tvlive.txt"},{"key":"keep","name":"保留","url":"https://keep.example/tv.txt"}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                // The recovered record: absolute, and no base URL on the document.
+                test_live("live-2-2", "SAO0", "https://iptv-org.github.io/iptv/countries/cn.m3u"),
+                test_live("keep", "保留", "https://keep.example/tv.txt"),
+            ],
+            None,
+        );
+
+        let updated = remove_sources_in_connection(
+            &mut connection,
+            document_id,
+            &["live-2-2".to_string()],
+        )
+        .unwrap();
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let names: Vec<&str> = raw_value["lives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect();
+
+        assert_eq!(names, vec!["保留"], "raw config was: {}", updated.raw_config);
+    }
+
+    #[test]
+    fn replacing_a_recovered_url_rewrites_the_raw_text_too() {
+        // The three stores have to agree. Only the source list carried the recovered URL, so the raw
+        // text kept `./libs/tv/tvlive.txt`; anything that later re-derives the normalised form from
+        // the raw text (an import, or a save from the raw tab) would put the old address back and
+        // silently undo the repair. Matching is by name because the raw key (`-4`) is the author's
+        // and the list key (`live-2-2`) is the parser's.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let raw = r#"{"lives":[{"key":"-4","name":"SAO0","url":"./libs/tv/tvlive.txt"},{"key":"keep","name":"保留","url":"https://keep.example/tv.txt"}],"sites":[{"key":"s","name":"站点","api":"https://s.example/api"}]}"#;
+        let document_id = insert_document_with_records(
+            &connection,
+            raw,
+            &[
+                test_live("live-2-2", "SAO0", "./libs/tv/tvlive.txt"),
+                test_live("keep", "保留", "https://keep.example/tv.txt"),
+                test_site("s", "站点", "https://s.example/api"),
+            ],
+            Some("https://szyyds.cn/tv/x.json"),
+        );
+
+        let mut replacements = HashMap::new();
+        replacements.insert(
+            "live-2-2".to_string(),
+            "https://iptv-org.github.io/iptv/countries/cn.m3u".to_string(),
+        );
+        let updated = replace_known_live_source_urls(&mut connection, document_id, &replacements)
+            .unwrap()
+            .expect("the replacement must produce a document");
+
+        let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
+        let lives = raw_value["lives"].as_array().unwrap();
+        assert_eq!(
+            lives[0]["url"].as_str(),
+            Some("https://iptv-org.github.io/iptv/countries/cn.m3u"),
+            "raw config was: {}",
+            updated.raw_config
+        );
+        // The recovered entry was the only one meant to change.
+        assert_eq!(lives[1]["url"].as_str(), Some("https://keep.example/tv.txt"));
+        // An unrelated section is left exactly as it was.
+        assert_eq!(
+            raw_value["sites"][0]["api"].as_str(),
+            Some("https://s.example/api")
+        );
+    }
+
+    #[test]
+    fn replacing_a_recovered_url_leaves_an_unreadable_raw_text_alone() {
+        // A removal must never empty a document it cannot parse, and the same holds here: the
+        // recovery rewrites three stores, and one of them being unreadable must not become an empty
+        // configuration. The list still moves, because that is what the user sees working.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let document_id = insert_document_with_records(
+            &connection,
+            "{ not json",
+            &[test_live("live-2-2", "SAO0", "./libs/tv/tvlive.txt")],
+            Some("https://szyyds.cn/tv/x.json"),
+        );
+
+        let mut replacements = HashMap::new();
+        replacements.insert(
+            "live-2-2".to_string(),
+            "https://iptv-org.github.io/iptv/countries/cn.m3u".to_string(),
+        );
+        let updated = replace_known_live_source_urls(&mut connection, document_id, &replacements)
+            .unwrap()
+            .expect("the replacement must produce a document");
+
+        assert_eq!(updated.raw_config, "{ not json");
+        assert_eq!(
+            updated.sources[0].api,
+            "https://iptv-org.github.io/iptv/countries/cn.m3u"
+        );
     }
 
     /// The base URL of a document, for tests that check the identity invariant directly.

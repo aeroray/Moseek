@@ -1,5 +1,7 @@
 import JSON5 from "json5";
 
+import { rawFlagFields } from "@/features/config/config-schema";
+
 /**
  * The visual editor's model of a configuration.
  *
@@ -154,14 +156,12 @@ function fieldText(value: unknown, kind?: VisualField["kind"]): string {
  * and `searchable: 1` is a yes/no. Deciding by the value alone made every `type: 1` source render a
  * switch for its type, and flipping that switch would have written 0 — silently changing the
  * source's dialect. The field name is what carries the meaning, so the decision is made by name.
+ *
+ * The list itself lives in `config-schema.ts`, next to the schema that has to accept these fields'
+ * spellings. Keeping a second copy here is what let the editor write `"true"` as a string into a
+ * boolean slot while the schema rejected the whole document for it.
  */
-const flagFields = new Set([
-  "searchable",
-  "quickSearch",
-  "filterable",
-  "status",
-  "nsfw",
-]);
+const flagFields = rawFlagFields;
 
 function fieldKind(name: string, value: unknown): VisualField["kind"] {
   if (typeof value === "boolean") return "flag";
@@ -347,13 +347,26 @@ export function updateVisualEntryField(
       return;
     }
     // A JSON field keeps its shape: writing a string where an object belongs would change what the
-    // parser sees and silently break the entry.
+    // parser sees and silently break the entry. Checked before the flag rule below, so a field that
+    // happens to be named like a flag but holds an object is never collapsed to a boolean.
     if (isPlainObject(previous) || Array.isArray(previous)) {
       try {
         entry[field] = JSON5.parse(trimmed);
       } catch {
         entry[field] = trimmed;
       }
+      return;
+    }
+    // A flag field the entry does NOT have yet.
+    //
+    // This is the case that broke saving. The switches in the visual editor send "true"/"false" for
+    // these five field names, and when the key was absent every branch above was skipped, so the
+    // string was written straight into a slot the schema requires to be a boolean — the document
+    // then failed validation and could not be saved at all. The field name is what marks it as a
+    // flag, which is the same rule `fieldKind` uses to decide to render a switch in the first place,
+    // so the two cannot disagree about which fields these are.
+    if (flagFields.has(field)) {
+      entry[field] = trimmed === "true" || trimmed === "1";
       return;
     }
     entry[field] = trimmed;

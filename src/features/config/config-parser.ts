@@ -1,6 +1,7 @@
 import JSON5 from "json5";
 
 import {
+  RAW_FLAG_FIELDS,
   RawConfigSchema,
   type RawLive,
   type RawSite,
@@ -301,6 +302,49 @@ export function formatConfigText(rawText: string): ConfigTextTransformResult {
   }
 }
 
+/**
+ * Coerces flag fields that were written as strings into real booleans.
+ *
+ * The repair pass used to handle syntax only — BOM, stray whitespace, Markdown fences, a trailing
+ * semicolon, unescaped newlines — and then declare "未发现可自动修正的问题" while the document was
+ * still unparseable. Measured: a site carrying `"searchable": "true"` failed validation with
+ * "Invalid input: expected boolean, received string", and 自动修正 left the string exactly where it
+ * was. That is the user-visible behaviour of a button that promises to fix things and does not, so a
+ * repair that only understands syntax has to be honest about it or grow to understand types.
+ *
+ * Only the five known flag names are touched, and only when their value is one of the spellings a
+ * real configuration uses. Anything else is left alone: a repair that rewrites fields it does not
+ * understand can turn a working configuration into a different one.
+ */
+function coerceStringFlags(parsed: unknown): number {
+  let repaired = 0;
+
+  const visitEntry = (entry: unknown) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+    const record = entry as Record<string, unknown>;
+    for (const field of RAW_FLAG_FIELDS) {
+      const value = record[field];
+      if (typeof value !== "string") continue;
+      const normalised = value.trim().toLowerCase();
+      if (normalised === "true" || normalised === "1") {
+        record[field] = true;
+        repaired += 1;
+      } else if (normalised === "false" || normalised === "0") {
+        record[field] = false;
+        repaired += 1;
+      }
+    }
+  };
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return 0;
+  const root = parsed as Record<string, unknown>;
+  for (const section of ["sites", "lives", "data"]) {
+    const list = root[section];
+    if (Array.isArray(list)) list.forEach(visitEntry);
+  }
+  return repaired;
+}
+
 export function repairConfigText(rawText: string): ConfigTextTransformResult {
   const sizeIssue = createSizeIssue(rawText);
   if (sizeIssue) {
@@ -340,7 +384,14 @@ export function repairConfigText(rawText: string): ConfigTextTransformResult {
   }
 
   try {
-    JSON5.parse(repairedText);
+    const parsed = JSON5.parse(repairedText) as unknown;
+    // The syntax is now readable, so the type pass can run: a string spelling of a flag is the other
+    // thing that makes a document fail validation, and it is not visible to a syntax parser.
+    const coerced = coerceStringFlags(parsed);
+    if (coerced > 0) {
+      repairedText = JSON.stringify(parsed, null, 2);
+      changes.push(`把 ${coerced} 处写成了字符串的开关改回 true/false`);
+    }
     return {
       ok: true,
       text: repairedText,
