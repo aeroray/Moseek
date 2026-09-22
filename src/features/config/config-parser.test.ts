@@ -388,6 +388,84 @@ describe("Moseek config parser", () => {
     expect(parseConfigText(repaired.text).ok).toBe(false);
   });
 
+  it("repairs a field name that lost its opening quote", () => {
+    // Measured on 肥猫's published file: exactly two keys read `ext": {` instead of `"ext": {`, and
+    // quoting them makes the whole document parse into 39 sites and 2 lives. Without the repair the
+    // user loses the entire configuration to a publisher's typo, and the error they see —
+    // `invalid character '"' at 125:4` — points at the symptom rather than the cause.
+    const text = `{
+  "sites": [
+    {
+      "key": "甲",
+      "name": "甲源",
+      "api": "https://a.example/api",
+ext": {
+        "host": ""
+      }
+    }
+  ]
+}`;
+
+    expect(parseConfigText(text).ok).toBe(false);
+
+    const repaired = repairConfigText(text);
+    expect(repaired.ok).toBe(true);
+    expect(repaired.changes.join("")).toContain("缺少左引号");
+    expect(parseConfigText(repaired.text).ok).toBe(true);
+    // The value is preserved, not just the syntax.
+    const after = JSON.parse(repaired.text) as { sites: { ext?: { host?: string } }[] };
+    expect(after.sites[0].ext?.host).toBe("");
+  });
+
+  it("repairs EVERY malformed field name, not just the first", () => {
+    // The order of the repair passes is load-bearing, and getting it wrong produced exactly this
+    // failure: the newline-escaping pass ran first and rewrote the malformed line, so only one of the
+    // two keys still matched and the document stayed unparseable with a NEW error at a new line.
+    // That is the "I pressed the fix button and it did not fix it" the user reported about 自动修正.
+    //
+    // Two malformed keys is the real shape, so two is what this pins.
+    const text = `{
+  "sites": [
+    {
+      "key": "甲",
+      "name": "甲源",
+      "api": "https://a.example/api",
+ext": {
+        "host": ""
+      }
+    },
+    {
+      "key": "乙",
+      "name": "乙源",
+      "api": "https://b.example/api",
+ext": {
+        "host": ""
+      }
+    }
+  ]
+}`;
+
+    const repaired = repairConfigText(text);
+    expect(repaired.ok).toBe(true);
+    expect(repaired.changes.join("")).toContain("2 处");
+    const after = JSON.parse(repaired.text) as { sites: { ext?: unknown }[] };
+    expect(after.sites).toHaveLength(2);
+    expect(after.sites[0].ext).toBeDefined();
+    expect(after.sites[1].ext).toBeDefined();
+  });
+
+  it("leaves a correctly quoted document alone", () => {
+    // The quote repair is narrow on purpose: a bare identifier at the start of a line followed by `":`
+    // cannot occur in valid JSON, so a document that was already correct must come through untouched.
+    const text = JSON.stringify({
+      sites: [{ key: "a", name: "甲", api: "https://a.example/api", ext: { host: "" } }],
+    });
+    const repaired = repairConfigText(text);
+    expect(repaired.ok).toBe(true);
+    expect(repaired.changes.join("")).not.toContain("缺少左引号");
+    expect(JSON.parse(repaired.text)).toEqual(JSON.parse(text));
+  });
+
   it("does not rewrite text when repair cannot validate it", () => {
     const malformed = '{"sites": [{"name": "missing}]}';
     const repaired = repairConfigText(malformed);
