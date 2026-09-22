@@ -1501,6 +1501,67 @@ describe("config center", () => {
     }
   });
 
+  it("writes exactly once for one edit, and settles", async () => {
+    // The loop that a real browser caught and jsdom did not: one field edit produced FIVE writes.
+    // A successful save merges the sources, which changes `sources`, which the debounce effect
+    // depended on, which restarted the timer — so an idle page kept writing. Worse than the manual
+    // save it replaced, and each pass re-parsed and re-merged, which is how the source list grew
+    // duplicate entries.
+    //
+    // The count is the assertion: "an edit is saved" is satisfied by a loop, so it has to be
+    // "exactly once".
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      openRawTab();
+
+      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+      const nameField = screen.getByLabelText("name");
+      fireEvent.change(nameField, { target: { value: "只写一次" } });
+      fireEvent.blur(nameField);
+
+      vi.mocked(replaceAllConfigDocuments).mockClear();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+      // And the page settles rather than still believing there is work to save.
+      expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent("已自动保存");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not write again when nothing changed", async () => {
+    // The other half of the same guard: after a save, the effect must not fire a second time for the
+    // text it just wrote.
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      openRawTab();
+
+      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+      const nameField = screen.getByLabelText("name");
+      fireEvent.change(nameField, { target: { value: "改一次" } });
+      fireEvent.blur(nameField);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+      const firstCount = vi.mocked(replaceAllConfigDocuments).mock.calls.length;
+
+      // Let more time pass with no further edits.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(vi.mocked(replaceAllConfigDocuments).mock.calls.length).toBe(firstCount);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps the user's switches when a name is corrected", async () => {
     // The save merges the existing records against the new parse rather than taking the parse
     // directly. Taking it would reset every switch on the page each time a name was corrected.

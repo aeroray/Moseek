@@ -252,7 +252,8 @@ describe("absolutising relative references", () => {
 /** A source snapshot as the merge sees it: the identity fields plus whatever local state it holds. */
 type TestSource = {
   api: string;
-  ext: unknown;
+  /** Optional: the parser's own `SourceRecord` omits it, and a test may merge real parsed sources. */
+  ext?: unknown;
   capability: string;
   enabled: boolean;
   testStatus: string;
@@ -522,5 +523,73 @@ describe("carrying local source state", () => {
     const { sources, carried } = carryLocalSourceState([parsed()], []);
     expect(carried).toBe(0);
     expect(sources[0].enabled).toBe(true);
+  });
+
+  it("does not duplicate a recovered live source whose raw text spells the old address", () => {
+    // Found in a real browser, not by these tests: `replace_known_live_source_urls` repairs a live
+    // source to a working absolute URL while the raw text keeps the old relative spelling. Saving
+    // re-parses that text against the base URL, so the entry resolves to a DIFFERENT address and the
+    // identity lookup finds nothing — the source is added a second time. Measured, one unrelated
+    // field edit took the list from 26 to 29 with SAO0 and IPV6 each appearing twice.
+    const raw = JSON.stringify({
+      lives: [{ key: "-4", name: "SAO0", url: "./libs/tv/tvlive.txt" }],
+    });
+    const parsedConfig = parseConfigText(raw, "https://szyyds.cn/tv/x.json");
+    expect(parsedConfig.ok).toBe(true);
+    if (!parsedConfig.ok) return;
+
+    // Typed as the parser's own record, so the two sides of the merge are the same shape — the
+    // stored list and the parsed list are both `SourceRecord` in the app, and typing them
+    // differently here would let a real mismatch through.
+    const existing: typeof parsedConfig.sources = [
+      {
+        ...parsedConfig.sources[0],
+        key: "live-2-2",
+        name: "SAO0",
+        api: "https://iptv-org.github.io/iptv/countries/cn.m3u",
+      },
+    ];
+
+    const result = mergeSourceLists(existing, parsedConfig.sources);
+
+    const copies = result.sources.filter((source) => source.name === "SAO0");
+    expect(copies).toHaveLength(1);
+    expect(result.added).toBe(0);
+    // And the surviving copy keeps the RECOVERED address. Taking the incoming one would silently
+    // undo the repair, turning a working URL back into a relative path.
+    expect(copies[0].api).toBe("https://iptv-org.github.io/iptv/countries/cn.m3u");
+  });
+
+  it("keeps both sources when a name is ambiguous rather than collapsing one", () => {
+    // The name fallback must not become a way to lose a source. Two live sources that share a name
+    // and differ in address are two sources the user can see, so neither is claimed and both stay.
+    const existing = [
+      parsed({ key: "a", name: "同名", sourceType: "live", api: "https://one.example/tv.txt" }),
+      parsed({ key: "b", name: "同名", sourceType: "live", api: "https://two.example/tv.txt" }),
+    ];
+    const incoming = [
+      parsed({ key: "c", name: "同名", sourceType: "live", api: "https://three.example/tv.txt" }),
+    ];
+
+    const result = mergeSourceLists(existing, incoming);
+
+    expect(result.sources.filter((source) => source.name === "同名")).toHaveLength(3);
+    expect(result.added).toBe(1);
+  });
+
+  it("does not use the name fallback to collapse two differently-named live sources", () => {
+    // The fallback is keyed on the name matching, so a different name is a different source and the
+    // ordinary identity path applies: this one is genuinely new.
+    const existing = [
+      parsed({ key: "a", name: "甲", sourceType: "live", api: "https://one.example/tv.txt" }),
+    ];
+    const incoming = [
+      parsed({ key: "b", name: "乙", sourceType: "live", api: "https://two.example/tv.txt" }),
+    ];
+
+    const result = mergeSourceLists(existing, incoming);
+
+    expect(result.sources).toHaveLength(2);
+    expect(result.added).toBe(1);
   });
 });

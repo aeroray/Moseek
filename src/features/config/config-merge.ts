@@ -472,8 +472,10 @@ export interface SourceMergeResult<T> {
 export function mergeSourceLists<
   T extends {
     key?: string;
+    name?: string;
     api?: string;
     ext?: unknown;
+    sourceType?: string;
     capability?: string;
     enabled?: boolean;
   },
@@ -500,7 +502,26 @@ export function mergeSourceLists<
     const free = (slotsByIdentity.get(identity) ?? []).filter(
       (index) => !claimed.has(index),
     );
-    const at = free.length > 0 ? free[free.length - 1] : undefined;
+    // A name fallback, for the one case where an address legitimately changed under the merge's feet.
+    //
+    // `replace_known_live_source_urls` repairs a live source to a working absolute URL while the raw
+    // text keeps the old relative spelling. On save the raw text is parsed against the base URL, so
+    // the entry resolves to a DIFFERENT address from the recovered one and the identity lookup finds
+    // nothing — the source is then added a second time. Measured in a real browser: one unrelated
+    // field edit took the list from 26 to 29, with SAO0 and IPV6 each appearing twice.
+    //
+    // Name is the fallback because it is what the recovery itself keys on when it decides two entries
+    // are the same source, and it is the last resort here in the same spirit as
+    // `remove_sources_from_config` (identity, then key, then name). It is deliberately narrow: it
+    // only applies to live sources, only when both sides declare a type that agrees, only when
+    // exactly ONE unclaimed candidate matches, and only when the incoming entry carries no identity
+    // slot of its own. Two genuinely different sources that share a name therefore still both survive
+    // — the ambiguity is resolved by leaving both alone rather than by collapsing one.
+    const byName =
+      free.length === 0
+        ? matchingSlotsByName(merged, claimed, source)
+        : [];
+    const at = free.length > 0 ? free[free.length - 1] : byName.length === 1 ? byName[0] : undefined;
 
     if (at === undefined) {
       const index = merged.length;
@@ -522,6 +543,17 @@ export function mergeSourceLists<
       const value = (before as Record<string, unknown>)[field];
       if (value !== undefined) next[field] = value;
     }
+    // A source matched by NAME rather than by address is one the app deliberately repaired, and the
+    // stored address is the repaired one. The incoming text still spells the old value, so taking it
+    // would undo the repair — silently reverting a working URL to a broken relative path. The stored
+    // address wins, and the two other address-bearing fields are carried over so the record stays
+    // internally consistent rather than mixing one side's address with the other's metadata.
+    if (free.length === 0 && byName.length === 1) {
+      for (const field of ["api", "capability", "capabilityNote"]) {
+        const value = (before as Record<string, unknown>)[field];
+        if (value !== undefined) next[field] = value;
+      }
+    }
     // A source the new configuration no longer supports must not stay switched on.
     if (source.capability !== "supported") {
       next.enabled = false;
@@ -535,6 +567,35 @@ export function mergeSourceLists<
   }
 
   return { sources: ensureUniqueKeys(merged), added, updated, unchanged };
+}
+
+/**
+ * The stored positions a source can be recognised by when its address no longer matches.
+ *
+ * Returns every unclaimed slot whose name matches, so the caller can require exactly one. Returning
+ * all candidates rather than the first is what keeps an ambiguous name from silently deleting a
+ * source: with two live sources of the same name, neither is claimed and both survive.
+ *
+ * Restricted to live sources on purpose. A site's identity is its adapter address, and sites are not
+ * rewritten by the recovery command, so the fallback has no case to serve there — and the narrower it
+ * is, the less it can collapse two entries the user meant to keep apart.
+ */
+function matchingSlotsByName<
+  T extends { name?: string; sourceType?: string; capability?: string },
+>(merged: T[], claimed: Set<number>, incoming: T): number[] {
+  const name = incoming.name;
+  if (incoming.sourceType !== "live" || !name) return [];
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return [];
+
+  const matches: number[] = [];
+  merged.forEach((candidate, index) => {
+    if (claimed.has(index)) return;
+    if (candidate.sourceType !== "live") return;
+    if ((candidate.name ?? "").trim().toLowerCase() !== wanted) return;
+    matches.push(index);
+  });
+  return matches;
 }
 
 /**

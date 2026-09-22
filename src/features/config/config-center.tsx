@@ -303,6 +303,13 @@ export function ConfigCenter() {
   );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const liveRecoveryAttempts = useRef(new Set<number>());
+  /**
+   * The exact text the last save wrote, so a repeat is skipped.
+   *
+   * A ref rather than state: it must be readable inside the debounce without becoming a reason for
+   * the effect to run again, which is the loop it exists to prevent.
+   */
+  const lastSavedText = useRef<string | null>(null);
   const editorText = rawDraft ?? rawConfig;
   const activeDocument =
     activeConfigId === null ? undefined : configDocumentCache[activeConfigId];
@@ -1207,6 +1214,15 @@ export function ConfigCenter() {
     text: string,
     options: { silent?: boolean } = {},
   ) => {
+    // A save that already ran for this exact text must not run again.
+    //
+    // Without this the debounce re-fired after every write: a successful save merges the sources,
+    // which changes `sources`, which the effect depends on, which restarts the timer and saves
+    // again. Measured in a real browser, one field edit produced FIVE writes. A save loop is worse
+    // than the manual save it replaced — it churns the database on an idle page, and each pass
+    // re-parses and re-merges, which is how the source list grew duplicates.
+    if (lastSavedText.current === text) return;
+
     const trimmed = text.trim();
     // `null` means "empty text", which is a state of its own rather than a parse failure — see
     // `resolveSavePayload`.
@@ -1222,6 +1238,9 @@ export function ConfigCenter() {
       ).length,
     });
 
+    // Recorded before the await: a second call arriving while the first is still in flight must see
+    // it, or two writes race and the later one may carry the older source list.
+    lastSavedText.current = text;
     setIsSavingRaw(true);
     try {
       const name = activeDocument?.name ?? "中心配置";
@@ -1256,6 +1275,10 @@ export function ConfigCenter() {
             : { tone: "success", message: `已自动保存：${payload.sourceCount} 个源。` },
       );
     } catch (error) {
+      // The text did NOT land, so a retry must still be possible. Leaving the marker set would make
+      // the guard skip every later attempt at the same text, turning one transient database error
+      // into permanently unsaveable edits.
+      lastSavedText.current = null;
       setRawStatus({
         tone: "error",
         message: `保存失败：${error instanceof Error ? error.message : "未知错误"}`,
@@ -1289,7 +1312,12 @@ export function ConfigCenter() {
     return () => window.clearTimeout(timer);
     // `saveEditorText` is recreated each render, so depending on it would restart the timer on every
     // render and the save would never fire. The inputs it actually reads are listed instead.
-  }, [rawDraft, rawConfig, hasRawChanges, isSavingRaw, configBaseUrl, activeConfigId, sources]);
+    //
+    // `sources` is deliberately NOT a dependency. It changes as a RESULT of a save (the merge
+    // rewrites the list), so depending on it made every successful write schedule the next one —
+    // measured, one edit produced five writes. The guard in `saveEditorText` is the second line of
+    // defence; this is the first.
+  }, [rawDraft, rawConfig, hasRawChanges, isSavingRaw, configBaseUrl, activeConfigId]);
 
   const saveParseError = (error: unknown) => {
     const message =
