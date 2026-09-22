@@ -337,15 +337,16 @@ describe("PlayerView composition", () => {
     expect(screen.getByText("没有可用线路")).toBeInTheDocument();
   });
 
-  it("collapses the back control to an icon", () => {
-    // The header used to spell out "返回列表" next to an ArrowLeft. The label was the widest
-    // thing in a header whose only job is to name the work.
+  it("labels the back control with the word, not only an icon", () => {
+    // The bare chevron saved the width of one word and cost the meaning: this header has no title
+    // in it, so the arrow was the only thing saying how to leave the page. The visible word is the
+    // accessible name too, so the two can never disagree.
     renderPlayer();
 
-    const back = screen.getByLabelText("返回列表");
-    expect(back.textContent).toBe("");
+    const back = screen.getByRole("button", { name: "返回列表" });
+    expect(back.textContent).toContain("返回列表");
     expect(back.querySelector(".lucide-chevron-left")).toBeTruthy();
-    expect(document.querySelector("header")?.textContent).not.toContain("返回列表");
+    expect(document.querySelector("header")?.textContent).toContain("返回列表");
   });
 
   it("draws no divider in the header", () => {

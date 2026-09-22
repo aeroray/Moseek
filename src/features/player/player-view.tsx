@@ -249,16 +249,18 @@ export function PlayerView({
     // viewport, the rail's top is clipped, and the list has nothing left to scroll.
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <header className="flex shrink-0 items-center gap-3 border-b border-border/70 bg-card/40 px-5 py-2.5 backdrop-blur-md select-none">
+        {/* Back carries its word. It was reduced to a bare chevron to save width, but the word is
+            what says where the control goes, and this header is otherwise blank — the title lives
+            down in the metadata block — so the arrow was the only thing explaining how to leave. */}
         <Button
           type="button"
           variant="ghost"
-          size="icon-sm"
-          aria-label="返回列表"
-          title="返回列表"
-          className="text-muted-foreground hover:text-foreground"
+          size="sm"
+          className="gap-1.5 text-muted-foreground hover:text-foreground"
           onClick={onBack}
         >
-          <ChevronLeft className="size-4" aria-hidden="true" />
+          <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+          返回列表
         </Button>
 
         {/* The work's name leads the metadata block under the player instead of sitting here, so

@@ -10,6 +10,7 @@ import {
   TriangleAlert,
 } from "lucide-react";
 
+import { ChannelLogo } from "@/components/channel-logo";
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
 import {
@@ -416,18 +417,14 @@ function FavoriteLiveCard({
       className={catalogCardClassName}
     >
       <div className="relative aspect-[2/3] w-full overflow-hidden bg-muted/40">
-        <span className="flex size-full items-center justify-center p-2">
-          {favorite.channel.logoUrl ? (
-            <img
-              src={favorite.channel.logoUrl}
-              alt=""
-              className="size-full object-contain"
-              loading="lazy"
-            />
-          ) : (
-            <Radio className="size-6 text-muted-foreground" aria-hidden="true" />
-          )}
-        </span>
+        {/* The logo slot fills the card, so a logo that fails leaves a clean fallback instead of a
+            broken-image glyph in the middle of the artwork. */}
+        <ChannelLogo
+          src={favorite.channel.logoUrl}
+          name={favorite.channel.name}
+          className="size-full p-2"
+          iconClassName="size-6"
+        />
 
         <div className={catalogCardOverlayClassName}>
           <span className="flex size-10 items-center justify-center rounded-full bg-sky-400 text-[#04121b] transition-transform duration-200 group-hover:scale-110">
@@ -667,18 +664,18 @@ function FavoriteWatchView({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-3 border-b border-border/70 px-4 py-2">
-        {/* Icon-only, matching the watch page's back button: the arrow is unambiguous, and the
-            word took width from the title without adding meaning. */}
+        {/* Back carries its word, matching the watch page. The bare chevron saved width but not
+            meaning: an arrow alone does not say whether it returns to the collection or leaves it.
+            The accessible name now comes from the visible text, so no `aria-label` is needed. */}
         <Button
           type="button"
           variant="ghost"
-          size="icon-sm"
-          aria-label="返回收藏"
-          title="返回收藏"
-          className="text-muted-foreground hover:text-foreground"
+          size="sm"
+          className="gap-1.5 text-muted-foreground hover:text-foreground"
           onClick={onBack}
         >
-          <ChevronLeft className="size-4" aria-hidden="true" />
+          <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
+          返回收藏
         </Button>
         <h2 className="truncate text-sm font-semibold text-foreground">
           {item.name}

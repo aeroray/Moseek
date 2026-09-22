@@ -201,4 +201,50 @@ describe("settings page", () => {
       within(boundary as HTMLElement).getByText(/远程 JavaScript、JAR 和 spider 默认阻止/),
     ).toBeInTheDocument();
   });
+  it("names the page once, without a badge repeating the product name", () => {
+    // The header carried a "拾影 · 偏好设置" badge next to the 系统设置 heading. It named the
+    // product and the page in the same breath as the heading, which had already said both.
+    renderSettings();
+
+    expect(screen.getByRole("heading", { name: "系统设置" })).toBeInTheDocument();
+    expect(screen.queryByText("拾影 · 偏好设置")).not.toBeInTheDocument();
+  });
+
+  it("gives every tab an icon", () => {
+    // Four bare words take longer to scan than four words with a shape in front of each, which is
+    // how the configuration centre's tab row reads.
+    renderSettings();
+
+    for (const [label, iconClass] of [
+      ["外观", "lucide-palette"],
+      ["播放器", "lucide-play"],
+      ["安全与网络", "lucide-shield-check"],
+      ["存储", "lucide-hard-drive"],
+    ] as const) {
+      const tab = screen.getByRole("tab", { name: label });
+      expect(tab.querySelector(`.${iconClass}`), label).toBeTruthy();
+    }
+  });
+
+  it("keeps the page from scrolling as a whole, like the configuration centre", () => {
+    // The controls have to stay put while a long tab is read. jsdom performs no layout, so this
+    // asserts the class contract that produces the behaviour rather than the behaviour itself.
+    renderSettings();
+
+    const root = document.querySelector("div.flex.h-full.flex-col.overflow-hidden");
+    expect(root).toBeTruthy();
+    // The reading column is width-capped and centred, matching the configuration centre.
+    expect(root?.querySelector(".max-w-6xl")).toBeTruthy();
+  });
+
+  it("labels each clear action with what it clears", () => {
+    // Two buttons both reading "清除" give a screen-reader user no way to tell them apart.
+    renderSettings();
+    openTab("存储");
+
+    expect(screen.getByRole("button", { name: "清除足迹" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "清除收藏" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "清除" })).not.toBeInTheDocument();
+  });
+
 });
