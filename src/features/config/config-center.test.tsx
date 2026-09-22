@@ -217,9 +217,9 @@ function chooseRawMode(name: "可视化" | "代码") {
   fireEvent.click(tab);
 }
 
-/** Opens the 解析报告 tab. Radix switches tabs on pointer-down, not click. */
+/** Opens the 源健康 tab. Radix switches tabs on pointer-down, not click. */
 function openReportTab() {
-  const tab = screen.getByRole("tab", { name: "解析报告" });
+  const tab = screen.getByRole("tab", { name: "源健康" });
   fireEvent.mouseDown(tab, { button: 0 });
   fireEvent.click(tab);
 }
@@ -1115,8 +1115,8 @@ describe("config center", () => {
     ).toContain("pl-6");
   });
 
-  it("gives 原始配置 and 解析报告 the same 16px content inset", () => {
-    // These two are the pair the user compared. 原始配置 was `p-3 pt-4` (12px) and 解析报告 was
+  it("gives 原始配置 and 源健康 the same 16px content inset", () => {
+    // These two are the pair the user compared. 原始配置 was `p-3 pt-4` (12px) and the report was
     // `p-5` (20px); both now carry no padding and an inner wrapper supplies 16px, so the block
     // edges line up with the card header's own `px-4`.
     renderCenter();
@@ -1139,7 +1139,7 @@ describe("config center", () => {
 
     openReportTab();
     const reportCard = screen
-      .getAllByText("解析报告")
+      .getAllByText("源健康")
       .map((node) => node.closest("[data-slot='card']"))
       .find(Boolean);
     expect(reportCard?.querySelector("[data-slot='card-content']")?.className).toContain("p-0");
@@ -1201,14 +1201,16 @@ describe("config center", () => {
   });
 
   it("gives a report row the same padding as an entry row", () => {
-    // 解析报告's rows sat at 34px from the card edge — the widest of the four tabs — because they
-    // carried `px-4` inside an already-padded content area.
+    // The report's rows sat at 34px from the card edge — the widest of the four tabs — because they
+    // carried `px-4` inside an already-padded content area. The health rows keep the entry rows'
+    // `px-3 py-2.5`, so the same reader finds the same rhythm across the page.
     renderCenter();
     openReportTab();
 
-    const label = screen.getByText("可搜索的源");
-    expect(label.parentElement?.className).toContain("px-2");
-    expect(label.parentElement?.className).toContain("py-2.5");
+    const label = screen.getByText("可用");
+    const row = label.closest("button");
+    expect(row?.className).toContain("px-3");
+    expect(row?.className).toContain("py-2.5");
   });
 
   it("sizes the raw editor from the space left, not a fixed height", () => {
@@ -2646,37 +2648,204 @@ describe("config center", () => {
     });
   });
 
-  it("leads the report with a verdict instead of eight equal cards", () => {
-    // Every finding was its own bordered card, so a fatal parse failure and a zero-count security
-    // note looked identical and the reader had to read all eight to find the one that mattered.
+  it("leads with a verdict about the sources, not about the parser", () => {
+    // The old verdict read "配置解析成功，已识别 27 个源" — a statement about our parser, and a count
+    // that disagreed with the header badge (26) because it counted raw entries rather than stored
+    // sources. Two different numbers side by side, with nothing to say which was right.
     renderCenter();
     openReportTab();
 
-    expect(screen.getByText(/配置解析成功，已识别 \d+ 个源/)).toBeInTheDocument();
-    // The verdict is a single statement, not a card per field.
-    expect(screen.queryByText("结构解析")).not.toBeInTheDocument();
+    // The fixture holds one untested source, one blocked and one needing an adapter, so the verdict
+    // is that nothing has been confirmed usable — a statement about the sources rather than about
+    // our parser.
+    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
+    expect(screen.queryByText(/配置解析成功/)).not.toBeInTheDocument();
+    // And the number it states is the list's own, not a second opinion.
+    expect(screen.queryByText(/已识别 \d+ 个源/)).not.toBeInTheDocument();
   });
 
-  it("groups the report into content and execution boundaries", () => {
+  it("answers with the source list's own words, and each row leads to them", () => {
+    // The count has to be findable in the list, so the label is the word the rows carry. It also
+    // has to lead somewhere: "7 处需要留意" with no way to find out which seven is why the old report
+    // was useless.
     renderCenter();
     openReportTab();
 
-    expect(screen.getByText("内容")).toBeInTheDocument();
-    expect(screen.getByText("执行边界")).toBeInTheDocument();
-    expect(screen.getByText("可搜索的源")).toBeInTheDocument();
-    expect(screen.getByText("HTTP 解析服务")).toBeInTheDocument();
+    expect(screen.getByText("源的状态")).toBeInTheDocument();
+    const row = screen.getByText("待测试").closest("button");
+    expect(row).not.toBeNull();
+
+    // Clicking it opens the source list filtered to those sources.
+    fireEvent.click(row as HTMLElement);
+    expect(screen.getByRole("tab", { name: "源列表" })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    expect(useAppStore.getState().sourceFilter.statuses).toEqual(["untested"]);
   });
 
-  it("collapses a boundary that fired on nothing into one honest line", () => {
-    // Three rows each saying "0 个已阻止" is noise; the reader needs to know nothing was blocked,
-    // and that is one sentence. The fixture config has no JAR, no private protocol and nothing
-    // blocked, so the collapsed form is what should render.
+  it("omits states nothing is in, rather than stating a row of zeros", () => {
+    // The old report printed 远程依赖 0 / 私有协议 0 / 危险执行路径 0 — three rows that said nothing,
+    // directly above the one section that did.
     renderCenter();
     openReportTab();
 
-    expect(screen.getByText("没有需要阻止的内容")).toBeInTheDocument();
     expect(screen.queryByText("远程依赖")).not.toBeInTheDocument();
     expect(screen.queryByText("危险执行路径")).not.toBeInTheDocument();
+    // 可用 survives at zero: "nothing works" is the most important thing this page can say.
+    expect(screen.getByText("可用")).toBeInTheDocument();
+  });
+
+  it("names the source a problem is about instead of printing an array index", () => {
+    // The old list addressed findings as `parses.41` — an index into an array the reader has never
+    // seen, repeated four times over with only the digits differing. That was the single biggest
+    // reason this tab was unreadable.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        rawConfig: JSON.stringify({
+          sites: [{ key: "ok", name: "可用的源", api: "https://a.example/api.php/provide/vod" }],
+          lives: [{ key: "bad", name: "没有地址的直播源", url: "" }],
+          parses: [
+            { name: "解析甲", type: 1, url: "https://jx.example/?url=" },
+            { name: "解析乙", type: 1, url: "not-a-url" },
+            { name: "解析丙", type: 1, url: "also-not-a-url" },
+          ],
+        }),
+        normalizedConfig: "{}",
+      });
+    });
+    openReportTab();
+
+    // The two non-HTTP services are ONE problem with two names, not two problems.
+    const serviceFinding = screen.getByText(
+      /解析服务使用非 HTTP 协议/,
+    );
+    const row = serviceFinding.closest("div");
+    expect(row?.textContent).toContain("解析服务「解析乙」");
+    expect(row?.textContent).toContain("解析服务「解析丙」");
+    // And nothing is addressed by index.
+    expect(document.body.textContent).not.toMatch(/parses\.\d/);
+  });
+
+  it("stops counting a source as soon as it is deleted", () => {
+    // The reported bug: the report kept the results it already had, so a source the user had just
+    // deleted was still counted. `report` used to be `parseResult ?? parseConfigText(rawConfig)`,
+    // and `parseResult` was only written when the drafts reset or an import was parsed — neither of
+    // which a deletion does.
+    renderCenter();
+    openReportTab();
+
+    // The fixture's sources: one untested, one blocked, one needing an adapter.
+    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
+
+    act(() => {
+      const state = useAppStore.getState();
+      const trimmed = JSON.stringify({
+        sites: [{ key: "ok", name: "可用的源", api: supported.api }],
+      });
+      useAppStore.setState({
+        sources: state.sources.filter((source) => source.key !== "no"),
+        rawConfig: trimmed,
+        normalizedConfig: trimmed,
+      });
+    });
+
+    // Two sources remain, and the verdict says so immediately.
+    expect(screen.getByText("2 个源里没有一个确认可用。")).toBeInTheDocument();
+    expect(screen.queryByText("3 个源里没有一个确认可用。")).not.toBeInTheDocument();
+  });
+
+  it("follows a source whose test result changes", () => {
+    // The report is about what the last test found, so a finished test has to move it. This is the
+    // half the old report ignored entirely: it never read `testStatus`, so running 全部测速 changed
+    // nothing on it.
+    renderCenter();
+    openReportTab();
+    expect(screen.getByText("可用")).toBeInTheDocument();
+
+    act(() => {
+      useAppStore.setState((state) => ({
+        sources: state.sources.map((source) =>
+          source.key === "ok" ? { ...source, testStatus: "passed" as const } : source,
+        ),
+      }));
+    });
+
+    // The verdict now reports one confirmed source rather than none.
+    expect(screen.getByText(/1 个已确认可用/)).toBeInTheDocument();
+    expect(screen.queryByText("3 个源里没有一个确认可用。")).not.toBeInTheDocument();
+  });
+
+  it("does not report the stored configuration as broken after a failed import attempt", async () => {
+    // The decisive case. `handleParse` used to store its parse result unconditionally, including a
+    // FAILED one, and nothing cleared it — so pasting broken text into the import dialog and having
+    // it rejected left the report announcing 配置无法解析 about a document that was perfectly valid.
+    //
+    // A plain deletion does not expose this, because the draft-reset effect re-parses whenever
+    // `rawConfig` changes and quietly repairs the stale value. The failure path changes no document
+    // at all, so the stale result is what remains.
+    renderCenter();
+
+    vi.mocked(fetchConfigUrl).mockResolvedValue("{ this is not json");
+    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+    const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+    fireEvent.change(input, { target: { value: "https://broken.example/config.json" } });
+    fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
+    await waitFor(() => {
+      expect(screen.getByLabelText("配置文本")).toBeInTheDocument();
+    });
+    // The merge attempt parses the broken text and is rejected.
+    fireEvent.click(screen.getByRole("button", { name: /合并进中心配置/ }));
+    await waitFor(() => {
+      expect(screen.getByText(/解析失败/)).toBeInTheDocument();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+
+    openReportTab();
+    // The report describes the stored document — which parses — not the rejected import.
+    expect(screen.queryByText("配置无法解析")).not.toBeInTheDocument();
+    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
+    expect(replaceAllConfigDocuments).not.toHaveBeenCalled();
+  });
+
+  it("describes the saved configuration, not the unsaved draft", () => {
+    // The chosen rule: the report describes the document as saved, and unsaved edits are shown as
+    // such by the banner instead. Parsing the draft here would make the report claim sources the
+    // document does not have.
+    renderCenter();
+    openReportTab();
+    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
+
+    // Edit the document in the raw tab without saving.
+    openRawTab();
+    act(() => {
+      useAppStore.setState((state) => ({
+        sources: [
+          ...state.sources,
+          {
+            key: "draft-only",
+            name: "只存在于草稿里的源",
+            sourceType: "cms",
+            api: "https://draft.example/api.php/provide/vod",
+            searchable: true,
+            filterable: true,
+            capability: "supported",
+            capabilityNote: "可用",
+            testStatus: "passed",
+            enabled: true,
+            lastCheckedAt: "刚刚",
+            requestCount: 0,
+          },
+        ],
+      }));
+    });
+
+    openReportTab();
+    // The health rows follow the list, which is the page's live state...
+    expect(screen.getByText(/1 个已确认可用/)).toBeInTheDocument();
+    // ...while the report's own parse still describes the saved text, which is unchanged.
+    expect(useAppStore.getState().rawConfig).not.toContain("draft.example");
   });
 
   it("merges an imported configuration into the centre configuration", async () => {

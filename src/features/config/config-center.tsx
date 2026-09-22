@@ -7,8 +7,10 @@ import {
   type DragEvent,
 } from "react";
 import {
+  Activity,
   AlertTriangle,
   AlignLeft,
+  ArrowRight,
   Blocks,
   Braces,
   Check,
@@ -120,6 +122,12 @@ import {
   matchesSourceFilterState,
 } from "@/features/config/source-filter";
 import {
+  groupIssues,
+  healthVerdict,
+  summarizeSourceHealth,
+  type SourceHealthGroup,
+} from "@/features/config/config-report";
+import {
   SourceFilterFacets,
   SourceFilterTrigger,
 } from "@/features/config/source-filter-panel";
@@ -169,6 +177,9 @@ import type {
  * claimed otherwise. Whether a particular source actually works is what the 状态 column reports.
  */
 type ImportMode = "remote" | "local";
+
+/** The page's four tabs. Named so the health rows can navigate to the source list. */
+type ConfigTab = "sources" | "adapters" | "raw" | "report";
 
 /** The two views of the configuration document. */
 type RawMode = "visual" | "code";
@@ -242,8 +253,15 @@ export function ConfigCenter() {
     message: string;
     title?: string;
   }>({ type: "idle", message: "" });
-  const [parseResult, setParseResult] = useState<ParseResult | null>(null);
   const [isParsing, setIsParsing] = useState(false);
+  /**
+   * Which tab is open.
+   *
+   * Controlled rather than left to Radix's `defaultValue`, because the health rows navigate: a row
+   * that says "12 个测试失败" has to be able to open the source list filtered to those twelve, and
+   * that needs the page to be able to change its own tab.
+   */
+  const [activeTab, setActiveTab] = useState<ConfigTab>("sources");
   const [importMode, setImportMode] = useState<ImportMode>("remote");
   const [sourceInput, setSourceInput] = useState("");
   const [configBaseUrl, setConfigBaseUrl] = useState<string | undefined>();
@@ -287,9 +305,26 @@ export function ConfigCenter() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const liveRecoveryAttempts = useRef(new Set<number>());
   const editorText = rawDraft ?? rawConfig;
-  const report =
-    parseResult ??
-    (rawConfig ? parseConfigText(rawConfig, configBaseUrl) : null);
+  /**
+   * The parsed configuration the report describes.
+   *
+   * Derived from the SAVED document on every render rather than read from a stored result. It used
+   * to be `parseResult ?? parseConfigText(rawConfig)`, and `parseResult` was written by the import
+   * dialog's parse step — which stores its result even when the parse FAILED, and which nothing
+   * cleared when the dialog was closed. So pasting broken text into the dialog and having it
+   * rejected left the report announcing 配置无法解析 about a document that was perfectly valid, and a
+   * configuration that was fetched and then abandoned could go on being described.
+   *
+   * Recomputing is cheap next to the correctness it buys: `parseConfigText` is a JSON5 parse plus a
+   * schema pass over a few hundred entries, and this is the tab whose entire value is being current.
+   * It deliberately reads `rawConfig` rather than `editorText`: the report describes the document as
+   * saved, and unsaved edits are reported by the 保存改动 button instead. Parsing the draft here
+   * would make the report claim sources the document does not have.
+   */
+  const report = useMemo(
+    () => (rawConfig.trim() ? parseConfigText(rawConfig, configBaseUrl) : null),
+    [rawConfig, configBaseUrl],
+  );
   const activeDocument =
     activeConfigId === null ? undefined : configDocumentCache[activeConfigId];
   const relativeLiveSources = useMemo(
@@ -308,7 +343,19 @@ export function ConfigCenter() {
       : (scriptArchives.find(
           (archive) => archive.id === inspectedSource.scriptArchiveId,
         ) ?? undefined);
-  const reportCounts = countParsedCapabilities(report?.sources ?? []);
+  /**
+   * The report's two halves, both derived from live state.
+   *
+   * The health half reads `sources` — the list the page is showing — not the parse, because the
+   * question it answers ("can I watch anything") is about those records, including the test results
+   * that only exist on them. The findings half reads the parse, because a structural problem in the
+   * text is not visible on a source record.
+   */
+  const reportHealth = useMemo(() => summarizeSourceHealth(sources), [sources]);
+  const reportFindings = useMemo(
+    () => (report?.ok ? groupIssues(report.issues, report) : []),
+    [report],
+  );
   const testableSources = useMemo(
     () => sources.filter(isTestableSource),
     [sources],
@@ -391,9 +438,6 @@ export function ConfigCenter() {
     draftSourceRef.current = next;
     setRawDraft(rawConfig);
     setImportText(rawConfig);
-    setParseResult(
-      rawConfig ? parseConfigText(rawConfig, configBaseUrl) : null,
-    );
   }, [activeConfigId, configBaseUrl, rawConfig]);
 
   useEffect(() => {
@@ -613,7 +657,6 @@ export function ConfigCenter() {
     setConfigBaseUrl(undefined);
     setSelectedFileName("");
     setImportText("");
-    setParseResult(null);
     setParseState({ type: "idle", message: "" });
     setImportOpen(true);
   };
@@ -1330,7 +1373,6 @@ export function ConfigCenter() {
   const handleParse = async () => {
     setIsParsing(true);
     const result = parseConfigText(importText, configBaseUrl);
-    setParseResult(result);
 
     if (!result.ok) {
       const issue = result.issues[0];
@@ -1454,7 +1496,8 @@ export function ConfigCenter() {
             count and its own sentence. */}
 
         <Tabs
-          defaultValue="sources"
+          value={activeTab}
+          onValueChange={(value) => setActiveTab(value as ConfigTab)}
           className="flex min-h-0 flex-1 flex-col gap-5"
         >
           <div className="flex shrink-0 items-center justify-between gap-4">
@@ -1472,8 +1515,8 @@ export function ConfigCenter() {
                 原始配置
               </TabsTrigger>
               <TabsTrigger value="report" className="gap-1.5">
-                <FileJson className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                解析报告
+                <Activity className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                源健康
               </TabsTrigger>
             </TabsList>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -2202,11 +2245,11 @@ export function ConfigCenter() {
             <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
               <CardHeader className="shrink-0 border-b pb-4 pt-5">
                 <CardTitle className="flex items-center gap-2 text-base">
-                  <FileJson className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  解析报告
+                  <Activity className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
+                  源健康
                 </CardTitle>
                 <CardDescription>
-                  按字段和执行边界整理的导入结果。
+                  这些源现在能不能用，以及配置里还有哪些问题要修。来自最近一次测速。
                 </CardDescription>
               </CardHeader>
               {/* The content carries no padding and does not scroll; the inner wrapper does both.
@@ -2216,126 +2259,95 @@ export function ConfigCenter() {
                   and made the block edges asymmetric — 16px on the left, 22px on the right. */}
               <CardContent className="flex min-h-0 flex-1 flex-col p-0">
                 {report ? (
-                  /* One verdict, then two groups of labelled rows.
-                     The previous layout was eight equal-weight bordered cards, each an icon plus a
-                     heading plus a sentence, so a fatal parse failure and a zero-count security
-                     note looked identical and the reader had to read all eight to find the one that
-                     mattered. A verdict block answers "did it work" first, and the groups answer
-                     "what came in" and "what is being refused" — the two questions the report
-                     actually exists for. */
+                  /* A verdict about the sources, then the two things a reader can act on: the state
+                     each source is in, and the problems that block it. The verdict used to be
+                     "配置解析成功，已识别 27 个源" — a statement about our parser, and a count that
+                     disagreed with the header badge (26) because it counted raw entries rather than
+                     stored sources. */
                   <ScrollArea className="min-h-0 flex-1" viewportClassName="[&>div]:!block">
                     <div className="flex flex-col gap-5 px-4 py-4">
                     <ReportVerdict
                       ok={report.ok}
-                      sourceCount={report.sources.length}
-                      dialect={report.configDialect}
+                      verdict={healthVerdict(sources)}
                       failureMessage={
                         report.issues[0]?.message ?? "配置结构无法解析"
                       }
                     />
 
                     {report.ok && (
-                      <>
-                        <ReportGroup title="内容">
-                          <ReportRow
-                            label="可搜索的源"
-                            value={`${reportCounts.supported} 个`}
-                          />
-                          <ReportRow
-                            label="直播源"
-                            value={
-                              report.liveCount > 0
-                                ? `${report.liveCount} 个`
-                                : "无"
-                            }
-                          />
-                          <ReportRow
-                            label="HTTP 解析服务"
-                            value={(() => {
-                              const usable = report.parseServices.filter(
-                                (service) => service.capability === "supported",
-                              ).length;
-                              if (report.parseServices.length === 0)
-                                return "未配置";
-                              return usable > 0
-                                ? `${usable} 个可用`
-                                : `${report.parseServices.length} 个均不可用`;
-                            })()}
-                          />
-                        </ReportGroup>
-
-                        <ReportGroup title="执行边界">
-                          {/* A boundary with a count of zero is good news and does not deserve a
-                              row of its own; saying "没有阻止任何内容" once is the honest summary,
-                              and it keeps the eye on the boundaries that did fire. */}
-                          {reportCounts.blocked === 0 &&
-                          reportCounts["needs-adapter"] === 0 &&
-                          !report.sources.some((source) => Boolean(source.jar)) ? (
-                            <ReportRow
-                              label="阻止与限制"
-                              value="没有需要阻止的内容"
-                              tone="supported"
+                      <section className="flex flex-col gap-2">
+                        <h3 className="text-sm font-medium">源的状态</h3>
+                        {/* Every row is a count the reader can reach: the label is the word the
+                            source list puts on those rows, the sentence says what it means, and the
+                            whole row opens the list filtered to exactly them. The report used to
+                            state counts with nowhere to go — "7 处需要留意" and no way to find out
+                            which seven. */}
+                        <div className="flex flex-col gap-1.5">
+                          {reportHealth.map((group) => (
+                            <HealthRow
+                              key={group.key}
+                              group={group}
+                              onOpen={() => {
+                                setSourceFilter(group.filter);
+                                setActiveTab("sources");
+                              }}
                             />
-                          ) : (
-                            <>
-                              <ReportRow
-                                label="远程依赖"
-                                value={`${report.sources.filter((source) => Boolean(source.jar)).length} 个已阻止`}
-                                tone="blocked"
-                              />
-                              <ReportRow
-                                label="私有协议"
-                                value={`${reportCounts["needs-adapter"]} 个${adapterStatusLabel("needs-adapter")}`}
-                                tone="warning"
-                              />
-                              <ReportRow
-                                label="危险执行路径"
-                                value={`${reportCounts.blocked} 个${adapterStatusLabel("blocked")}`}
-                                tone="blocked"
-                              />
-                            </>
-                          )}
-                        </ReportGroup>
-                      </>
+                          ))}
+                        </div>
+                        <p className="px-1 text-xs leading-5 text-muted-foreground">
+                          测速结果只反映「上一次测试」，不会自动更新。点一行可以只看这些源。
+                        </p>
+                      </section>
                     )}
 
-                    {report.issues.length > 0 && (
+                    {reportFindings.length > 0 && (
                       <section className="flex flex-col gap-2">
-                        {/* No eyebrow: the heading carries its own weight, and the count in it is
-                            the part that tells the reader whether to keep going. */}
                         <h3 className="flex items-center gap-2 text-sm font-medium">
                           <AlertTriangle
                             className="size-3.5 text-[color:var(--status-partial)]"
                             aria-hidden="true"
                           />
-                          {report.issues.length} 处需要留意
+                          配置里需要修正的 {reportFindings.length} 类问题
                         </h3>
                         <div className="divide-y divide-border/60 rounded-lg border border-border/60">
-                          {report.issues.slice(0, 5).map((issue) => (
+                          {/* Grouped by what they say, and named by what they are about. The old
+                              list printed `parses.41` four times over — an index into an array the
+                              reader has never seen, and the single biggest reason this tab was
+                              unreadable. */}
+                          {reportFindings.map((finding) => (
                             <div
-                              key={`${issue.path}-${issue.message}`}
-                              className="flex items-baseline gap-3 px-2 py-2.5"
+                              key={finding.message}
+                              className="flex items-start gap-3 px-3 py-2.5"
                             >
-                              <span className="shrink-0 font-mono text-xs text-foreground">
-                                {issue.path}
+                              <span
+                                className={cn(
+                                  "mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                                  finding.severity === "error"
+                                    ? "bg-destructive/15 text-destructive"
+                                    : "bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]",
+                                )}
+                              >
+                                {finding.severity === "error" ? "无法使用" : "留意"}
                               </span>
-                              <span className="min-w-0 text-sm text-muted-foreground">
-                                {issue.message}
-                              </span>
-                              {issue.line && (
-                                <span className="ml-auto shrink-0 text-xs tabular-nums text-muted-foreground">
-                                  第 {issue.line} 行
-                                </span>
-                              )}
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm text-foreground">{finding.message}</p>
+                                <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                                  {finding.targets.slice(0, 6).join("、")}
+                                  {finding.targets.length > 6
+                                    ? ` 等 ${finding.targets.length} 项`
+                                    : ""}
+                                </p>
+                              </div>
                             </div>
                           ))}
-                          {report.issues.length > 5 && (
-                            <p className="px-2 py-2.5 text-xs text-muted-foreground">
-                              其余 {report.issues.length - 5} 处可在源详情中查看。
-                            </p>
-                          )}
                         </div>
                       </section>
+                    )}
+
+                    {reportFindings.length === 0 && reportHealth.length <= 1 && (
+                      <p className="px-1 text-sm text-muted-foreground">
+                        配置结构没有问题，也不需要留意的地方。
+                      </p>
                     )}
                     </div>
                   </ScrollArea>
@@ -2344,11 +2356,11 @@ export function ConfigCenter() {
                     <Empty className="min-h-64 border border-dashed bg-card/40">
                       <EmptyHeader>
                         <EmptyMedia variant="icon">
-                          <FileJson data-icon="inline-start" aria-hidden="true" />
+                          <Activity data-icon="inline-start" aria-hidden="true" />
                         </EmptyMedia>
-                        <EmptyTitle>还没有解析报告</EmptyTitle>
+                        <EmptyTitle>还没有源</EmptyTitle>
                         <EmptyDescription>
-                          导入并解析配置后，这里会显示结构、能力和安全边界报告。
+                          导入并解析配置后，这里会说明这些源现在能不能用。
                         </EmptyDescription>
                       </EmptyHeader>
                     </Empty>
@@ -3507,20 +3519,20 @@ function DetailRow({
 }
 
 /**
- * The one-line answer to "did the import work", stated before any detail.
+ * The one-line answer to "can I watch anything with this configuration".
  *
- * The old report had no verdict at all: 结构解析 was one card among eight, so a failed parse looked
- * like the other seven until the reader got to it.
+ * It used to read "配置解析成功，已识别 27 个源" — a statement about our parser, not about the
+ * reader's sources, and a number that disagreed with the header badge right above it (26) because it
+ * counted raw entries rather than stored sources. The verdict now comes from `healthVerdict`, which
+ * partitions the same list the header counts.
  */
 function ReportVerdict({
   ok,
-  sourceCount,
-  dialect,
+  verdict,
   failureMessage,
 }: {
   ok: boolean;
-  sourceCount: number;
-  dialect: string;
+  verdict: string;
   failureMessage: string;
 }) {
   return (
@@ -3552,63 +3564,68 @@ function ReportVerdict({
               : "text-[color:var(--status-blocked)]",
           )}
         >
-          {ok ? `配置解析成功，已识别 ${sourceCount} 个源` : "配置无法解析"}
+          {ok ? verdict : "配置无法解析"}
         </p>
-        <p className="mt-1 text-sm leading-5 text-muted-foreground">
-          {ok
-            ? `识别为 ${dialect} 格式，已统一转换为 Moseek 标准源模型。`
-            : failureMessage}
-        </p>
+        {!ok && (
+          <p className="mt-1 text-sm leading-5 text-muted-foreground">{failureMessage}</p>
+        )}
       </div>
     </div>
   );
 }
 
-/** A named group of report rows. Groups exist so "what came in" and "what is refused" read apart. */
-function ReportGroup({
-  title,
-  children,
+/**
+ * One state a source can be in, as a count that leads somewhere.
+ *
+ * A count with no way to reach the rows it describes is what made the old report useless — "7 处需要
+ * 留意", and no way to find out which seven. So the whole row is the control: it opens the source
+ * list filtered to exactly these sources, which is also what makes the numbers checkable.
+ */
+function HealthRow({
+  group,
+  onOpen,
 }: {
-  title: string;
-  children: React.ReactNode;
+  group: SourceHealthGroup;
+  onOpen: () => void;
 }) {
-  return (
-    <section className="flex flex-col gap-2">
-      <h3 className="text-sm font-medium">{title}</h3>
-      <div className="divide-y divide-border/60 rounded-lg border border-border/60">
-        {children}
-      </div>
-    </section>
-  );
-}
+  // Only the states that need attention are coloured. 可用 and 待测试 are facts rather than alarms,
+  // and colouring them would make the row that matters harder to find.
+  const tone =
+    group.key === "usable"
+      ? "supported"
+      : group.key === "untested"
+        ? null
+        : group.key === "empty" || group.key === "needs-adapter"
+          ? "warning"
+          : "blocked";
 
-function ReportRow({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: "supported" | "warning" | "blocked";
-}) {
-  // `px-2 py-2.5`, matching the entry rows in 原始配置: the box sits 16px inside the card and the
-  // content 8px more, which is the same 25px the table tabs' `pl-6` produces. The old `px-4 py-2.5`
-  // landed the label at 34px — the widest inset of the four tabs.
   return (
-    <div className="flex items-baseline justify-between gap-4 px-2 py-2.5">
-      <span className="text-sm text-muted-foreground">{label}</span>
+    <button
+      type="button"
+      onClick={onOpen}
+      className="flex w-full items-center gap-3 rounded-lg border border-border/60 bg-card/40 px-3 py-2.5 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
+    >
       <span
         className={cn(
-          "text-sm font-medium tabular-nums",
+          "w-16 shrink-0 text-base font-semibold tabular-nums",
           tone === "supported" && "text-[color:var(--status-supported)]",
           tone === "warning" && "text-[color:var(--status-partial)]",
-          tone === "blocked" && "text-[color:var(--status-blocked)]",
-          !tone && "text-foreground",
+          tone === "blocked" && "text-destructive",
+          tone === null && "text-foreground",
         )}
       >
-        {value}
+        {group.count}
       </span>
-    </div>
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1.5">
+          <span className="text-sm font-medium text-foreground">{group.label}</span>
+          <ArrowRight className="size-3 text-muted-foreground/60" aria-hidden="true" />
+        </span>
+        <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
+          {group.hint}
+        </span>
+      </span>
+    </button>
   );
 }
 
