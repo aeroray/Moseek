@@ -15,7 +15,7 @@ import {
   updateSourceTest as updateSourceTestCommand,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
-import { defaultSourceFilter } from "@/features/config/source-filter";
+import { clearedSourceFilter, defaultSourceFilter } from "@/features/config/source-filter";
 import type { SourceRecord, SourceTestResult } from "@/types/moseek";
 
 // The page's job is to answer three questions in order: which configuration am I on, what is in
@@ -282,13 +282,112 @@ describe("config center", () => {
     });
   });
 
-  it("names itself 配置中心", () => {
-    // "配置与源" described the page's contents rather than its role; 配置中心 says what it is.
+  it("names itself 配置中心", () => {    // "配置与源" described the page's contents rather than its role; 配置中心 says what it is.
     renderCenter();
 
     expect(
       screen.getByRole("heading", { name: "配置中心" }),
     ).toBeInTheDocument();
+  });
+
+  it("does not ask for a configuration name", () => {
+    // An import merges into 中心配置, so the name the user typed was discarded immediately — the
+    // document keeps the centre configuration's own name. Asking for a value that cannot be used
+    // implies the import creates something separate, which is the model this page removed.
+    renderCenter();
+    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+
+    expect(screen.queryByLabelText("配置名称")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/主用影视源/)).not.toBeInTheDocument();
+  });
+
+  it("keeps the centre configuration's name through an import", async () => {
+    // The other half of removing the field: the stored document must still be named, and named after
+    // the centre configuration rather than after whatever the dialog used to collect.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [{ key: "新源", name: "新源", api: "https://new.example/api.php/provide/vod" }],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    expect(saved?.name).toBe("中心配置");
+  });
+
+  it("shows a source's address rather than the configuration author's key", () => {
+    // The row's second line used to read `{source.key} · 直播源`. Measured on the owner's file: three
+    // live sources carry the keys `-7`, `-8` and `-9`, which are array indices the publisher invented
+    // and mean nothing to a reader. The address is what identifies a source to a person.
+    renderCenter();
+
+    // The fixture's own address, which is what the row should now carry.
+    expect(screen.getByText("https://example.com/api.php/provide/vod/")).toBeInTheDocument();
+    // And the raw key is no longer on the row.
+    expect(screen.queryByText(/^ok · /)).not.toBeInTheDocument();
+  });
+
+  it("falls back to the source kind when there is no address", () => {
+    // An address-less entry has nothing to show, so the kind is the honest fallback — the row must
+    // not render an empty line. Measured: the owner's configuration holds one live entry with no
+    // address at all, which is exactly the case this covers.
+    //
+    // The filter is cleared first, and that is not incidental: an address-less source is not testable,
+    // so the default 适配器状态 filter hides it. Reaching the row means asking for it the way a user
+    // would, rather than asserting about a row that is not on screen.
+    renderCenter();
+    act(() => {
+      useAppStore.setState({
+        sources: useAppStore
+          .getState()
+          .sources.map((source) => (source.key === "ok" ? { ...source, api: "" } : source)),
+        sourceFilter: clearedSourceFilter,
+      });
+    });
+
+    const rows = [...document.querySelectorAll("tr")];
+    const row = rows.find((item) => item.textContent?.includes("可用的源"));
+    expect(row, "the source row must be rendered").toBeTruthy();
+    expect(row?.textContent).toContain("普通 CMS");
+    // And the raw key is gone from this row too.
+    expect(row?.textContent).not.toContain("ok ·");
+  });
+
+  it("reports a finished operation as a toast rather than a permanent banner", async () => {
+    // The banner sat below the list and stayed until the next operation replaced it — a permanent
+    // record of a momentary event, in the space the list's own footer belongs to.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [{ key: "新源", name: "新源", api: "https://new.example/api.php/provide/vod" }],
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/已合并进/)).toBeInTheDocument();
+    });
+    // It is a toast, and no page-level alert is left behind.
+    expect(document.querySelector("[data-slot='toast']")).toBeTruthy();
+    expect(document.querySelector("[data-slot='alert']")).toBeNull();
+  });
+
+  it("fills the empty state to the bottom of its container", () => {
+    // The dashed border stopped wherever its own content ended, leaving a gap above the card's
+    // bottom edge: `Empty` carries `flex-1`, but inside a plain block that does nothing.
+    renderCenter();
+    // An empty list, so the empty state is what renders rather than the table.
+    act(() => {
+      useAppStore.setState({ sources: [] });
+    });
+
+    const empty = document.querySelector("[data-slot='empty']");
+    expect(empty).toBeTruthy();
+    // The wrapper has to be a flex column that takes the remaining height, which is what makes the
+    // `flex-1` on the empty state mean anything.
+    const wrapper = empty?.parentElement;
+    expect(wrapper?.className).toContain("flex");
+    expect(wrapper?.className).toContain("flex-1");
+    expect(wrapper?.className).toContain("min-h-0");
   });
 
   it("states the single centre configuration instead of offering a switcher", () => {
@@ -2987,5 +3086,113 @@ describe("config center", () => {
     const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
     const sites = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites;
     expect(sites).toHaveLength(3);
+  });
+
+  it("offers one action for every address in a 多仓 list", async () => {
+    // Eighteen addresses is eighteen trips through the dialog otherwise, and the editor holds one
+    // document at a time, so "import them all" was not expressible before.
+    renderCenter();
+    const list = JSON.stringify({
+      urls: [
+        { name: "甲仓", url: "https://one.example/config.json" },
+        { name: "乙仓", url: "https://two.example/config.json" },
+      ],
+    });
+    vi.mocked(fetchConfigUrl).mockResolvedValue({
+      text: list,
+      kind: "config",
+      note: null,
+      pageTitle: null,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+    const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+    fireEvent.change(input, { target: { value: "https://list.example/dc" } });
+    fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
+
+    const bulk = await screen.findByRole("button", { name: /全部合并导入/ });
+    expect(bulk).toHaveTextContent("2");
+  });
+
+  it("merges every address in one action, and names the ones that failed", async () => {
+    // Failures are collected rather than thrown: measured on the owner's list, one of eighteen
+    // addresses is a host that no longer resolves. Aborting the batch would give the user nothing and
+    // no explanation of which one broke.
+    renderCenter();
+    const list = JSON.stringify({
+      urls: [
+        { name: "甲仓", url: "https://one.example/config.json" },
+        { name: "坏仓", url: "https://dead.example/config.json" },
+        { name: "乙仓", url: "https://two.example/config.json" },
+      ],
+    });
+
+    vi.mocked(fetchConfigUrl).mockImplementation(async (url: string) => {
+      if (url === "https://list.example/dc") {
+        return { text: list, kind: "config", note: null, pageTitle: null };
+      }
+      if (url === "https://dead.example/config.json") {
+        throw new Error("无法连接到远程服务器");
+      }
+      const key = url.includes("one") ? "甲" : "乙";
+      return {
+        text: JSON.stringify({
+          sites: [{ key, name: `${key}源`, api: `https://${key}.example/api.php/provide/vod` }],
+        }),
+        kind: "config",
+        note: null,
+        pageTitle: null,
+      };
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+    const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+    fireEvent.change(input, { target: { value: "https://list.example/dc" } });
+    fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /全部合并导入/ }));
+
+    // The two that worked are merged AND committed in one action, and the dead one is named. The
+    // dialog closes because the job is finished — the button says 合并导入, not 载入, so it must not
+    // leave a second confirmation to press.
+    await waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/已合并导入 2 份配置/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/坏仓/)).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+
+    // And the stored document holds BOTH sources, which is the point of merging before committing.
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const parsed = JSON.parse(saved!.rawConfig) as { sites: { key: string }[] };
+    const keys = parsed.sites.map((site) => site.key);
+    expect(keys).toContain("甲");
+    expect(keys).toContain("乙");
+  });
+
+  it("says so when a 多仓 list yields nothing at all", async () => {
+    // Every address failing is a different situation from some failing, and the message has to say
+    // which one happened.
+    renderCenter();
+    const list = JSON.stringify({
+      urls: [{ name: "甲仓", url: "https://dead.example/config.json" }],
+    });
+    vi.mocked(fetchConfigUrl).mockImplementation(async (url: string) => {
+      if (url === "https://list.example/dc") {
+        return { text: list, kind: "config", note: null, pageTitle: null };
+      }
+      throw new Error("无法连接到远程服务器");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+    const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+    fireEvent.change(input, { target: { value: "https://list.example/dc" } });
+    fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /全部合并导入/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/都没有取到内容/)).toBeInTheDocument();
+    });
   });
 });

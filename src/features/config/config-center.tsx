@@ -233,7 +233,6 @@ export function ConfigCenter() {
     null,
   );
   const [importOpen, setImportOpen] = useState(false);
-  const [configName, setConfigName] = useState("");
   const [importText, setImportText] = useState("");
   const [rawDraft, setRawDraft] = useState<string | null>(null);
   /**
@@ -267,6 +266,8 @@ export function ConfigCenter() {
     entries: MultiRepoEntry[];
     from: string;
   } | null>(null);
+  /** Whether the 多仓 bulk import is running, so its button can report progress. */
+  const [isImportingAll, setIsImportingAll] = useState(false);
   /**
    * Which tab is open.
    *
@@ -638,7 +639,6 @@ export function ConfigCenter() {
   );
 
   const openImportDialog = () => {
-    setConfigName(`配置 ${configDocuments.length + 1}`);
     setImportMode("remote");
     setSourceInput("");
     setConfigBaseUrl(undefined);
@@ -957,7 +957,6 @@ export function ConfigCenter() {
     setConfigBaseUrl(undefined);
     setSelectedFileName(file.name);
     setIsDraggingFile(false);
-    setConfigName(file.name.replace(/\.(json5?|txt)$/i, "") || file.name);
     setImportText(await file.text());
     setParseState({
       type: "idle",
@@ -1067,6 +1066,106 @@ export function ConfigCenter() {
       setParseState({ type: "error", message });
     } finally {
       setIsFetchingRemote(false);
+    }
+  };
+
+  /**
+   * Fetches every address in a 多仓 list and merges them all into the centre configuration at once.
+   *
+   * The user asked for this because picking eighteen addresses one at a time is eighteen round trips
+   * through a dialog that only ever loads one of them into the editor — and the editor can only hold
+   * one document, so "select all" was not expressible before this existed.
+   *
+   * Failures are collected rather than thrown. With eighteen addresses, some are dead: measured on
+   * the owner's list, one of the eighteen is a host that no longer resolves. Aborting the whole batch
+   * because one address is dead would be the worst outcome — the user would get nothing and no
+   * explanation of which one broke. So each address is tried, the ones that work are merged, and the
+   * ones that did not are named.
+   */
+  const handleImportAllMultiRepo = async () => {
+    const request = multiRepo;
+    if (!request) return;
+    setMultiRepo(null);
+    setIsImportingAll(true);
+    try {
+      const documents: string[] = [];
+      const failed: string[] = [];
+
+      for (const entry of request.entries) {
+        try {
+          const fetched = await fetchConfigUrl(entry.url);
+          if (!fetched?.text) {
+            failed.push(entry.name);
+            continue;
+          }
+          const source = readConfigSource(fetched.text, fetched.note);
+          if (source.kind !== "config") {
+            // A nested 多仓 list or a landing page: not an error worth stopping for, but it did not
+            // contribute anything, so it is named.
+            failed.push(entry.name);
+            continue;
+          }
+          // Each address is repaired on its own, because a publisher's typo should not cost the whole
+          // batch — this is the same pass the single-address path runs.
+          const parsed = parseConfigText(source.text, entry.url);
+          const repaired = parsed.ok ? null : repairConfigText(source.text);
+          documents.push(
+            repaired?.ok === true && repaired.text !== source.text ? repaired.text : source.text,
+          );
+        } catch {
+          failed.push(entry.name);
+        }
+      }
+
+      if (documents.length === 0) {
+        setParseState({
+          type: "error",
+          message: `这份列表里的 ${request.entries.length} 个配置都没有取到内容。`,
+        });
+        return;
+      }
+
+      // Merge them into ONE document, then commit it through the ordinary import path. Doing the
+      // merge first is what keeps this from being eighteen separate imports, each of which would
+      // rewrite the stored configuration in turn.
+      let merged = documents[0];
+      for (const next of documents.slice(1)) {
+        const existing = parseRawObject(merged);
+        const incoming = parseRawObject(next);
+        if (!existing || !incoming) continue;
+        merged = JSON.stringify(mergeRawConfigs(existing, incoming).raw);
+      }
+
+      // The base URL is deliberately NOT set here. Eighteen addresses usually live on eighteen
+      // different hosts, so there is no single directory a relative path could resolve against;
+      // picking one would silently rewrite the others' addresses. `absolutizeRelativeSites` in the
+      // import path leaves them as written instead, which is honest about what we know.
+      const parsedMerged = parseConfigText(merged, undefined);
+      if (!parsedMerged.ok) {
+        setParseState({
+          type: "error",
+          message: `合并后的配置无法解析：${parsedMerged.issues[0]?.message ?? "未知错误"}`,
+        });
+        return;
+      }
+
+      // Committed directly rather than left in the editor for a second confirmation. The user asked
+      // for "一键合并导入" — one action — and the button says 合并导入, not 载入.
+      await commitParsedConfig(parsedMerged, {
+        rawOverride: merged,
+        successNote:
+          `已合并导入 ${documents.length} 份配置` +
+          (failed.length > 0
+            ? `；${failed.length} 个地址没有取到配置：${failed.slice(0, 3).join("、")}${failed.length > 3 ? " 等" : ""}。`
+            : "。"),
+      });
+    } catch (error) {
+      setParseState({
+        type: "error",
+        message: error instanceof Error ? error.message : "批量导入失败",
+      });
+    } finally {
+      setIsImportingAll(false);
     }
   };
 
@@ -1398,6 +1497,35 @@ export function ConfigCenter() {
   const hasRawChanges = rawDraft !== null && rawDraft !== rawConfig;
 
   /**
+   * Reports a finished operation as a toast once the import dialog is out of the way.
+   *
+   * The page used to render this as a banner pinned below the list, where it stayed until the next
+   * operation replaced it — a permanent record of a momentary event, in the space the list's own
+   * footer belongs to. A toast says the same thing at the moment it happens and then leaves.
+   *
+   * `handledParseState` holds the exact state object already reported, so a message appears once.
+   * While the dialog is open the message belongs beside the text being imported, so it is marked
+   * handled without a toast — closing the dialog afterwards does not then repeat it.
+   */
+  const handledParseState = useRef<typeof parseState | null>(null);
+  useEffect(() => {
+    if (parseState.type === "idle") return;
+    if (handledParseState.current === parseState) return;
+    handledParseState.current = parseState;
+    if (importOpen) return;
+    toast({
+      variant: parseState.type === "error" ? "error" : "success",
+      // A caller-supplied title wins. Forcing "需要修正配置" onto every error meant a cancelled test
+      // or a failed source audit announced itself as a broken configuration file, which is a
+      // different problem entirely.
+      title:
+        parseState.title ??
+        (parseState.type === "success" ? "解析完成" : "需要修正配置"),
+      description: parseState.message,
+    });
+  }, [parseState, importOpen, toast]);
+
+  /**
    * Auto-save, debounced.
    *
    * Every keystroke must not become a database write — a visual edit fires on blur, but the code
@@ -1433,10 +1561,17 @@ export function ConfigCenter() {
     });
   };
 
-  const commitParsedConfig = async (result: ParseResult) => {
+  const commitParsedConfig = async (
+    result: ParseResult,
+    options: { rawOverride?: string; successNote?: string } = {},
+  ) => {
     const parsedCounts = countParsedCapabilities(result.sources);
 
-    let mergedRawText = importText;
+    // The text to merge. Normally the editor's, but the 多仓 bulk path has already merged several
+    // documents in memory and hands the result over here rather than routing it through the editor.
+    const incomingText = options.rawOverride ?? importText;
+
+    let mergedRawText = incomingText;
     let mergeReport: MergeReport | null = null;
     if (sources.length > 0 && rawConfig.trim()) {
       // Merging runs on the raw text, not on the parsed sources: the parsed model does not carry
@@ -1446,7 +1581,7 @@ export function ConfigCenter() {
       const incomingRaw = parseRawObject(
         JSON.stringify(
           absolutizeRelativeSites(
-            parseRawObject(importText) ?? {},
+            parseRawObject(incomingText) ?? {},
             configBaseUrl ?? null,
           ),
         ),
@@ -1468,7 +1603,7 @@ export function ConfigCenter() {
     const finalSources = sourceMerge.sources;
     const mergedParse = mergeReport ? parseConfigText(mergedRawText, configBaseUrl) : result;
 
-    const name = configName.trim() || activeDocument?.name || "中心配置";
+    const name = activeDocument?.name || "中心配置";
 
     // `replaceAll` rather than `save`: there is exactly one configuration, so the write is "the
     // centre configuration is now this", not "add another one". Using an insert here would quietly
@@ -1510,9 +1645,13 @@ export function ConfigCenter() {
     );
     setParseState({
       type: "success",
-      message: mergeReport
-        ? `已合并进「${name}」：新增 ${sourceMerge.added} 个源，更新 ${sourceMerge.updated} 个，${sourceMerge.unchanged} 个原本就有；当前共 ${finalSources.length} 个源。`
-        : `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`,
+      // A caller-supplied note wins: the 多仓 bulk path knows how many documents it merged and which
+      // addresses failed, and that is more useful than the generic merge sentence.
+      message:
+        options.successNote ??
+        (mergeReport
+          ? `已合并进「${name}」：新增 ${sourceMerge.added} 个源，更新 ${sourceMerge.updated} 个，${sourceMerge.unchanged} 个原本就有；当前共 ${finalSources.length} 个源。`
+          : `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`),
     });
     setImportOpen(false);
   };
@@ -1873,13 +2012,21 @@ export function ConfigCenter() {
                                 </div>
                                 <div className="min-w-0">
                                   <p className="font-medium">{source.name}</p>
-                                  <p className="text-xs text-muted-foreground">
-                                    {source.key} ·{" "}
-                                    {source.sourceType === "cms"
-                                      ? "普通 CMS"
-                                      : source.sourceType === "live"
-                                        ? "直播源"
-                                        : "解析服务"}
+                                  {/* The second line used to read `{source.key} · 直播源`, which put
+                                      the configuration author's own identifier in front of the
+                                      reader. Measured on the owner's file: three live sources carry
+                                      the keys `-7`, `-8` and `-9`, and no one can tell what those
+                                      mean — they are array indices the publisher invented. The
+                                      address is what actually identifies a source to a person, so
+                                      that is what this shows, with the kind as the fallback when
+                                      there is no address. */}
+                                  <p className="truncate text-xs text-muted-foreground">
+                                    {source.api?.trim() ||
+                                      (source.sourceType === "cms"
+                                        ? "普通 CMS"
+                                        : source.sourceType === "live"
+                                          ? "直播源"
+                                          : "解析服务")}
                                   </p>
                                 </div>
                               </div>
@@ -2034,9 +2181,13 @@ export function ConfigCenter() {
                 ) : (
                   /* Padded to match the table's own inset: the card's content area has no
                      padding (the table brings its own), so an empty state flush against it
-                     pressed its dashed border against the card edge. */
-                  <div className="p-4">
-                    <Empty className="min-h-72">
+                     pressed its dashed border against the card edge.
+                     The wrapper is also a flex column that takes the remaining height, and that is
+                     load-bearing: `Empty` carries `flex-1`, but inside a plain block `flex-1` does
+                     nothing, so the dashed border stopped wherever its own content ended and left a
+                     gap above the card's bottom edge. */
+                  <div className="flex min-h-0 flex-1 flex-col p-4">
+                    <Empty>
                       <EmptyHeader>
                         <EmptyMedia variant="icon">
                           <Search className="size-4" data-icon="inline-start" aria-hidden="true" />
@@ -2386,29 +2537,13 @@ export function ConfigCenter() {
           </TabsContent>
         </Tabs>
 
-        {/* The status banner belongs to the page, not to the import dialog. It used to be
-            rendered inside that dialog, so every message it carried — a finished test run, a
-            cancelled one, a deleted source — was invisible unless the user happened to have the
-            import dialog open. Only the import-specific notice stays there. */}
-        {parseState.type !== "idle" && !importOpen && (
-          <Alert
-            variant={parseState.type === "error" ? "destructive" : "default"}
-          >
-            {parseState.type === "success" ? (
-              <Check className="size-4" data-icon="inline-start" aria-hidden="true" />
-            ) : (
-              <AlertTriangle className="size-4" data-icon="inline-start" aria-hidden="true" />
-            )}
-            <AlertTitle>
-              {/* A caller-supplied title wins. Forcing "需要修正配置" onto every error meant a
-                  cancelled test or a failed source audit announced itself as a broken
-                  configuration file, which is a different problem entirely. */}
-              {parseState.title ??
-                (parseState.type === "success" ? "解析完成" : "需要修正配置")}
-            </AlertTitle>
-            <AlertDescription>{parseState.message}</AlertDescription>
-          </Alert>
-        )}
+        {/* The page-level banner is gone: every message it carried is now a toast.
+            
+            It sat at the bottom of the page and stayed there, so a finished import kept announcing
+            itself until the next operation replaced it — a permanent record of a momentary event,
+            occupying the space where the source list's own footer belongs. A toast says the same
+            thing at the moment it happens and then leaves. The in-dialog copy below is unchanged:
+            while the import dialog is open, its message belongs beside the text being imported. */}
       </div>
 
       <Dialog
@@ -2426,12 +2561,10 @@ export function ConfigCenter() {
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
-            <Input
-              value={configName}
-              onChange={(event) => setConfigName(event.target.value)}
-              placeholder="例如：主用影视源、备用直播源"
-              aria-label="配置名称"
-            />
+            {/* No 配置名称 field: an import merges into 中心配置, so the name the user typed was
+                discarded immediately — the document keeps the centre configuration's own name. Asking
+                for a value that cannot be used is worse than not asking: it implies the import
+                creates something separate, which is exactly the model this page removed. */}
             <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/50 p-1">
               <Button
                 type="button"
@@ -2538,18 +2671,37 @@ export function ConfigCenter() {
               <div className="flex min-h-0 flex-1 flex-col gap-2 rounded-md border bg-muted/20 p-3">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs text-muted-foreground">
-                    这份列表来自 {multiRepo.from}，共 {multiRepo.entries.length} 个配置，选一个导入：
+                    这份列表来自 {multiRepo.from}，共 {multiRepo.entries.length} 个配置。
                   </p>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="shrink-0"
-                    onClick={() => setMultiRepo(null)}
-                  >
-                    <X className="size-3.5" aria-hidden="true" />
-                    关闭
-                  </Button>
+                  <div className="flex shrink-0 items-center gap-1">
+                    {/* One button for the whole list. Eighteen addresses is eighteen trips through
+                        this dialog otherwise, and the editor holds one document at a time, so
+                        "import them all" was not expressible before. */}
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="gap-1.5"
+                      disabled={isImportingAll}
+                      onClick={() => void handleImportAllMultiRepo()}
+                    >
+                      {isImportingAll ? (
+                        <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <Download className="size-3.5" aria-hidden="true" />
+                      )}
+                      {isImportingAll ? "合并中…" : `全部合并导入 (${multiRepo.entries.length})`}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="shrink-0"
+                      onClick={() => setMultiRepo(null)}
+                    >
+                      <X className="size-3.5" aria-hidden="true" />
+                      关闭
+                    </Button>
+                  </div>
                 </div>
                 <ScrollArea className="min-h-0 flex-1 rounded-md border bg-background">
                   <div className="flex flex-col">
