@@ -15,7 +15,6 @@ import {
   Blocks,
   Braces,
   Check,
-  ChevronDown,
   CircleAlert,
   Code2,
   CircleCheck,
@@ -2047,12 +2046,28 @@ export function ConfigCenter() {
                           }}
                           disabled={testableSources.length === 0 || testingKeys.size > 0}
                         >
+                          {/* No chevron is drawn here: `SelectTrigger` already renders its own inside a
+                              `SelectPrimitive.Icon`. Adding a second one is what made this control show
+                              two carets.
+
+                              `SelectValue` is kept even though the trigger is icon-only, because
+                              `item-aligned` positioning measures that node to lay the menu over the
+                              trigger; without it Radix has nothing to measure and the menu never
+                              appeared. It is `sr-only` so it still names the current scope for screen
+                              readers without adding a visible label to a caret-sized button.
+
+                              `position` is left at its `item-aligned` default deliberately. Measured
+                              in jsdom, `popper` made the first timer after opening the menu take
+                              **18 683 ms** against 32 ms for `item-aligned` — the floating-ui
+                              measurement loop never settles there, which starved `waitFor` and timed
+                              the scope test out. It was not needed: `item-aligned` positions this menu
+                              correctly, as the browser check confirms. */}
                           <SelectTrigger
                             size="sm"
-                            className="w-7 rounded-l-none px-0"
+                            className="w-8 justify-center rounded-l-none px-0"
                             aria-label="测速范围"
                           >
-                            <ChevronDown className="size-3.5" aria-hidden="true" />
+                            <SelectValue className="sr-only" />
                           </SelectTrigger>
                           <SelectContent align="end">
                             <SelectItem value="all">
