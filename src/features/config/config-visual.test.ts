@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { RawSiteSchema, RAW_FLAG_FIELDS } from "@/features/config/config-schema";
 import {
   addVisualEntry,
   canSaveVisualConfig,
@@ -217,6 +218,47 @@ describe("editing through the visual model", () => {
       ).text,
     );
     expect(booleanFlag.sites[0].filterable).toBe(true);
+  });
+
+  it("writes a real boolean when the flag was not there at all", () => {
+    // The defect that made a whole configuration unsaveable. The switches send the STRINGS
+    // "true"/"false"; the conversion back to a boolean only ran when the entry already carried a
+    // numeric flag or a boolean. For a field the entry does not have — the ordinary case, since
+    // TVBox omits defaults — every branch was skipped and the string was written straight into a
+    // slot the schema requires to be a boolean. One such field then failed validation for the entire
+    // document, so nothing could be saved and the error named neither the field nor the entry.
+    const raw = JSON.stringify({
+      sites: [{ key: "a", name: "甲", api: "https://a.example/api" }],
+    });
+
+    const on = JSON.parse(
+      updateVisualEntryField(raw, "sites", 0, "searchable", "true").text,
+    ) as { sites: { searchable: unknown }[] };
+    expect(on.sites[0].searchable).toBe(true);
+
+    const off = JSON.parse(
+      updateVisualEntryField(raw, "sites", 0, "filterable", "false").text,
+    ) as { sites: { filterable: unknown }[] };
+    expect(off.sites[0].filterable).toBe(false);
+  });
+
+  it("writes a boolean for every flag field the schema declares", () => {
+    // The list of flag names is shared with the schema on purpose: it had been maintained as a second
+    // copy here, and the two drifting apart is what let the writer produce a value the schema
+    // rejected. This walks the shared list so a name added to one side without the other fails here.
+    for (const field of RAW_FLAG_FIELDS) {
+      const raw = JSON.stringify({
+        sites: [{ key: "a", name: "甲", api: "https://a.example/api" }],
+      });
+      const written = JSON.parse(
+        updateVisualEntryField(raw, "sites", 0, field, "true").text,
+      ) as { sites: Record<string, unknown>[] };
+      expect(typeof written.sites[0][field], `${field} must be a boolean`).toBe("boolean");
+
+      // And the schema accepts it, which is the property that actually matters.
+      const accepted = RawSiteSchema.safeParse(written.sites[0]);
+      expect(accepted.success, `${field} must satisfy the schema`).toBe(true);
+    }
   });
 
   it("removes one entry and leaves the rest alone", () => {

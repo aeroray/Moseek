@@ -7,10 +7,8 @@ import {
   type DragEvent,
 } from "react";
 import {
-  Activity,
   AlertTriangle,
   AlignLeft,
-  ArrowRight,
   Blocks,
   Braces,
   Check,
@@ -31,7 +29,6 @@ import {
   Search,
   Save,
   ShieldAlert,
-  ShieldCheck,
   TestTube2,
   Trash2,
   Upload,
@@ -43,7 +40,6 @@ import { CapabilityBadge } from "@/components/capability-badge";
 import { useToast } from "@/components/toast-host";
 import { JsonEditor } from "@/components/json-editor";
 import { ConfigVisualEditor } from "@/features/config/config-visual-editor";
-import { canSaveVisualConfig } from "@/features/config/config-visual";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -121,12 +117,7 @@ import {
   isFilterUnfiltered,
   matchesSourceFilterState,
 } from "@/features/config/source-filter";
-import {
-  groupIssues,
-  healthVerdict,
-  summarizeSourceHealth,
-  type SourceHealthGroup,
-} from "@/features/config/config-report";
+import { resolveSavePayload } from "@/features/config/config-autosave";
 import {
   SourceFilterFacets,
   SourceFilterTrigger,
@@ -178,8 +169,16 @@ import type {
  */
 type ImportMode = "remote" | "local";
 
-/** The page's four tabs. Named so the health rows can navigate to the source list. */
-type ConfigTab = "sources" | "adapters" | "raw" | "report";
+/** The page's three tabs. */
+type ConfigTab = "sources" | "adapters" | "raw";
+
+/**
+ * How long the editor waits after the last keystroke before writing.
+ *
+ * Long enough that typing a key does not trigger a write, short enough that a pause reads as
+ * "saved". The status line updates the moment it lands, so the value is not load-bearing.
+ */
+const AUTO_SAVE_DELAY_MS = 600;
 
 /** The two views of the configuration document. */
 type RawMode = "visual" | "code";
@@ -305,26 +304,6 @@ export function ConfigCenter() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const liveRecoveryAttempts = useRef(new Set<number>());
   const editorText = rawDraft ?? rawConfig;
-  /**
-   * The parsed configuration the report describes.
-   *
-   * Derived from the SAVED document on every render rather than read from a stored result. It used
-   * to be `parseResult ?? parseConfigText(rawConfig)`, and `parseResult` was written by the import
-   * dialog's parse step — which stores its result even when the parse FAILED, and which nothing
-   * cleared when the dialog was closed. So pasting broken text into the dialog and having it
-   * rejected left the report announcing 配置无法解析 about a document that was perfectly valid, and a
-   * configuration that was fetched and then abandoned could go on being described.
-   *
-   * Recomputing is cheap next to the correctness it buys: `parseConfigText` is a JSON5 parse plus a
-   * schema pass over a few hundred entries, and this is the tab whose entire value is being current.
-   * It deliberately reads `rawConfig` rather than `editorText`: the report describes the document as
-   * saved, and unsaved edits are reported by the 保存改动 button instead. Parsing the draft here
-   * would make the report claim sources the document does not have.
-   */
-  const report = useMemo(
-    () => (rawConfig.trim() ? parseConfigText(rawConfig, configBaseUrl) : null),
-    [rawConfig, configBaseUrl],
-  );
   const activeDocument =
     activeConfigId === null ? undefined : configDocumentCache[activeConfigId];
   const relativeLiveSources = useMemo(
@@ -343,19 +322,6 @@ export function ConfigCenter() {
       : (scriptArchives.find(
           (archive) => archive.id === inspectedSource.scriptArchiveId,
         ) ?? undefined);
-  /**
-   * The report's two halves, both derived from live state.
-   *
-   * The health half reads `sources` — the list the page is showing — not the parse, because the
-   * question it answers ("can I watch anything") is about those records, including the test results
-   * that only exist on them. The findings half reads the parse, because a structural problem in the
-   * text is not visible on a source record.
-   */
-  const reportHealth = useMemo(() => summarizeSourceHealth(sources), [sources]);
-  const reportFindings = useMemo(
-    () => (report?.ok ? groupIssues(report.issues, report) : []),
-    [report],
-  );
   const testableSources = useMemo(
     () => sources.filter(isTestableSource),
     [sources],
@@ -1159,100 +1125,122 @@ export function ConfigCenter() {
   };
 
   /**
-   * Checks the configuration without changing it.
+   * Checks the configuration and repairs what it can, in one action.
    *
-   * Formatting and repairing both rewrite the file, so a user who only wants to know whether it is
-   * valid had no way to ask. This reports what the parser sees — including how many sources it found
-   * and which ones are unusable — and leaves the text alone.
+   * 校验 and 自动修正 were two buttons over the same text, and the pair was backwards: 校验 only
+   * reported what 自动修正 could then fix, so the user had to read the diagnosis and press a second
+   * button for the obvious next step. Worse, neither touched a type problem — the button named 自动修正
+   * reported "未发现可自动修正的问题" over a document that could not be saved at all, which is the
+   * behaviour the user reported and was right to doubt.
+   *
+   * So this repairs first and then reports. `repairConfigText` now coerces string spellings of the
+   * flag fields back to booleans as well as handling syntax, so the common "cannot be saved" causes
+   * are actually fixed rather than merely described.
    */
-  const handleValidateRaw = () => {
-    const result = parseConfigText(editorText, configBaseUrl);
-    if (!result.ok) {
+  const handleCheckAndFixRaw = () => {
+    const repaired = repairConfigText(editorText);
+
+    if (!repaired.ok) {
+      // The text is not even readable, so there is nothing to repair. Say where the problem is and
+      // leave the text alone — the user is looking at the editor and has to find it themselves.
       setRawStatus({
         tone: "error",
-        message: describeRawIssue("校验未通过", result.issues[0]),
+        message: describeRawIssue("检查未通过，需要手动修正", repaired.issue),
       });
       return;
     }
-    const unusable = result.sources.filter((source) => !isTestableSource(source)).length;
+
+    const changed = repaired.text !== editorText;
+    if (changed) {
+      // The edit goes through the normal change path, so the debounced auto-save picks it up and the
+      // repair lands without a second action.
+      handleRawTextChange(repaired.text);
+    }
+
+    // Report on the text that will now be saved, so the message describes the state the user is left
+    // in rather than the one they were in a moment ago.
+    const after = parseConfigText(repaired.text, configBaseUrl);
+    const issues = after.issues.length;
+    const unusable = after.ok
+      ? after.sources.filter((source) => !isTestableSource(source)).length
+      : 0;
+    const parts: string[] = [];
+    parts.push(changed ? `已修正：${repaired.changes.join("、")}` : "没有可自动修正的问题");
+    if (after.ok) {
+      parts.push(
+        `识别到 ${after.sources.length} 个源` +
+          (after.liveCount > 0 ? `（其中直播源 ${after.liveCount} 个）` : "") +
+          (unusable > 0 ? `，${unusable} 个没有可用适配器` : "，全部有可用适配器"),
+      );
+      if (issues > 0) parts.push(`另有 ${issues} 处需要留意`);
+    } else {
+      parts.push(`仍有无法解析的问题：${after.issues[0]?.message ?? "未知错误"}`);
+    }
+
     setRawStatus({
-      tone: "success",
-      message:
-        `校验通过：识别到 ${result.sources.length} 个源` +
-        (result.liveCount > 0 ? `（其中直播源 ${result.liveCount} 个）` : "") +
-        (unusable > 0 ? `，${unusable} 个没有可用适配器。` : "，全部有可用适配器。"),
+      tone: !after.ok ? "error" : changed ? "success" : "info",
+      message: `${parts.join("；")}。`,
     });
   };
 
-  /** Applies the automatic repairs the import path knows about. */
-  const handleRepairRaw = () => {
-    const result = repairConfigText(editorText);
-    if (!result.ok) {
-      setRawStatus({ tone: "error", message: describeRawIssue("修正失败", result.issue) });
-      return;
-    }
-    // `repairConfigText` reports "found nothing" as a change entry rather than as an empty list, so
-    // the check is on the text rather than on the list: writing an identical string back would
-    // re-serialise the document and drop comments for no reason.
-    if (result.text === editorText) {
-      setRawStatus({ tone: "info", message: "没有找到需要修正的地方。" });
-      return;
-    }
-    handleRawTextChange(result.text);
-    setRawStatus({ tone: "success", message: `${result.changes.join("、")}。` });
-  };
-
   /**
-   * Saves the edited configuration as the current one.
+   * Writes the editor's current text to the stored configuration.
    *
-   * The raw tab previously had no save at all: edits went into a draft that only the import dialog
-   * read, so a change made in the visual editor — or in the code editor — was silently discarded
-   * unless the user happened to open 导入配置 and confirm. Managing a configuration means the change
-   * has to be able to land.
+   * **There is no manual save.** The user asked for the text to land whether or not it is valid,
+   * because a configuration is their own work and refusing to store it turns a typo into lost
+   * effort. This used to refuse the save outright (`配置无法保存，请先修正`) and also refused anything
+   * whose syntax JSON5 could not read, so a broken file could not even be saved in order to be fixed.
    *
-   * The source list is merged from the *existing* records against the new parse rather than taken
-   * from the parse. That is what preserves the user's own switches: an edited entry keeps its
-   * `enabled` and test state because it is the same source by identity, while a deleted one simply
-   * has no counterpart and drops out. Taking the parse directly would reset every switch on the page
-   * each time a name was corrected.
+   * The text always lands. `resolveSavePayload` decides what happens to the derived state: a
+   * parseable text regenerates it, an unparseable one keeps the previous, so a typo never looks like
+   * "all my sources are gone".
+   *
+   * The source list is merged from the *existing* records rather than replaced by the parse. That is
+   * what preserves the user's own switches: an edited entry keeps its `enabled` and test state
+   * because it is the same source by identity, while a deleted one has no counterpart and drops out.
+   * Taking the parse directly would reset every switch each time a name was corrected.
+   *
+   * `options.silent` is for the debounced background save: it must not replace the status line the
+   * user is currently reading with a "已保存" message on every keystroke.
    */
-  const handleSaveRaw = async () => {
-    // The guard is a separate function so it can be tested: the editor that can produce invalid text
-    // is CodeMirror, which a jsdom test cannot type into, and this is the check that stops an
-    // unreadable file from replacing a working configuration.
-    const allowed = canSaveVisualConfig(editorText);
-    if (!allowed.ok) {
-      setRawStatus({ tone: "error", message: allowed.message });
-      return;
-    }
-    const result = parseConfigText(editorText, configBaseUrl);
-    if (!result.ok) {
-      setRawStatus({
-        tone: "error",
-        message: describeRawIssue("配置无法保存，请先修正", result.issues[0]),
-      });
-      return;
-    }
+  const saveEditorText = async (
+    text: string,
+    options: { silent?: boolean } = {},
+  ) => {
+    const trimmed = text.trim();
+    // `null` means "empty text", which is a state of its own rather than a parse failure — see
+    // `resolveSavePayload`.
+    const parsed = trimmed ? parseConfigText(text, configBaseUrl) : null;
+    const payload = resolveSavePayload({
+      text,
+      parsed,
+      previousSources: sources,
+      previousNormalizedConfig:
+        activeDocument?.normalizedConfig ?? normalizedConfig,
+      previousLiveCount: activeDocument?.liveCount ?? sources.filter(
+        (source) => source.sourceType === "live",
+      ).length,
+    });
+
     setIsSavingRaw(true);
     try {
-      const merged = mergeSourceLists(sources, result.sources).sources;
       const name = activeDocument?.name ?? "中心配置";
       const saved = await replaceAllConfigDocuments({
         name,
-        rawConfig: editorText,
-        normalizedConfig: result.normalizedConfig,
-        sources: merged,
-        liveCount: result.liveCount,
+        rawConfig: payload.rawConfig,
+        normalizedConfig: payload.normalizedConfig,
+        sources: payload.sources,
+        liveCount: payload.liveCount,
         sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
       });
       const document: StoredConfigDocument = saved ?? {
         id: activeConfigId ?? -Date.now(),
         name,
-        rawConfig: editorText,
-        normalizedConfig: result.normalizedConfig,
-        sources: merged,
-        sourceCount: merged.length,
-        liveCount: result.liveCount,
+        rawConfig: payload.rawConfig,
+        normalizedConfig: payload.normalizedConfig,
+        sources: payload.sources,
+        sourceCount: payload.sources.length,
+        liveCount: payload.liveCount,
         importedAt: new Date().toISOString(),
         sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
       };
@@ -1260,10 +1248,13 @@ export function ConfigCenter() {
       // The draft is dropped so the editors read the saved document again; keeping it would leave
       // the page showing text that no longer matches what is stored.
       setRawDraft(null);
-      setRawStatus({
-        tone: "success",
-        message: `已保存：${merged.length} 个源。`,
-      });
+      setRawStatus(
+        payload.warning
+          ? { tone: "error", message: payload.warning }
+          : options.silent
+            ? rawStatus
+            : { tone: "success", message: `已自动保存：${payload.sourceCount} 个源。` },
+      );
     } catch (error) {
       setRawStatus({
         tone: "error",
@@ -1274,8 +1265,31 @@ export function ConfigCenter() {
     }
   };
 
-  /** Whether the open document has unsaved edits, so the save button can say so. */
+  /**
+   * Whether the open document has edits that have not landed yet. */
   const hasRawChanges = rawDraft !== null && rawDraft !== rawConfig;
+
+  /**
+   * Auto-save, debounced.
+   *
+   * Every keystroke must not become a database write — a visual edit fires on blur, but the code
+   * editor fires per character and rewriting the whole document (and the source list) on each one
+   * would be both slow and a lot of churn for the SQLite writer. The delay is short enough that a
+   * user who stops typing sees the change land before they can move on, and `hasRawChanges` going
+   * false is the visible proof it did.
+   *
+   * Only a draft triggers it. `rawDraft === null` means the editors are showing the stored document,
+   * so saving would be a no-op write that also bumps `importedAt`.
+   */
+  useEffect(() => {
+    if (!hasRawChanges || isSavingRaw) return;
+    const timer = window.setTimeout(() => {
+      void saveEditorText(rawDraft ?? "", { silent: true });
+    }, AUTO_SAVE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+    // `saveEditorText` is recreated each render, so depending on it would restart the timer on every
+    // render and the save would never fire. The inputs it actually reads are listed instead.
+  }, [rawDraft, rawConfig, hasRawChanges, isSavingRaw, configBaseUrl, activeConfigId, sources]);
 
   const saveParseError = (error: unknown) => {
     const message =
@@ -1513,10 +1527,6 @@ export function ConfigCenter() {
               <TabsTrigger value="raw" className="gap-1.5">
                 <Code2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                 原始配置
-              </TabsTrigger>
-              <TabsTrigger value="report" className="gap-1.5">
-                <Activity className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                源健康
               </TabsTrigger>
             </TabsList>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -2141,48 +2151,51 @@ export function ConfigCenter() {
                           <AlignLeft className="size-3.5" data-icon="inline-start" aria-hidden="true" />
                           格式化
                         </Button>
+                        {/* One button, not two.
+                            校验 and 自动修正 were separate actions over the same text, and 校验 only
+                            ever reported what 自动修正 could then have fixed — so the pair made the
+                            user do the diagnosis themselves and press twice for one outcome. The
+                            merged action repairs what it can and then reports what is left, which is
+                            both halves in the order they are useful. */}
                         <Button
                           type="button"
                           variant="outline"
                           size="sm"
                           className="gap-1.5"
                           disabled={!editorText.trim()}
-                          onClick={handleValidateRaw}
-                        >
-                          <ShieldCheck className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                          校验
-                        </Button>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5"
-                          disabled={!editorText.trim()}
-                          onClick={handleRepairRaw}
+                          onClick={handleCheckAndFixRaw}
                         >
                           <WandSparkles className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                          自动修正
+                          检查并修正
                         </Button>
                       </>
                     )}
-                    {/* The save action is shared: a change made in either view is a change to the
-                        same document, and having it only in one would make the other look like it
-                        saved by itself. Disabled until there is something to save, so the button
-                        also answers "are my edits applied". */}
-                    <Button
-                      type="button"
-                      size="sm"
-                      className="gap-1.5"
-                      disabled={!hasRawChanges || isSavingRaw}
-                      onClick={() => void handleSaveRaw()}
+                    {/* No save button: edits save themselves. What the user needs from this corner is
+                        not an action but the state — whether their text has landed, and whether the
+                        app could read it. It is a status, not a control, which is also why it can no
+                        longer be pressed at the wrong moment. */}
+                    <span
+                      role="status"
+                      aria-label="自动保存状态"
+                      className="flex items-center gap-1.5 text-xs text-muted-foreground"
                     >
                       {isSavingRaw ? (
-                        <LoaderCircle className="size-3.5 animate-spin" data-icon="inline-start" aria-hidden="true" />
+                        <>
+                          <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+                          正在保存…
+                        </>
+                      ) : hasRawChanges ? (
+                        <>
+                          <Save className="size-3.5" aria-hidden="true" />
+                          等待自动保存…
+                        </>
                       ) : (
-                        <Save className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                        <>
+                          <Check className="size-3.5" aria-hidden="true" />
+                          已自动保存
+                        </>
                       )}
-                      {hasRawChanges ? "保存改动" : "已保存"}
-                    </Button>
+                    </span>
                   </div>
                 </div>
               </CardHeader>
@@ -2217,6 +2230,7 @@ export function ConfigCenter() {
                 <div className="shrink-0 border-t border-border/60 px-3 py-2.5">
                   <div
                     role="status"
+                    aria-label="配置检查结果"
                     className={cn(
                       "flex items-start gap-2 rounded-md p-2.5 text-xs leading-5",
                       rawStatus.tone === "error"
@@ -2235,138 +2249,6 @@ export function ConfigCenter() {
                   </div>
                 </div>
               )}
-            </Card>
-          </TabsContent>
-
-          <TabsContent
-            value="report"
-            className="flex min-h-0 flex-1 flex-col gap-4"
-          >
-            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
-              <CardHeader className="shrink-0 border-b pb-4 pt-5">
-                <CardTitle className="flex items-center gap-2 text-base">
-                  <Activity className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                  源健康
-                </CardTitle>
-                <CardDescription>
-                  这些源现在能不能用，以及配置里还有哪些问题要修。来自最近一次测速。
-                </CardDescription>
-              </CardHeader>
-              {/* The content carries no padding and does not scroll; the inner wrapper does both.
-                  That is the structure the table tabs use, and it is what keeps the scrollbar from
-                  shifting the content: the bar is drawn over the padding rather than taking width
-                  from it. A native `overflow-y-auto` on the content box itself cost 6px of width
-                  and made the block edges asymmetric — 16px on the left, 22px on the right. */}
-              <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-                {report ? (
-                  /* A verdict about the sources, then the two things a reader can act on: the state
-                     each source is in, and the problems that block it. The verdict used to be
-                     "配置解析成功，已识别 27 个源" — a statement about our parser, and a count that
-                     disagreed with the header badge (26) because it counted raw entries rather than
-                     stored sources. */
-                  <ScrollArea className="min-h-0 flex-1" viewportClassName="[&>div]:!block">
-                    <div className="flex flex-col gap-5 px-4 py-4">
-                    <ReportVerdict
-                      ok={report.ok}
-                      verdict={healthVerdict(sources)}
-                      failureMessage={
-                        report.issues[0]?.message ?? "配置结构无法解析"
-                      }
-                    />
-
-                    {report.ok && (
-                      <section className="flex flex-col gap-2">
-                        <h3 className="text-sm font-medium">源的状态</h3>
-                        {/* Every row is a count the reader can reach: the label is the word the
-                            source list puts on those rows, the sentence says what it means, and the
-                            whole row opens the list filtered to exactly them. The report used to
-                            state counts with nowhere to go — "7 处需要留意" and no way to find out
-                            which seven. */}
-                        <div className="flex flex-col gap-1.5">
-                          {reportHealth.map((group) => (
-                            <HealthRow
-                              key={group.key}
-                              group={group}
-                              onOpen={() => {
-                                setSourceFilter(group.filter);
-                                setActiveTab("sources");
-                              }}
-                            />
-                          ))}
-                        </div>
-                        <p className="px-1 text-xs leading-5 text-muted-foreground">
-                          测速结果只反映「上一次测试」，不会自动更新。点一行可以只看这些源。
-                        </p>
-                      </section>
-                    )}
-
-                    {reportFindings.length > 0 && (
-                      <section className="flex flex-col gap-2">
-                        <h3 className="flex items-center gap-2 text-sm font-medium">
-                          <AlertTriangle
-                            className="size-3.5 text-[color:var(--status-partial)]"
-                            aria-hidden="true"
-                          />
-                          配置里需要修正的 {reportFindings.length} 类问题
-                        </h3>
-                        <div className="divide-y divide-border/60 rounded-lg border border-border/60">
-                          {/* Grouped by what they say, and named by what they are about. The old
-                              list printed `parses.41` four times over — an index into an array the
-                              reader has never seen, and the single biggest reason this tab was
-                              unreadable. */}
-                          {reportFindings.map((finding) => (
-                            <div
-                              key={finding.message}
-                              className="flex items-start gap-3 px-3 py-2.5"
-                            >
-                              <span
-                                className={cn(
-                                  "mt-0.5 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium",
-                                  finding.severity === "error"
-                                    ? "bg-destructive/15 text-destructive"
-                                    : "bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]",
-                                )}
-                              >
-                                {finding.severity === "error" ? "无法使用" : "留意"}
-                              </span>
-                              <div className="min-w-0 flex-1">
-                                <p className="text-sm text-foreground">{finding.message}</p>
-                                <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                                  {finding.targets.slice(0, 6).join("、")}
-                                  {finding.targets.length > 6
-                                    ? ` 等 ${finding.targets.length} 项`
-                                    : ""}
-                                </p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </section>
-                    )}
-
-                    {reportFindings.length === 0 && reportHealth.length <= 1 && (
-                      <p className="px-1 text-sm text-muted-foreground">
-                        配置结构没有问题，也不需要留意的地方。
-                      </p>
-                    )}
-                    </div>
-                  </ScrollArea>
-                ) : (
-                  <div className="px-4 py-4">
-                    <Empty className="min-h-64 border border-dashed bg-card/40">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <Activity data-icon="inline-start" aria-hidden="true" />
-                        </EmptyMedia>
-                        <EmptyTitle>还没有源</EmptyTitle>
-                        <EmptyDescription>
-                          导入并解析配置后，这里会说明这些源现在能不能用。
-                        </EmptyDescription>
-                      </EmptyHeader>
-                    </Empty>
-                  </div>
-                )}
-              </CardContent>
             </Card>
           </TabsContent>
         </Tabs>
@@ -3515,117 +3397,6 @@ function DetailRow({
         {value}
       </span>
     </div>
-  );
-}
-
-/**
- * The one-line answer to "can I watch anything with this configuration".
- *
- * It used to read "配置解析成功，已识别 27 个源" — a statement about our parser, not about the
- * reader's sources, and a number that disagreed with the header badge right above it (26) because it
- * counted raw entries rather than stored sources. The verdict now comes from `healthVerdict`, which
- * partitions the same list the header counts.
- */
-function ReportVerdict({
-  ok,
-  verdict,
-  failureMessage,
-}: {
-  ok: boolean;
-  verdict: string;
-  failureMessage: string;
-}) {
-  return (
-    <div
-      className={cn(
-        "flex items-start gap-3 rounded-lg border p-4",
-        ok
-          ? "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)]"
-          : "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)]",
-      )}
-    >
-      {ok ? (
-        <CircleCheck
-          className="mt-0.5 size-4 shrink-0 text-[color:var(--status-supported)]"
-          aria-hidden="true"
-        />
-      ) : (
-        <CircleX
-          className="mt-0.5 size-4 shrink-0 text-[color:var(--status-blocked)]"
-          aria-hidden="true"
-        />
-      )}
-      <div className="min-w-0">
-        <p
-          className={cn(
-            "font-medium",
-            ok
-              ? "text-[color:var(--status-supported)]"
-              : "text-[color:var(--status-blocked)]",
-          )}
-        >
-          {ok ? verdict : "配置无法解析"}
-        </p>
-        {!ok && (
-          <p className="mt-1 text-sm leading-5 text-muted-foreground">{failureMessage}</p>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * One state a source can be in, as a count that leads somewhere.
- *
- * A count with no way to reach the rows it describes is what made the old report useless — "7 处需要
- * 留意", and no way to find out which seven. So the whole row is the control: it opens the source
- * list filtered to exactly these sources, which is also what makes the numbers checkable.
- */
-function HealthRow({
-  group,
-  onOpen,
-}: {
-  group: SourceHealthGroup;
-  onOpen: () => void;
-}) {
-  // Only the states that need attention are coloured. 可用 and 待测试 are facts rather than alarms,
-  // and colouring them would make the row that matters harder to find.
-  const tone =
-    group.key === "usable"
-      ? "supported"
-      : group.key === "untested"
-        ? null
-        : group.key === "empty" || group.key === "needs-adapter"
-          ? "warning"
-          : "blocked";
-
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      className="flex w-full items-center gap-3 rounded-lg border border-border/60 bg-card/40 px-3 py-2.5 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
-    >
-      <span
-        className={cn(
-          "w-16 shrink-0 text-base font-semibold tabular-nums",
-          tone === "supported" && "text-[color:var(--status-supported)]",
-          tone === "warning" && "text-[color:var(--status-partial)]",
-          tone === "blocked" && "text-destructive",
-          tone === null && "text-foreground",
-        )}
-      >
-        {group.count}
-      </span>
-      <span className="min-w-0 flex-1">
-        <span className="flex items-center gap-1.5">
-          <span className="text-sm font-medium text-foreground">{group.label}</span>
-          <ArrowRight className="size-3 text-muted-foreground/60" aria-hidden="true" />
-        </span>
-        <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
-          {group.hint}
-        </span>
-      </span>
-    </button>
   );
 }
 

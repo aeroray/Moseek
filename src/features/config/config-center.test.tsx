@@ -217,13 +217,6 @@ function chooseRawMode(name: "可视化" | "代码") {
   fireEvent.click(tab);
 }
 
-/** Opens the 源健康 tab. Radix switches tabs on pointer-down, not click. */
-function openReportTab() {
-  const tab = screen.getByRole("tab", { name: "源健康" });
-  fireEvent.mouseDown(tab, { button: 0 });
-  fireEvent.click(tab);
-}
-
 /** Expands one section of the visual editor. Sections start collapsed. */
 function openVisualSection(title: string) {
   fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${title}`) }));
@@ -1115,10 +1108,10 @@ describe("config center", () => {
     ).toContain("pl-6");
   });
 
-  it("gives 原始配置 and 源健康 the same 16px content inset", () => {
-    // These two are the pair the user compared. 原始配置 was `p-3 pt-4` (12px) and the report was
-    // `p-5` (20px); both now carry no padding and an inner wrapper supplies 16px, so the block
-    // edges line up with the card header's own `px-4`.
+  it("gives 原始配置 the same 16px content inset as the list", () => {
+    // These two are the pair the user compared. 原始配置 was `p-3 pt-4` (12px); it now carries no
+    // padding and an inner wrapper supplies 16px, so the block edges line up with the card header's
+    // own `px-4`.
     renderCenter();
     openRawTab();
 
@@ -1136,16 +1129,6 @@ describe("config center", () => {
       "[data-slot='scroll-area-viewport'] > div > div",
     );
     expect(scrollContent?.className).toContain("px-4");
-
-    openReportTab();
-    const reportCard = screen
-      .getAllByText("源健康")
-      .map((node) => node.closest("[data-slot='card']"))
-      .find(Boolean);
-    expect(reportCard?.querySelector("[data-slot='card-content']")?.className).toContain("p-0");
-    expect(
-      reportCard?.querySelector("[data-slot='scroll-area-viewport'] > div > div")?.className,
-    ).toContain("px-4");
   });
 
   it("keeps the top inset, which the split padding had dropped", () => {
@@ -1198,19 +1181,6 @@ describe("config center", () => {
     const row = screen.getByRole("button", { name: "编辑 可用的源" }).closest("div.flex");
     expect(row?.className).toContain("py-2.5");
     expect(row?.className).toContain("px-2");
-  });
-
-  it("gives a report row the same padding as an entry row", () => {
-    // The report's rows sat at 34px from the card edge — the widest of the four tabs — because they
-    // carried `px-4` inside an already-padded content area. The health rows keep the entry rows'
-    // `px-3 py-2.5`, so the same reader finds the same rhythm across the page.
-    renderCenter();
-    openReportTab();
-
-    const label = screen.getByText("可用");
-    const row = label.closest("button");
-    expect(row?.className).toContain("px-3");
-    expect(row?.className).toContain("py-2.5");
   });
 
   it("sizes the raw editor from the space left, not a fixed height", () => {
@@ -1436,65 +1406,28 @@ describe("config center", () => {
   });
 
   it("offers the code view's helpers only in the code view", () => {
-    // Format, validate and repair act on text. Showing them over a form would suggest they apply
-    // to the form.
+    // Format and check act on text. Showing them over a form would suggest they apply to the form.
     renderCenter();
     openRawTab();
 
-    for (const name of ["格式化", "校验", "自动修正"]) {
+    for (const name of ["格式化", "检查并修正"]) {
       expect(screen.queryByRole("button", { name }), name).not.toBeInTheDocument();
     }
 
     chooseRawMode("代码");
-    for (const name of ["格式化", "校验", "自动修正"]) {
+    for (const name of ["格式化", "检查并修正"]) {
       expect(screen.getByRole("button", { name }), name).toBeInTheDocument();
     }
   });
 
-  it("reports what the configuration contains when asked to validate", () => {
-    // A user who only wants to know whether the file is valid had no way to ask: formatting and
-    // repairing both rewrite it. This reports without touching the text, which is asserted through
-    // the save button: an edit that reformatted would leave the document dirty and offer to save.
+  it("merges the check and the repair into one action", () => {
+    // They were two buttons over the same text, and 校验 only ever reported what 自动修正 could then
+    // fix — so the user read the diagnosis and pressed a second button for the obvious next step.
+    // One action repairs first and reports what is left.
     renderCenter();
     act(() => {
       useAppStore.setState({
-        // Deliberately unformatted, so a rewrite would be visible.
-        rawConfig: '{"sites":[{"key":"ok","name":"可用的源","api":"https://a.example/api"}]}',
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-    chooseRawMode("代码");
-
-    fireEvent.click(screen.getByRole("button", { name: "校验" }));
-
-    const status = screen.getByRole("status");
-    expect(status).toHaveTextContent("校验通过");
-    expect(status).toHaveTextContent(/识别到 \d+ 个源/);
-    // Nothing was edited, so there is nothing to save. A validate that quietly reformatted would
-    // leave the document dirty — which is the difference this asserts.
-    expect(screen.getByRole("button", { name: /已保存/ })).toBeDisabled();
-  });
-
-  it("says so when a check finds nothing to change", () => {
-    // "自动修正" that silently does nothing is indistinguishable from a broken button. It also must
-    // not write the text back: re-serialising an unchanged document would drop comments for nothing.
-    renderCenter();
-    openRawTab();
-    chooseRawMode("代码");
-
-    fireEvent.click(screen.getByRole("button", { name: "自动修正" }));
-
-    expect(screen.getByRole("status")).toHaveTextContent("没有找到需要修正的地方");
-  });
-
-  it("applies a repair it can actually make, and names it", () => {
-    // The other branch: a file with something to fix is rewritten, and the message says what was
-    // done rather than only that something happened.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        // A Markdown fence around the JSON, which the repair path knows how to strip.
+        // A Markdown fence, which the repair path knows how to strip.
         rawConfig: "```json\n{\"sites\":[]}\n```",
         normalizedConfig: "{}",
       });
@@ -1502,118 +1435,154 @@ describe("config center", () => {
     openRawTab();
     chooseRawMode("代码");
 
-    fireEvent.click(screen.getByRole("button", { name: "自动修正" }));
+    expect(screen.queryByRole("button", { name: "校验" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "自动修正" })).not.toBeInTheDocument();
 
-    const status = screen.getByRole("status");
+    fireEvent.click(screen.getByRole("button", { name: "检查并修正" }));
+
+    const status = screen.getByRole("status", { name: "配置检查结果" });
     expect(status).toHaveTextContent("移除 Markdown 代码围栏");
+    // It reports the state it left the user in, not just what it changed.
+    expect(status).toHaveTextContent(/识别到 \d+ 个源/);
   });
 
-  it("saves an edit made in the visual view", async () => {
-    // The raw tab previously had no save at all: edits went into a draft that only the import
-    // dialog read, so a change was discarded unless the user happened to open 导入配置 and confirm.
-    // Managing a configuration means the change has to be able to land.
-    renderCenter();
-    openRawTab();
-
-    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-    const nameField = screen.getByLabelText("name");
-    fireEvent.change(nameField, { target: { value: "改名后的源" } });
-    fireEvent.blur(nameField);
-
-    // The button reports that there is something to save, which is also how the user knows their
-    // edit is not already applied.
-    const save = screen.getByRole("button", { name: /保存改动/ });
-    expect(save).toBeEnabled();
-
-    vi.mocked(replaceAllConfigDocuments).mockClear();
-    fireEvent.click(save);
-
-    await waitFor(() => {
-      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
-    });
-    const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
-    expect(written.rawConfig).toContain("改名后的源");
-    // And the button settles back to 已保存, so the state of the page matches the state of storage.
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: /已保存/ })).toBeDisabled();
-    });
-  });
-
-  it("keeps the user's switches when a name is corrected", async () => {
-    // The save merges the existing records against the new parse rather than taking the parse
-    // directly. Taking it would reset every switch on the page each time a name was corrected.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        sources: useAppStore.getState().sources.map((source) =>
-          source.key === "ok" ? { ...source, enabled: false, testStatus: "passed" as const } : source,
-        ),
-      });
-    });
-    openRawTab();
-
-    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-    const nameField = screen.getByLabelText("name");
-    fireEvent.change(nameField, { target: { value: "改名的源" } });
-    fireEvent.blur(nameField);
-
-    vi.mocked(replaceAllConfigDocuments).mockClear();
-    fireEvent.click(screen.getByRole("button", { name: /保存改动/ }));
-
-    await waitFor(() => {
-      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
-    });
-    const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
-    const kept = written.sources.find((source) => source.key === "ok");
-    expect(kept?.enabled).toBe(false);
-    expect(kept?.testStatus).toBe("passed");
-  });
-
-  it("refuses to save a configuration it cannot parse, and says where", async () => {
-    // Saving invalid text would replace a working configuration with one that cannot be read. The
-    // draft is what the save reads, and the visual view cannot be driven to produce invalid text,
-    // so the refusal is reached through the store's document instead.
+  it("reports a configuration it could not repair", () => {
+    // The refusal has to say where the problem is: the user is looking at the editor and has to find
+    // it themselves. Text that is not even readable has nothing to repair.
     renderCenter();
     act(() => {
       useAppStore.setState({ rawConfig: "{ sites: [", normalizedConfig: "{}" });
     });
     openRawTab();
-    vi.mocked(replaceAllConfigDocuments).mockClear();
-
-    // The visual view reports that it cannot read the file rather than showing it as empty.
-    expect(screen.getByText("无法以可视化方式打开")).toBeInTheDocument();
-    // And the code view offers the helpers, with the save disabled because nothing was edited.
     chooseRawMode("代码");
-    expect(screen.getByRole("button", { name: /已保存/ })).toBeDisabled();
-    expect(replaceAllConfigDocuments).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "检查并修正" }));
+
+    expect(screen.getByRole("status", { name: "配置检查结果" })).toHaveTextContent(
+      /需要手动修正/,
+    );
   });
 
-  it("edits a source through the visual view and writes it back", () => {
-    // The point of the visual editor: changing a field is typing in a box, and the result reaches
-    // the save path. Asserted through the save, because a visual view that only updated its own
-    // state would still relabel the row and still enable the button.
+  it("saves an edit on its own, without a save button", async () => {
+    // The user asked for edits to land by themselves: needing to press 保存 turns a typo they are
+    // about to fix into a decision about whether their work is stored yet. Deletions and edits used
+    // to be discarded unless they pressed the button.
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      openRawTab();
+
+      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+      const nameField = screen.getByLabelText("name");
+      fireEvent.change(nameField, { target: { value: "改名后的源" } });
+      fireEvent.blur(nameField);
+
+      // No save button exists at all any more.
+      expect(screen.queryByRole("button", { name: /保存改动/ })).not.toBeInTheDocument();
+      // The status says the edit has not landed yet, which is how the user knows.
+      expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent(
+        "等待自动保存",
+      );
+
+      vi.mocked(replaceAllConfigDocuments).mockClear();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+      const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
+      expect(written.rawConfig).toContain("改名后的源");
+      // And the status settles, so the page agrees with storage.
+      expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent(
+        "已自动保存",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the user's switches when a name is corrected", async () => {
+    // The save merges the existing records against the new parse rather than taking the parse
+    // directly. Taking it would reset every switch on the page each time a name was corrected.
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      act(() => {
+        useAppStore.setState({
+          sources: useAppStore.getState().sources.map((source) =>
+            source.key === "ok" ? { ...source, enabled: false, testStatus: "passed" as const } : source,
+          ),
+        });
+      });
+      openRawTab();
+
+      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+      const nameField = screen.getByLabelText("name");
+      fireEvent.change(nameField, { target: { value: "改名的源" } });
+      fireEvent.blur(nameField);
+
+      vi.mocked(replaceAllConfigDocuments).mockClear();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+      const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
+      const kept = written.sources.find((source) => source.key === "ok");
+      expect(kept?.enabled).toBe(false);
+      expect(kept?.testStatus).toBe("passed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers no save button at all, only the auto-save state", () => {
+    // The user's instruction: edits save themselves. A save button is not only redundant, it is a
+    // decision the user should not have to make — whether the typo they are about to fix is stored
+    // yet. What replaces it is a status, which cannot be pressed at the wrong moment.
+    //
+    // The unparseable-text branch is covered where it lives, in `config-autosave.test.ts`: the
+    // visual view always re-serialises valid JSON, so it cannot be driven to produce broken text,
+    // and jsdom cannot type into the CodeMirror view that can.
     renderCenter();
     openRawTab();
 
-    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-    const nameField = screen.getByLabelText("name");
-    fireEvent.change(nameField, { target: { value: "改名后的源" } });
-    fireEvent.blur(nameField);
+    expect(screen.queryByRole("button", { name: /保存改动/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^保存$/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent("已自动保存");
+  });
 
-    // The row's label follows, which is the visual view reading its own document.
-    expect(screen.getByRole("button", { name: "编辑 改名后的源" })).toBeInTheDocument();
-    // The other entry is untouched.
-    expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
+  it("edits a source through the visual view and writes it back", async () => {
+    // The point of the visual editor: changing a field is typing in a box, and the result reaches
+    // storage. Asserted through the write, because a visual view that only updated its own state
+    // would still relabel the row.
+    vi.useFakeTimers();
+    try {
+      renderCenter();
+      openRawTab();
 
-    vi.mocked(replaceAllConfigDocuments).mockClear();
-    fireEvent.click(screen.getByRole("button", { name: /保存改动/ }));
-    return waitFor(() => {
+      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+      const nameField = screen.getByLabelText("name");
+      fireEvent.change(nameField, { target: { value: "改名后的源" } });
+      fireEvent.blur(nameField);
+
+      // The row's label follows, which is the visual view reading its own document.
+      expect(screen.getByRole("button", { name: "编辑 改名后的源" })).toBeInTheDocument();
+      // The other entry is untouched.
+      expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
+
+      vi.mocked(replaceAllConfigDocuments).mockClear();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+
       expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
-    }).then(() => {
       const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
       expect(written.rawConfig).toContain("改名后的源");
       expect(written.rawConfig).toContain("不可用的源");
-    });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("refuses to empty a required field, and says why", () => {
@@ -2646,206 +2615,6 @@ describe("config center", () => {
     await waitFor(() => {
       expect(screen.getByText(/已自动关闭该源的启用开关/)).toBeInTheDocument();
     });
-  });
-
-  it("leads with a verdict about the sources, not about the parser", () => {
-    // The old verdict read "配置解析成功，已识别 27 个源" — a statement about our parser, and a count
-    // that disagreed with the header badge (26) because it counted raw entries rather than stored
-    // sources. Two different numbers side by side, with nothing to say which was right.
-    renderCenter();
-    openReportTab();
-
-    // The fixture holds one untested source, one blocked and one needing an adapter, so the verdict
-    // is that nothing has been confirmed usable — a statement about the sources rather than about
-    // our parser.
-    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
-    expect(screen.queryByText(/配置解析成功/)).not.toBeInTheDocument();
-    // And the number it states is the list's own, not a second opinion.
-    expect(screen.queryByText(/已识别 \d+ 个源/)).not.toBeInTheDocument();
-  });
-
-  it("answers with the source list's own words, and each row leads to them", () => {
-    // The count has to be findable in the list, so the label is the word the rows carry. It also
-    // has to lead somewhere: "7 处需要留意" with no way to find out which seven is why the old report
-    // was useless.
-    renderCenter();
-    openReportTab();
-
-    expect(screen.getByText("源的状态")).toBeInTheDocument();
-    const row = screen.getByText("待测试").closest("button");
-    expect(row).not.toBeNull();
-
-    // Clicking it opens the source list filtered to those sources.
-    fireEvent.click(row as HTMLElement);
-    expect(screen.getByRole("tab", { name: "源列表" })).toHaveAttribute(
-      "data-state",
-      "active",
-    );
-    expect(useAppStore.getState().sourceFilter.statuses).toEqual(["untested"]);
-  });
-
-  it("omits states nothing is in, rather than stating a row of zeros", () => {
-    // The old report printed 远程依赖 0 / 私有协议 0 / 危险执行路径 0 — three rows that said nothing,
-    // directly above the one section that did.
-    renderCenter();
-    openReportTab();
-
-    expect(screen.queryByText("远程依赖")).not.toBeInTheDocument();
-    expect(screen.queryByText("危险执行路径")).not.toBeInTheDocument();
-    // 可用 survives at zero: "nothing works" is the most important thing this page can say.
-    expect(screen.getByText("可用")).toBeInTheDocument();
-  });
-
-  it("names the source a problem is about instead of printing an array index", () => {
-    // The old list addressed findings as `parses.41` — an index into an array the reader has never
-    // seen, repeated four times over with only the digits differing. That was the single biggest
-    // reason this tab was unreadable.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [{ key: "ok", name: "可用的源", api: "https://a.example/api.php/provide/vod" }],
-          lives: [{ key: "bad", name: "没有地址的直播源", url: "" }],
-          parses: [
-            { name: "解析甲", type: 1, url: "https://jx.example/?url=" },
-            { name: "解析乙", type: 1, url: "not-a-url" },
-            { name: "解析丙", type: 1, url: "also-not-a-url" },
-          ],
-        }),
-        normalizedConfig: "{}",
-      });
-    });
-    openReportTab();
-
-    // The two non-HTTP services are ONE problem with two names, not two problems.
-    const serviceFinding = screen.getByText(
-      /解析服务使用非 HTTP 协议/,
-    );
-    const row = serviceFinding.closest("div");
-    expect(row?.textContent).toContain("解析服务「解析乙」");
-    expect(row?.textContent).toContain("解析服务「解析丙」");
-    // And nothing is addressed by index.
-    expect(document.body.textContent).not.toMatch(/parses\.\d/);
-  });
-
-  it("stops counting a source as soon as it is deleted", () => {
-    // The reported bug: the report kept the results it already had, so a source the user had just
-    // deleted was still counted. `report` used to be `parseResult ?? parseConfigText(rawConfig)`,
-    // and `parseResult` was only written when the drafts reset or an import was parsed — neither of
-    // which a deletion does.
-    renderCenter();
-    openReportTab();
-
-    // The fixture's sources: one untested, one blocked, one needing an adapter.
-    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
-
-    act(() => {
-      const state = useAppStore.getState();
-      const trimmed = JSON.stringify({
-        sites: [{ key: "ok", name: "可用的源", api: supported.api }],
-      });
-      useAppStore.setState({
-        sources: state.sources.filter((source) => source.key !== "no"),
-        rawConfig: trimmed,
-        normalizedConfig: trimmed,
-      });
-    });
-
-    // Two sources remain, and the verdict says so immediately.
-    expect(screen.getByText("2 个源里没有一个确认可用。")).toBeInTheDocument();
-    expect(screen.queryByText("3 个源里没有一个确认可用。")).not.toBeInTheDocument();
-  });
-
-  it("follows a source whose test result changes", () => {
-    // The report is about what the last test found, so a finished test has to move it. This is the
-    // half the old report ignored entirely: it never read `testStatus`, so running 全部测速 changed
-    // nothing on it.
-    renderCenter();
-    openReportTab();
-    expect(screen.getByText("可用")).toBeInTheDocument();
-
-    act(() => {
-      useAppStore.setState((state) => ({
-        sources: state.sources.map((source) =>
-          source.key === "ok" ? { ...source, testStatus: "passed" as const } : source,
-        ),
-      }));
-    });
-
-    // The verdict now reports one confirmed source rather than none.
-    expect(screen.getByText(/1 个已确认可用/)).toBeInTheDocument();
-    expect(screen.queryByText("3 个源里没有一个确认可用。")).not.toBeInTheDocument();
-  });
-
-  it("does not report the stored configuration as broken after a failed import attempt", async () => {
-    // The decisive case. `handleParse` used to store its parse result unconditionally, including a
-    // FAILED one, and nothing cleared it — so pasting broken text into the import dialog and having
-    // it rejected left the report announcing 配置无法解析 about a document that was perfectly valid.
-    //
-    // A plain deletion does not expose this, because the draft-reset effect re-parses whenever
-    // `rawConfig` changes and quietly repairs the stale value. The failure path changes no document
-    // at all, so the stale result is what remains.
-    renderCenter();
-
-    vi.mocked(fetchConfigUrl).mockResolvedValue("{ this is not json");
-    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
-    const input = await screen.findByPlaceholderText("https://example.com/config.json5");
-    fireEvent.change(input, { target: { value: "https://broken.example/config.json" } });
-    fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
-    await waitFor(() => {
-      expect(screen.getByLabelText("配置文本")).toBeInTheDocument();
-    });
-    // The merge attempt parses the broken text and is rejected.
-    fireEvent.click(screen.getByRole("button", { name: /合并进中心配置/ }));
-    await waitFor(() => {
-      expect(screen.getByText(/解析失败/)).toBeInTheDocument();
-    });
-    fireEvent.click(screen.getByRole("button", { name: "取消" }));
-
-    openReportTab();
-    // The report describes the stored document — which parses — not the rejected import.
-    expect(screen.queryByText("配置无法解析")).not.toBeInTheDocument();
-    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
-    expect(replaceAllConfigDocuments).not.toHaveBeenCalled();
-  });
-
-  it("describes the saved configuration, not the unsaved draft", () => {
-    // The chosen rule: the report describes the document as saved, and unsaved edits are shown as
-    // such by the banner instead. Parsing the draft here would make the report claim sources the
-    // document does not have.
-    renderCenter();
-    openReportTab();
-    expect(screen.getByText("3 个源里没有一个确认可用。")).toBeInTheDocument();
-
-    // Edit the document in the raw tab without saving.
-    openRawTab();
-    act(() => {
-      useAppStore.setState((state) => ({
-        sources: [
-          ...state.sources,
-          {
-            key: "draft-only",
-            name: "只存在于草稿里的源",
-            sourceType: "cms",
-            api: "https://draft.example/api.php/provide/vod",
-            searchable: true,
-            filterable: true,
-            capability: "supported",
-            capabilityNote: "可用",
-            testStatus: "passed",
-            enabled: true,
-            lastCheckedAt: "刚刚",
-            requestCount: 0,
-          },
-        ],
-      }));
-    });
-
-    openReportTab();
-    // The health rows follow the list, which is the page's live state...
-    expect(screen.getByText(/1 个已确认可用/)).toBeInTheDocument();
-    // ...while the report's own parse still describes the saved text, which is unchanged.
-    expect(useAppStore.getState().rawConfig).not.toContain("draft.example");
   });
 
   it("merges an imported configuration into the centre configuration", async () => {

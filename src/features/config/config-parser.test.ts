@@ -261,6 +261,39 @@ describe("Moseek config parser", () => {
     expect(result.sources[0]?.ext).toContain('"headers"');
   });
 
+  it("accepts the string spellings of a boolean flag that real files contain", () => {
+    // TVBox writes these keys five ways, and the schema used to reject two of them. A single
+    // `"searchable": "true"` then failed validation for the ENTIRE document, which is why the user's
+    // save reported "Invalid input: expected boolean, received string" and named nothing they could
+    // act on. A file in the wild is not ours to reject.
+    const result = parseConfigText(`{
+      sites: [{
+        key: "string-flags",
+        name: "字符串开关",
+        api: "https://cms.example/api",
+        searchable: "true",
+        quickSearch: "false",
+        filterable: "1",
+      }],
+      lives: [{ key: "l", name: "直播", url: "https://live.example/tv.txt", status: "true" }],
+    }`);
+
+    expect(result.ok).toBe(true);
+    expect(result.sources.find((source) => source.key === "string-flags")?.searchable).toBe(true);
+    expect(result.sources.find((source) => source.key === "string-flags")?.filterable).toBe(true);
+    expect(result.sources.find((source) => source.key === "l")?.enabled).toBe(true);
+  });
+
+  it("still rejects a flag value that is neither a boolean nor a number", () => {
+    // Accepting the real spellings must not mean accepting anything: a genuine mistake still has to
+    // be reported, or the schema stops being a check at all.
+    const result = parseConfigText(`{
+      sites: [{ key: "bad", name: "坏", api: "https://cms.example/api", searchable: "yes" }],
+    }`);
+
+    expect(result.ok).toBe(false);
+  });
+
   it("routes XML and HTTP extension site types without relabeling them as parsers", () => {
     const result = parseConfigText(`{
       sites: [
@@ -307,6 +340,52 @@ describe("Moseek config parser", () => {
     expect(repaired.ok).toBe(true);
     expect(repaired.changes).toContain("转义字符串中的换行");
     expect(parseConfigText(repaired.text).ok).toBe(true);
+  });
+
+  it("repairs a string flag into a real boolean, and says what it changed", () => {
+    // Two fixes meet here, and they are different things.
+    //
+    // The schema now ACCEPTS the string spellings, which is what unblocked saving — so a document
+    // like this one can be saved as it stands. What the repair adds is normalisation: the file is
+    // rewritten with real booleans, which is what the format means and what other TVBox clients
+    // expect. The user's report was that 自动修正 reported "未发现可自动修正的问题" over text that
+    // plainly had something wrong with it; a repair that cannot see a type problem at all is the
+    // behaviour that had to change.
+    const text = JSON.stringify({
+      sites: [
+        { key: "a", name: "甲", api: "https://a.example/api", searchable: "true" },
+        { key: "b", name: "乙", api: "https://b.example/api", filterable: "false" },
+      ],
+    });
+
+    // It is already saveable, because the schema accepts the spelling.
+    expect(parseConfigText(text).ok).toBe(true);
+
+    const repaired = repairConfigText(text);
+    expect(repaired.ok).toBe(true);
+    expect(repaired.changes.join("")).toContain("开关");
+
+    const after = JSON.parse(repaired.text) as {
+      sites: { searchable?: unknown; filterable?: unknown }[];
+    };
+    expect(after.sites[0].searchable).toBe(true);
+    expect(after.sites[1].filterable).toBe(false);
+    expect(parseConfigText(repaired.text).ok).toBe(true);
+  });
+
+  it("leaves a flag value it does not understand exactly as it was", () => {
+    // A repair that rewrites fields it does not recognise can turn a working configuration into a
+    // different one. Only the spellings a real file uses are coerced.
+    const text = JSON.stringify({
+      sites: [{ key: "a", name: "甲", api: "https://a.example/api", searchable: "maybe" }],
+    });
+
+    const repaired = repairConfigText(text);
+    expect(repaired.ok).toBe(true);
+    const after = JSON.parse(repaired.text) as { sites: { searchable?: unknown }[] };
+    expect(after.sites[0].searchable).toBe("maybe");
+    // Still rejected, so the user is still told — coercion did not paper over it.
+    expect(parseConfigText(repaired.text).ok).toBe(false);
   });
 
   it("does not rewrite text when repair cannot validate it", () => {
