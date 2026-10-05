@@ -41,23 +41,39 @@ export async function loadLiveCatalog(
 }
 
 /**
+ * The guide providers this app knows how to talk to, best first.
+ *
+ * Both answer the same per-channel JSON shape and both are free community services, so they are
+ * interchangeable — which is what makes a fallback possible at all.
+ *
+ * **Ordered by reachability, measured rather than assumed.** `epg.112114.xyz` was the sole default and
+ * is unreachable from the reporting machine: its DNS resolves to a different wrong address on every
+ * lookup (a Dropbox range, then two Facebook ranges, then a Tencent answer of `202.160.130.52`), and
+ * connecting straight to its real Cloudflare address fails too. 51zmt answered in 0.11 s over the same
+ * connection. Sixteen of the reporter's eighteen live sources therefore failed every time: ten declare
+ * no `epg` and so used this default, and six name 112114 explicitly.
+ *
+ * 51zmt covers what these playlists actually carry — measured on its endpoint, `CCTV1`, `CCTV5+`,
+ * `CCTV13`, 湖南卫视, 浙江卫视, 东方卫视, 广东卫视 and 江苏卫视 all return real schedules — so it is a
+ * sound default and not merely a reachable one.
+ */
+export const KNOWN_EPG_TEMPLATES = [
+  "http://epg.51zmt.top:8000/api/diyp/?ch={name}&date={date}",
+  "https://epg.112114.xyz/?ch={name}&date={date}",
+] as const;
+
+/**
  * Built-in fallback guide.
  *
  * Most public IPTV lists ship no `epg` field, and asking a non-technical user to hand-edit a
  * TVBox `epg` template is not a reasonable step: the guide is display-only enrichment that
  * never affects playback, so its absence should not cost a trip to the configuration editor.
  *
- * 112114 is a free community guide. Its per-channel JSON endpoint recognises the raw channel
- * names public lists actually carry (measured on a typical 央视/卫视 list: 38 of the first 40
- * names resolved without any normalisation, e.g. "sCCTV1综合" and "4CCTV3综艺" both matched
- * "CCTV1"/"CCTV3"). Its bulk XMLTV export covers fewer of those names (89/129) and costs
- * 2.6 MiB instead of 3.4 KiB, so the per-channel endpoint is what this default uses.
- *
  * It is a best-effort default, not a guarantee: a channel the provider does not carry is
  * reported as unlisted rather than faked, and a source may always override it by declaring
  * its own `epg`.
  */
-export const DEFAULT_EPG_TEMPLATE = "https://epg.112114.xyz/?ch={name}&date={date}";
+export const DEFAULT_EPG_TEMPLATE = KNOWN_EPG_TEMPLATES[0];
 
 /**
  * The titles providers use as filler when they do not carry a channel.
@@ -199,43 +215,82 @@ export async function loadEpg(
   request: EpgRequest,
   channel: Pick<LiveChannel, "name" | "epgId">,
 ): Promise<EpgAdapterResult> {
-  const first = await requestGuide(request, channel);
-  if (first.mode === "remote") return first;
-
   /**
-   * One retry, with the compact spelling, and only when there is a different spelling to try.
+   * The templates to try, in order: the one asked for, then any other known provider.
    *
-   * Measured against 51zmt: `CCTV-1` returns the "未提供" placeholder while `CCTV1` returns the real
-   * schedule. The retry is what makes a playlist's own spelling irrelevant, and it costs one request
-   * only for the channels where the first attempt found nothing — a correct name never reaches here.
+   * **Why a source's own `epg` is not the end of the story.** Six of the reporter's live sources name
+   * `epg.112114.xyz` explicitly, and that host is unreachable from their network (see
+   * `KNOWN_EPG_TEMPLATES`). Honouring the configured template and then giving up meant those channels
+   * could never show a guide, even though a working provider for exactly the same channel names was
+   * one request away. The configured provider still wins whenever it answers — the fallback only runs
+   * after it has failed — so a user who deliberately points at their own guide keeps it.
    *
-   * `unrecognized` counts as "nothing": the provider answered, but only with filler, which is exactly
-   * the response a name it does not know produces.
+   * A fixed XMLTV URL is never swapped: it is one document in someone else's format, and substituting
+   * a per-channel template for it would ask an unrelated question.
    */
-  const alternative = normalizeEpgChannelName(
-    channel.epgId?.trim() || channel.name?.trim() || "",
-  );
-  if (alternative === null) return first;
+  const candidates = isPerChannelTemplate(request.template)
+    ? [
+        request.template,
+        ...KNOWN_EPG_TEMPLATES.filter((known) => known !== request.template),
+      ]
+    : [request.template];
 
-  /**
-   * The retry is made under the compact name but the programmes are **claimed under the channel's own
-   * name**, and that distinction is the whole point.
-   *
-   * `requestGuide` labels a per-channel guide with the channel it was given. Passing the substituted
-   * name straight through would label them `CCTV1` — while the live view filters by the channel the
-   * user selected, `CCTV-1`, so the retry would fetch the right schedule and then have every row
-   * dropped on the client. That is the same failure the claiming step exists to fix, reintroduced one
-   * level down.
-   */
-  const retry = await requestGuide(
-    request,
-    // The `epgId` would otherwise win inside `resolveEpgUrl` and re-send the name that just failed.
-    { name: alternative, epgId: undefined },
-    channel,
-  );
-  // A retry that fails must not mask the first answer's reason: an empty first result is more
-  // informative than the retry's, because the retry only ran because the first one was empty.
-  return retry.mode === "remote" ? retry : first;
+  let firstFailure: EpgAdapterResult | null = null;
+  for (const template of candidates) {
+    const attempt = await requestGuide({ ...request, template }, channel);
+    if (attempt.mode === "remote") return attempt;
+    // Only a guide that came back *empty or as filler* is worth trying elsewhere.
+    //
+    // **A failed request is not, and the first version of this retried it.** `mode` is `empty` for
+    // both "the provider answered with nothing" and "the request threw", so an unreachable host — the
+    // very case being fixed — was asked a second time and the user waited out the timeout twice before
+    // being told it failed. `error` is what distinguishes them.
+    if (attempt.error !== null) {
+      firstFailure ??= attempt;
+      continue;
+    }
+
+
+    /**
+     * One retry with the compact spelling: measured, `CCTV-1` returns the "未提供" filler while
+     * `CCTV1` returns the real schedule, and a playlist's own spelling should not decide this.
+     *
+     * **Only for a per-channel template.** A fixed XMLTV address has no `{name}` to substitute, so
+     * "retrying with a different spelling" resolves to the identical URL — the same address requested
+     * twice for one channel. Measured: a fixed URL returning nothing produced two calls. The check is on
+     * the template rather than on the candidate list, because the candidate is the configured URL on the
+     * first pass whether or not it is a template.
+     */
+    const alternative = isPerChannelTemplate(template)
+      ? normalizeEpgChannelName(channel.epgId?.trim() || channel.name?.trim() || "")
+      : null;
+    if (alternative !== null) {
+      /**
+       * The retry is made under the compact name but the programmes are **claimed under the channel's
+       * own name**, and that distinction is the whole point.
+       *
+       * `requestGuide` labels a per-channel guide with the channel it was given. Passing the
+       * substituted name straight through would label them `CCTV1` — while the live view filters by the
+       * channel the user selected, `CCTV-1`, so the retry would fetch the right schedule and then have
+       * every row dropped on the client. That is the same failure the claiming step exists to fix,
+       * reintroduced one level down.
+       */
+      const retry = await requestGuide(
+        { ...request, template },
+        // The `epgId` would otherwise win inside `resolveEpgUrl` and re-send the name that just failed.
+        { name: alternative, epgId: undefined },
+        channel,
+      );
+      if (retry.mode === "remote") return retry;
+    }
+
+    // This provider answered but does not carry the channel. Another one might.
+    firstFailure ??= attempt;
+  }
+
+  // Nothing worked. The first answer is reported rather than the last: it is the one the user's own
+  // configuration asked for, so its message describes the thing they chose.
+  return firstFailure ?? { data: { programs: [] }, mode: "empty", origin: request.origin, error: null };
 }
 
 /**

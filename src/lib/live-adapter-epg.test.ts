@@ -163,4 +163,82 @@ describe("attributing a per-channel guide", () => {
 
     expect(result.mode).toBe("empty");
   });
+
+  it("does not retry a failed request against the same provider", async () => {
+    // **A defect introduced by the first version of the spelling retry.** `mode` is `empty` both for
+    // "the provider answered with nothing" and for "the request threw", so an unreachable host was
+    // asked twice for the same channel spelling and the user waited out the timeout twice before being
+    // told it failed.
+    //
+    // The assertion is that no *template* is asked twice, not that `getEpg` is called once: the
+    // provider fallback legitimately tries other hosts, and counting calls would confuse the two.
+    getEpg.mockRejectedValue(new Error("连接超时"));
+
+    const result = await loadEpg(
+      { template: uniqueTemplate(), origin: "configured" },
+      { name: "CCTV-1", epgId: undefined },
+    );
+
+    expect(result.error).not.toBeNull();
+    const requested = getEpg.mock.calls.map((call) => String(call[0]));
+    expect(new Set(requested).size).toBe(requested.length);
+    // And no request carried the compact spelling, which is what the retry would have sent.
+    expect(requested.some((url) => url.includes("ch=CCTV1&"))).toBe(false);
+  });
+
+  it("falls back to another provider when the configured one cannot be reached", async () => {
+    // **The reported failure: "一直获取失败".** Six of the user's live sources name
+    // `epg.112114.xyz`, which is unreachable from their network, so honouring the configured template
+    // and stopping meant those channels could never show a guide — even though a working provider for
+    // the same channel names was one request away.
+    //
+    // The configured template is made unreachable so the fallback is what has to answer. If the
+    // fallback did not exist, `getEpg` would be called once and the result would be an error.
+    getEpg.mockImplementation(async (url: string) => {
+      if (!String(url).includes("51zmt")) throw new Error("域名解析超时");
+      return providerAnswer("CCTV-1综合");
+    });
+
+    const result = await loadEpg(
+      { template: uniqueTemplate(), origin: "configured" },
+      { name: "CCTV-1", epgId: undefined },
+    );
+
+    expect(result.mode).toBe("remote");
+    expect(result.data.programs).toHaveLength(2);
+    // The working provider was actually tried, and it was not the configured one.
+    expect(String(getEpg.mock.calls.at(-1)?.[0])).toContain("51zmt");
+  });
+
+  it("keeps the configured provider when it answers", async () => {
+    // The fallback must not override a guide the user deliberately chose.
+    getEpg.mockResolvedValue(providerAnswer("CCTV-1综合"));
+
+    const result = await loadEpg(
+      { template: uniqueTemplate(), origin: "configured" },
+      { name: "CCTV-1", epgId: undefined },
+    );
+
+    expect(result.mode).toBe("remote");
+    expect(getEpg).toHaveBeenCalledTimes(1);
+  });
+
+  it("never swaps a fixed XMLTV address for a per-channel template", async () => {
+    // One is a whole document in someone else's format; substituting a per-channel template for it
+    // would ask an unrelated question and attribute the answer to the wrong channel.
+    //
+    // The URL is unique to this test for the same reason `uniqueTemplate` is: the guide cache is
+    // module-level and shared, so a fixed address reused across tests would answer from cache and the
+    // assertion below would pass without a request ever being made — measured, it reported zero calls.
+    const fixedUrl = `https://guide-${(templateCounter += 1)}.example/guide.xml`;
+    getEpg.mockResolvedValue({ programs: [] });
+
+    await loadEpg(
+      { template: fixedUrl, origin: "configured" },
+      { name: "CCTV-1", epgId: undefined },
+    );
+
+    expect(getEpg).toHaveBeenCalledTimes(1);
+    expect(String(getEpg.mock.calls[0][0])).toBe(fixedUrl);
+  });
 });

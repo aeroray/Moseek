@@ -9,6 +9,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LiveView } from "@/features/live/live-view";
+import { DEFAULT_EPG_TEMPLATE } from "@/lib/live-adapter";
 import type { EpgCatalog, LiveCatalog, SourceRecord } from "@/types/moseek";
 
 const loadLiveCatalog = vi.fn();
@@ -488,7 +489,10 @@ describe("LiveView EPG rendering", () => {
     });
     const request = loadEpg.mock.calls[0]?.[0] as { template: string; origin: string };
     expect(request.origin).toBe("auto");
-    expect(request.template).toContain("epg.112114.xyz");
+    // Asserted against the constant rather than a hostname literal: the built-in provider changed when
+    // the previous one turned out to be unreachable from the user's network (see
+    // `KNOWN_EPG_TEMPLATES`), and what this test is about is that *a* built-in guide is used at all.
+    expect(request.template).toBe(DEFAULT_EPG_TEMPLATE);
   });
 
   it("does not request a guide at all when auto guides are off and none is configured", async () => {
