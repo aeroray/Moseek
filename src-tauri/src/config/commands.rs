@@ -308,15 +308,33 @@ pub fn set_source_script_archive(
     )
 }
 
+/// Persists one source's test result, off the main thread.
+///
+/// `async` + `spawn_blocking` for the same reason as `remove_sources` above, and it is not a
+/// theoretical concern here: this rewrites the whole document, which was measured at **4.5 ms on a
+/// 320-source document and 10.2 ms on a 700-source one**. That was tolerable while the batch tested
+/// four sources at a time, because four results could not arrive closer together than the requests
+/// that produced them. The batch now probes **sixteen** at once (`TEST_CONCURRENCY`), so sixteen
+/// writes can land in the same instant and serialize on this mutex — a synchronous command would
+/// therefore block the event loop for the whole sum, ~160 ms on a large document, once per wave.
+///
+/// The work is CPU-bound and touches a `rusqlite` connection, which is not `Send`-friendly across
+/// await points, so the blocking section owns the lock for its whole duration, exactly as the
+/// removal path does.
 #[tauri::command]
-pub fn update_source_test(
+pub async fn update_source_test(
     document_id: i64,
     source_key: String,
     result: cms::SourceTestResult,
     state: State<'_, AppDatabase>,
 ) -> Result<ConfigDocument, String> {
-    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
-    storage::set_source_test_in_connection(&mut connection, document_id, &source_key, &result)
+    let database = state.0.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut connection = database.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        storage::set_source_test_in_connection(&mut connection, document_id, &source_key, &result)
+    })
+    .await
+    .map_err(|error| format!("保存测试结果的任务失败：{error}"))?
 }
 
 #[tauri::command]

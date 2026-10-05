@@ -119,6 +119,26 @@ describe("the source filter's groups", () => {
     expect(sourceStatusFacet(source({ capability: "invalid", api: "" }))).toBe("invalid");
   });
 
+  it("gives a failure that never reached the server the same facet as any other", () => {
+    // The row says 测试失败 for both and the switch goes off for both, so the panel must offer one
+    // choice covering both. Splitting them — which this test asserted before — named a difference
+    // nothing acts on: filtering to 测试失败 would hide rows the user calls 测试失败.
+    const answered = source({
+      testStatus: "failed",
+      testMessage: "HTTP 404：接口不存在。",
+    });
+    const unreachable = source({
+      testStatus: "failed",
+      testMessage: "测试超时（25 秒），已停止等待。",
+    });
+    expect(sourceStatusFacet(answered)).toBe("failed");
+    expect(sourceStatusFacet(unreachable)).toBe("failed");
+
+    const onlyFailed = filter({ statuses: ["failed"] });
+    expect(matchesSourceFilterState(answered, onlyFailed)).toBe(true);
+    expect(matchesSourceFilterState(unreachable, onlyFailed)).toBe(true);
+  });
+
   it("does not let a status choice match a source with no test outcome", () => {
     // Otherwise ticking 可用 would also reveal rows whose 状态 column says 已阻止. Every choice is
     // tried, not just the two that seemed likely: a mutation that gives such a source the `failed`

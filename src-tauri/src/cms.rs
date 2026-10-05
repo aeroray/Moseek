@@ -8,6 +8,7 @@ use crate::{
     adapters::SiteAdapterKind,
     html,
     policy::{fetch_json, fetch_text, validate_remote_url},
+    test_runs::TestRunRegistry,
     xbpq, SourceOperationResult, SourceRecord,
 };
 
@@ -75,44 +76,6 @@ pub struct SourceTestResult {
     pub duration_ms: u64,
     pub tested_at: String,
     pub operations: Vec<SourceOperationResult>,
-}
-
-/// Whether a failed test actually reached the server.
-///
-/// A transport failure — a connection reset, a DNS lookup that did not resolve, a TLS handshake the
-/// peer abandoned — says nothing about whether the source works. Switching a source off on one of
-/// those discards it on the strength of the local network or the remote host's momentary state, and
-/// nothing ever switches it back on: the author's database held 14 sources disabled that way, and 4
-/// more that had since passed a test while remaining off. Only an answer the server actually gave
-/// — an HTTP status, a body that is not the expected shape — is a verdict about the source.
-///
-/// The markers are the ones `policy::describe_http_error` and the fetch layer produce. A message
-/// that matches none of them is treated as an answer, which is the conservative direction: it keeps
-/// the existing behaviour for anything unrecognised rather than silently never disabling again.
-pub(crate) fn is_transport_failure(message: &str) -> bool {
-    const TRANSPORT_MARKERS: [&str; 14] = [
-        // reqwest's own chain, as `describe_http_error` renders it.
-        "error sending request",
-        "client error (Connect)",
-        "connection closed before message completed",
-        // The OS-level causes, in the wording the platform gives.
-        "os error 10054",
-        "os error 10053",
-        "os error 10060",
-        "os error 11001",
-        "远程主机强迫关闭",
-        "不知道这样的主机",
-        "无法解析远程主机",
-        "域名解析",
-        "连接被拒绝",
-        "拒绝连接",
-        // Our own timeout wrapper.
-        "测试超时",
-    ];
-    let lowered = message.to_ascii_lowercase();
-    TRANSPORT_MARKERS.iter().any(|marker| {
-        lowered.contains(&marker.to_ascii_lowercase())
-    })
 }
 
 #[tauri::command]
@@ -286,13 +249,38 @@ async fn fetch_catalog(
 /// terminable no matter what the remote does.
 const SOURCE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
+/// Tests one source, cancellably.
+///
+/// `run_id` is optional so the single-row test button and any older caller keep working; a test
+/// without one simply cannot be cancelled, which is exactly the previous behaviour.
+///
+/// **The cancellation is a `select!`, and the point is that the losing branch is DROPPED.** A flag
+/// alone cannot interrupt an `await`; dropping the future is what closes the socket. Racing the
+/// timeout against it means a cancel returns immediately instead of waiting out the 25 s bound —
+/// which is what the user asked for when they reported that cancelling "还在后台测".
 #[tauri::command]
-pub async fn test_source(source: SourceRecord) -> Result<SourceTestResult, String> {
+pub async fn test_source(
+    source: SourceRecord,
+    run_id: Option<String>,
+    registry: tauri::State<'_, TestRunRegistry>,
+) -> Result<SourceTestResult, String> {
     let source_key = source.key.clone();
     let tested_at = "刚刚".to_string();
     let started = Instant::now();
     let adapter_id = SiteAdapterKind::from_source(&source).id().to_string();
-    match tokio::time::timeout(SOURCE_TEST_TIMEOUT, test_source_inner(source)).await {
+    let timed = tokio::time::timeout(SOURCE_TEST_TIMEOUT, test_source_inner(source));
+    let outcome = match run_id {
+        Some(run_id) => {
+            let flag = registry.flag_for(&run_id);
+            tokio::select! {
+                biased;
+                _ = crate::test_runs::wait_for_cancellation(flag) => return Err(CANCELLED.into()),
+                result = timed => result,
+            }
+        }
+        None => timed.await,
+    };
+    match outcome {
         Ok(result) => result,
         Err(_) => Ok(SourceTestResult {
             source_key,
@@ -315,6 +303,13 @@ pub async fn test_source(source: SourceRecord) -> Result<SourceTestResult, Strin
         }),
     }
 }
+
+/// The marker a cancelled test returns, so the frontend can tell it apart from a real failure.
+///
+/// A cancelled test must not be persisted as a result: the source would be marked 测试失败 or
+/// switched off by a run the user explicitly abandoned. The frontend checks for this exact string,
+/// which is why it is a constant rather than a literal repeated at each site.
+pub const CANCELLED: &str = "__moseek_cancelled__";
 
 async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, String> {
     let adapter = SiteAdapterKind::from_source(&source);

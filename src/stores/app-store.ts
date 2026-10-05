@@ -18,6 +18,7 @@ import {
   rehydrateCache,
   stripCacheForStorage,
 } from "@/stores/config-cache-persistence";
+import { createAppPersistStorage } from "@/stores/persist-storage";
 import type {
   CapabilityStatus,
   FavoriteProgress,
@@ -76,43 +77,18 @@ export function migrateSources(sources: SourceRecord[] | undefined): SourceRecor
 }
 
 /**
- * Markers that mean a failed test never reached the server.
- *
- * Mirrors `cms::is_transport_failure` in `src-tauri/src/cms.rs`. The two must agree: the backend
- * persists the decision and this updates the same source in the store, so a mismatch would show one
- * answer until the next reload and another afterwards.
- */
-const TRANSPORT_FAILURE_MARKERS = [
-  "error sending request",
-  "client error (connect)",
-  "connection closed before message completed",
-  "os error 10054",
-  "os error 10053",
-  "os error 10060",
-  "os error 11001",
-  "远程主机强迫关闭",
-  "不知道这样的主机",
-  "无法解析远程主机",
-  "域名解析",
-  "连接被拒绝",
-  "拒绝连接",
-  "测试超时",
-];
-
-/** Whether a failed test never got an answer, so it proves nothing about the source. */
-export function isTransportFailure(message: string | undefined): boolean {
-  const lowered = (message ?? "").toLowerCase();
-  return TRANSPORT_FAILURE_MARKERS.some((marker) =>
-    lowered.includes(marker.toLowerCase()),
-  );
-}
-
-/**
  * Whether a source stays switched on after a test.
  *
- * Only an answer the server gave can switch it off — an HTTP status or a body of the wrong shape.
- * A transport failure reports the local network or the remote host's momentary state, and treating
- * it as a verdict discards a source that may work a minute later.
+ * **Every failure switches the source off, including one that never reached the server.** This
+ * mirrors `storage::set_source_test_in_connection`, which is the authority: it persists the decision
+ * this function has to agree with, or the list would show one answer until the next reload and
+ * another afterwards.
+ *
+ * It used to exempt transport failures — a timeout, a name that did not resolve, a refused
+ * connection — on the theory that they report the network rather than the source. The user's
+ * decision is the opposite, and it is the simpler rule: a source we cannot reach is a source we
+ * cannot use, so it is 测试失败 like any other and belongs in the same 清理不可用 set. The cost of
+ * being wrong is bounded, because the switch is one click away.
  *
  * There is deliberately no branch that switches a source back on. `enabled: false` cannot be told
  * apart from the user having switched the source off themselves, so re-enabling on a pass would
@@ -120,14 +96,11 @@ export function isTransportFailure(message: string | undefined): boolean {
  */
 export function nextEnabledAfterTest(
   source: Pick<SourceRecord, "enabled">,
-  result: Pick<SourceTestResult, "status" | "message">,
+  result: Pick<SourceTestResult, "status">,
 ): boolean {
-  if (result.status === "empty") return false;
-  if (result.status === "failed") {
-    return isTransportFailure(result.message) ? source.enabled : false;
-  }
-  // `passed` and `blocked` both leave the switch where the user put it: the first works, and the
-  // second never ran.
+  // `passed` and `blocked` leave the switch where the user put it: the first works, and the second
+  // never ran. `failed` and `empty` are both verdicts that it does not work.
+  if (result.status === "failed" || result.status === "empty") return false;
   return source.enabled;
 }
 
@@ -713,6 +686,11 @@ export const useAppStore = create<AppStore>()(
     }),
     {
       name: "moseek-app-state",
+      // A full localStorage degrades the mirror instead of failing the operation that wrote it.
+      // See `persist-storage.ts`: the exception used to escape through `setState` and surface as
+      // "解析成功，但保存失败 ... exceeded the quota" under the title "需要修正配置", which named
+      // neither the real cause nor the fact that the configuration had been saved.
+      storage: createAppPersistStorage(),
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<AppStore> | undefined;
         const hasImportedConfig = Boolean(persisted?.rawConfig?.trim());

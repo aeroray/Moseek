@@ -415,7 +415,9 @@ pub(crate) async fn run_script_archive(
 pub async fn test_script_source(
     app: AppHandle,
     source: SourceRecord,
+    run_id: Option<String>,
     state: State<'_, AppDatabase>,
+    registry: State<'_, crate::test_runs::TestRunRegistry>,
 ) -> Result<cms::SourceTestResult, String> {
     let started = Instant::now();
     let source_key = source.key.clone();
@@ -432,14 +434,26 @@ pub async fn test_script_source(
             operations: Vec::new(),
         });
     };
-    let result = run_script_archive(
+    // Cancellable like the other two test commands. A script has its own 20 s deadline in the
+    // sidecar, so a cancel here is about not making the user wait it out.
+    let flag = run_id.as_deref().map(|run_id| registry.flag_for(run_id));
+    let work = run_script_archive(
         app,
         archive_id,
         json!({"page": 1, "pageSize": 8, "query": "", "categoryId": "all"}),
         Some("getHome".to_string()),
         &state.0,
-    )
-    .await;
+    );
+    let result = match flag {
+        Some(flag) => {
+            tokio::select! {
+                biased;
+                _ = crate::test_runs::wait_for_cancellation(flag) => return Err(cms::CANCELLED.into()),
+                result = work => result,
+            }
+        }
+        None => work.await,
+    };
     let duration_ms = started.elapsed().as_millis() as u64;
     match result {
         Ok(result) => {

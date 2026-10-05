@@ -247,6 +247,64 @@ describe("absolutising relative references", () => {
     expect(absolutizeRelativeSites(raw, null)).toBe(raw);
     expect(absolutizeRelativeSites(raw, "not a url")).toBe(raw);
   });
+
+  it("resolves a relative LIVE url, which is where the broken sources actually were", () => {
+    // **The reported bug, and the reason it survived: only `sites` was rewritten.**
+    //
+    // Measured against the author's real database: 41 `sites` entries hold 0 relative addresses and
+    // 45 `lives` entries hold 14 (`url` ×11, `api` ×3). The one collection that needed the repair
+    // was the one this function did not touch, so `./FM.json` survived every merge verbatim and
+    // could never be fetched — 19 live sources stuck reading 未执行.
+    //
+    // A live entry spells its address `url`; sites spell it `api`. Resolved against its OWN
+    // configuration's URL, `./FM.json` returns a real playlist.
+    const raw = {
+      lives: [
+        { name: "拾光频道", type: 0, playerType: 1, url: "./FM.json" },
+        { name: "IPV6", type: 0, url: "./lib/tv/ipv6.m3u" },
+        { name: "SAO0", type: 0, url: "./libs/tv/tvlive.txt" },
+        // `api` also appears on live entries in some packs, so both keys are handled.
+        { name: "快直播", type: 3, api: "./py/kzb.py" },
+        // Already absolute: untouched.
+        { name: "绝对", type: 0, url: "https://a/b.m3u" },
+      ],
+    };
+    const resolved = absolutizeRelativeSites(
+      raw,
+      "https://gh-proxy.com/https://raw.githubusercontent.com/xmbjm/svip/refs/heads/main/svip.json",
+    );
+    const lives = resolved.lives as Record<string, unknown>[];
+    expect(lives[0].url).toBe(
+      "https://gh-proxy.com/https://raw.githubusercontent.com/xmbjm/svip/refs/heads/main/FM.json",
+    );
+    expect(lives[1].url).toBe(
+      "https://gh-proxy.com/https://raw.githubusercontent.com/xmbjm/svip/refs/heads/main/lib/tv/ipv6.m3u",
+    );
+    expect(lives[2].url).toBe(
+      "https://gh-proxy.com/https://raw.githubusercontent.com/xmbjm/svip/refs/heads/main/libs/tv/tvlive.txt",
+    );
+    expect(lives[3].api).toBe(
+      "https://gh-proxy.com/https://raw.githubusercontent.com/xmbjm/svip/refs/heads/main/py/kzb.py",
+    );
+    expect(lives[4].url).toBe("https://a/b.m3u");
+  });
+
+  it("leaves a live entry's bare adapter token alone", () => {
+    // `yqk`, `csp_MQiTV` and `直播链接自定义` are names an adapter resolves, not paths. Joining one to
+    // the base would invent `http://host/yqk` and make an unusable source look repairable.
+    const raw = {
+      lives: [
+        { name: "一起看", type: 0, url: "yqk" },
+        { name: "MQ", type: 0, api: "csp_MQiTV" },
+        { name: "自定义", type: 0, url: "直播链接自定义" },
+      ],
+    };
+    const resolved = absolutizeRelativeSites(raw, "https://clun.top/box.json");
+    const lives = resolved.lives as Record<string, unknown>[];
+    expect(lives[0].url).toBe("yqk");
+    expect(lives[1].api).toBe("csp_MQiTV");
+    expect(lives[2].url).toBe("直播链接自定义");
+  });
 });
 
 /** A source snapshot as the merge sees it: the identity fields plus whatever local state it holds. */

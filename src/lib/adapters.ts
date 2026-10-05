@@ -210,7 +210,23 @@ export function getAdapterProfile(
   let id: AdapterId;
 
   if (source.sourceType === "live") {
-    id = "builtin-live";
+    // **A live source is only runnable when its address is one the loader can fetch.** This branch
+    // used to answer `builtin-live` unconditionally, and that single answer caused three separate
+    // contradictions for a source addressed `./FM.json`:
+    //
+    // - `isTestableLiveSource` read the execution and said yes, so the row offered a 测试 button and
+    //   an 启用 switch; the test then returned `blocked` and the status column read 未执行 — an
+    //   address that cannot be requested, presented as a source merely not yet tried.
+    // - The 状态 column falls back to `getAdapterProfile(...).execution` for an untestable source,
+    //   so it rendered 可执行 directly beside the 适配器 column's 没有可用适配器.
+    // - The adapter tab counted these sources as 可执行, inflating that figure.
+    //
+    // Measured against the author's real database: all 19 sources in that state are live entries
+    // whose address is a relative path (`./FM.json`, `./lib/tv/ipv6.m3u`) or a bare token (`yqk`,
+    // `csp_MQiTV`, `直播链接自定义`). `private-protocol` is the profile the parser already implies
+    // for them — it stores `needs-adapter` with the note 「直播源使用非 HTTP 协议，需要单独适配器，
+    // 当前不执行」, which is this profile's own wording.
+    id = isFetchableLiveUrl(source.api) ? "builtin-live" : "private-protocol";
   } else if (hasScriptArchive(source)) {
     id = "local-script";
   } else if (source.siteProtocol === "http-extension") {
@@ -295,10 +311,33 @@ export function isTestableCmsSource(source: SourceRecord) {
   return profile.execution === "enabled";
 }
 
+/**
+ * Whether a live source's address is one the loader can actually fetch.
+ *
+ * Mirrors `is_fetchable_live_url` in `src-tauri/src/adapters.rs`, which is the authority: it is the
+ * check the live loader and `test_live_source` both apply. A relative path (`./FM.json`), a bare
+ * token (`yqk`, `csp_MQiTV`) and a private scheme (`proxy://…`) are all refused there.
+ */
+export function isFetchableLiveUrl(api: string) {
+  const trimmed = api.trim();
+  if (!trimmed) return false;
+  if (/^(javascript|data|file|shell):/i.test(trimmed)) return false;
+  return /^https?:\/\//i.test(trimmed);
+}
+
 export function isTestableLiveSource(source: SourceRecord) {
   if (source.sourceType !== "live" || source.capability === "invalid") {
     return false;
   }
+  // **The address has to be fetchable, and `getAdapterProfile` is where that is decided.** It used
+  // to answer `builtin-live` / `enabled` for any live source — including one addressed `./FM.json`
+  // — so this returned true and the row offered a 测试 button and a 启用 switch; the test then came
+  // back `blocked` and the status column read 未执行. Measured on the author's configuration, all 19
+  // sources in that state were live entries with a relative or bare address.
+  //
+  // The rule lives in the registry rather than here so that every reader agrees: the 状态 column
+  // falls back to the same `execution`, and the adapter tab counts by it. Keeping a second copy of
+  // the check here is what let the two columns disagree before.
   return getAdapterProfile(source).execution === "enabled";
 }
 

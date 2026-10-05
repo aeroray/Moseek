@@ -130,11 +130,29 @@ fn is_hls_manifest(text: &str) -> bool {
 const LIVE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
 #[tauri::command]
-pub async fn test_live_source(source: SourceRecord) -> Result<SourceTestResult, String> {
+pub async fn test_live_source(
+    source: SourceRecord,
+    run_id: Option<String>,
+    registry: tauri::State<'_, crate::test_runs::TestRunRegistry>,
+) -> Result<SourceTestResult, String> {
     let source_key = source.key.clone();
     let started = Instant::now();
     let tested_at = "刚刚".to_string();
-    match tokio::time::timeout(LIVE_TEST_TIMEOUT, test_live_source_inner(source)).await {
+    let timed = tokio::time::timeout(LIVE_TEST_TIMEOUT, test_live_source_inner(source));
+    // Cancellable for the same reason as the CMS test: a live list can be a large file on a host
+    // that stalls, and the user who cancels expects the socket to close, not just the spinner.
+    let outcome = match run_id {
+        Some(run_id) => {
+            let flag = registry.flag_for(&run_id);
+            tokio::select! {
+                biased;
+                _ = crate::test_runs::wait_for_cancellation(flag) => return Err(crate::cms::CANCELLED.into()),
+                result = timed => result,
+            }
+        }
+        None => timed.await,
+    };
+    match outcome {
         Ok(result) => result,
         Err(_) => Ok(SourceTestResult {
             source_key,

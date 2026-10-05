@@ -5,10 +5,9 @@ import {
   migrateHistory,
   migrateLiveFavorites,
   migrateSources,
-  nextEnabledAfterTest,
   useAppStore,
 } from "@/stores/app-store";
-import type { LiveChannel, SourceRecord, VodItem } from "@/types/moseek";
+import type { LiveChannel, SourceRecord, SourceTestResult, VodItem } from "@/types/moseek";
 
 function storedSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return {
@@ -23,6 +22,24 @@ function storedSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
     enabled: true,
     lastCheckedAt: "刚刚",
     requestCount: 0,
+    ...overrides,
+  };
+}
+
+/** A complete test result, since `setSourceTestResult` takes the whole record. */
+function testResult(
+  overrides: Partial<SourceTestResult> = {},
+): SourceTestResult {
+  return {
+    sourceKey: "demo",
+    status: "passed",
+    adapterId: "builtin-cms",
+    message: "请求成功。",
+    itemCount: 12,
+    categoryCount: 3,
+    durationMs: 40,
+    testedAt: "刚刚",
+    operations: [],
     ...overrides,
   };
 }
@@ -93,62 +110,33 @@ describe("capability migration", () => {
 });
 
 describe("switching a source off after a test", () => {
-  // Mirrors `is_transport_failure` and the disable rule in `src-tauri/src/config/storage.rs`. The
-  // backend persists the decision and this updates the same source in the store, so the two have to
-  // agree or the answer changes on the next reload.
-  it("leaves a source alone when the test never reached the server", () => {
-    // A connection reset or a name that did not resolve reports the network, not the source.
-    // Disabling on one of those discarded 14 sources in the author's database, each recoverable
-    // only by finding the switch by hand.
-    for (const message of [
-      "CMS 响应请求失败：error sending request for url (https://ikunzyapi.com/...)；client error (Connect)；远程主机强迫关闭了一个现有的连接。 (os error 10054)",
-      "无法解析远程主机：不知道这样的主机。 (os error 11001)",
-      "测试超时（25 秒），已停止等待。该源可能无法访问或响应过慢。",
-    ]) {
-      expect(
-        nextEnabledAfterTest({ enabled: true }, { status: "failed", message }),
-        message,
-      ).toBe(true);
-    }
+  // The pure rule lives in `source-test-enablement.test.ts`. What is worth asserting HERE is that
+  // the store action actually applies it to the right source — the two files would otherwise be two
+  // copies of the same table, and a break in the wiring would pass both.
+  beforeEach(() => {
+    useAppStore.setState({ sources: [storedSource()] });
   });
 
-  it("switches a source off when the server answered", () => {
-    // An HTTP status or a body of the wrong shape is a verdict about the source.
-    for (const message of [
-      "CMS 响应返回错误状态：HTTP 404；Not Found",
-      "CMS 响应不是有效 JSON：expected value at line 1 column 1",
-    ]) {
-      expect(
-        nextEnabledAfterTest({ enabled: true }, { status: "failed", message }),
-        message,
-      ).toBe(false);
-    }
+  it("switches the source off through the store action, for a failure that never reached it", () => {
+    // **The user's rule.** A source we cannot reach is a source we cannot use, so a timeout is
+    // 测试失败 like any other. The wording is deliberately a timeout: this message used to be the
+    // one that left the switch alone.
+    useAppStore.getState().setSourceTestResult(
+      "demo",
+      testResult({ status: "failed", message: "测试超时（25 秒），已停止等待。" }),
+    );
+
+    const [source] = useAppStore.getState().sources;
+    expect(source.enabled).toBe(false);
+    expect(source.testStatus).toBe("failed");
   });
 
-  it("does not resurrect a source the user switched off", () => {
-    // `enabled: false` cannot be told apart from the user's own choice, so a pass leaves it.
-    expect(
-      nextEnabledAfterTest({ enabled: false }, { status: "passed", message: "ok" }),
-    ).toBe(false);
-  });
+  it("leaves the switch alone through the store action when the test passed", () => {
+    useAppStore.getState().setSourceTestResult("demo", testResult());
 
-  it("leaves the switch alone when the test never ran", () => {
-    // `blocked` means no request was made, so there is nothing to conclude.
-    expect(
-      nextEnabledAfterTest(
-        { enabled: true },
-        { status: "blocked", message: "Spider 不会执行。" },
-      ),
-    ).toBe(true);
-  });
-
-  it("switches a source off when the server answered with nothing to watch", () => {
-    expect(
-      nextEnabledAfterTest(
-        { enabled: true },
-        { status: "empty", message: "请求成功，但响应中没有可识别的影视内容。" },
-      ),
-    ).toBe(false);
+    const [source] = useAppStore.getState().sources;
+    expect(source.enabled).toBe(true);
+    expect(source.testStatus).toBe("passed");
   });
 });
 

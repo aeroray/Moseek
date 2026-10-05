@@ -4,6 +4,7 @@ import {
   adapterStatusLabel,
   getAdapterProfile,
   hasScriptArchive,
+  isFetchableLiveUrl,
   isMovieLibrarySource,
   isTestableCmsSource,
   isTestableLiveSource,
@@ -165,6 +166,76 @@ describe("adapter registry", () => {
     expect(hasScriptArchive(source({ scriptArchiveId: 0 }))).toBe(true);
     expect(hasScriptArchive(source({ scriptArchiveId: null }))).toBe(false);
     expect(hasScriptArchive(source({ scriptArchiveId: undefined }))).toBe(false);
+  });
+
+  it("refuses a live source whose address is not a fetchable HTTP URL", () => {
+    // **The reported bug.** `getAdapterProfile` answers "which code would handle this", and for any
+    // live source it answers `builtin-live` / `enabled` — including one addressed `./FM.json`.
+    // Gating testability on that alone made such a row offer a 测试 button and a 启用 switch, and
+    // then the test returned `blocked` and the status column read 未执行: an address that cannot be
+    // requested, presented as a source merely not yet tried.
+    //
+    // Measured against the author's real database, all 19 sources in that state were live entries
+    // with a relative or bare address. They are 无法适配, which is what the parser already called
+    // them and what the user asked for: not a pending source, an unavailable one.
+    for (const api of [
+      "./FM.json",
+      "./lib/iptv.m3u",
+      "../tv/thtv.txt",
+      "yqk",
+      "csp_MQiTV",
+      "直播链接自定义",
+      "proxy://wexian/1",
+      "",
+    ]) {
+      const live = source({ sourceType: "live", capability: "needs-adapter", api });
+      expect(isTestableLiveSource(live), api).toBe(false);
+      expect(isTestableSource(live), api).toBe(false);
+    }
+
+    // And a fetchable address is still testable, so the guard does not refuse everything.
+    expect(
+      isTestableLiveSource(
+        source({ sourceType: "live", api: "https://example.com/live.m3u" }),
+      ),
+    ).toBe(true);
+    expect(
+      isTestableLiveSource(source({ sourceType: "live", api: "http://a/tv.txt" })),
+    ).toBe(true);
+  });
+
+  it("gives a non-fetchable live source a profile that is not runnable", () => {
+    // **The registry is the single source of truth for "can this run", and it has to answer the
+    // same way every reader asks.** The 状态 column falls back to this `execution` for an untestable
+    // source, and the adapter tab counts by it. While the live branch answered `builtin-live`
+    // unconditionally, a row addressed `./FM.json` rendered 可执行 in the 状态 column directly
+    // beside 没有可用适配器 in the 适配器 column — one row making two opposite claims, which is the
+    // exact contradiction this project has fixed before.
+    const broken = getAdapterProfile(
+      source({ sourceType: "live", api: "./FM.json", capability: "needs-adapter" }),
+    );
+    expect(broken.execution).not.toBe("enabled");
+    expect(broken.id).toBe("private-protocol");
+    // Its reason is the parser's own note for this state, so the row and the adapter tab agree.
+    expect(broken.reason).toContain("需要单独适配器");
+
+    // A fetchable live address still gets the live adapter.
+    const ok = getAdapterProfile(
+      source({ sourceType: "live", api: "https://example.com/live.m3u" }),
+    );
+    expect(ok.id).toBe("builtin-live");
+    expect(ok.execution).toBe("enabled");
+  });
+
+  it("agrees with the Rust predicate about what a live loader can fetch", () => {
+    // Mirrors `is_fetchable_live_url` in `src-tauri/src/adapters.rs`. The two must agree: this one
+    // decides whether a row offers a test, and that one decides whether the test can run at all.
+    expect(isFetchableLiveUrl("https://example.com/a.m3u")).toBe(true);
+    expect(isFetchableLiveUrl("http://example.com/a.txt")).toBe(true);
+    expect(isFetchableLiveUrl("HTTPS://EXAMPLE.COM/A.M3U")).toBe(true);
+    for (const api of ["./FM.json", "/abs/path.m3u", "yqk", "proxy://x", "file:///c:/a.txt", "   "]) {
+      expect(isFetchableLiveUrl(api), api).toBe(false);
+    }
   });
 
   it("names the execution states the way the interface does", () => {

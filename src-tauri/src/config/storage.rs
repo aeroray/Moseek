@@ -1156,21 +1156,21 @@ pub(super) fn set_source_test_in_connection(
         // proved does not work. `passed` and `blocked` are left alone: the first works, and the
         // second was never enabled by a test in the first place.
         //
-        // **Only an answer the server actually gave counts as proof.** A transport failure — a
-        // connection reset, a name that did not resolve, a timeout — says nothing about the source;
-        // it reports the local network or the remote host's momentary state. Switching a source off
-        // on one of those discards it for a reason that may not exist a minute later, and nothing
-        // ever switches it back on, which is how the author ended up with 14 sources disabled by
-        // DNS and connection failures and 4 more that had since passed while remaining off.
-        if (result.status == "failed" && !cms::is_transport_failure(&result.message))
-            || result.status == "empty"
-        {
+        // **Every failure switches the source off, including one that never reached the server.**
+        // This used to exempt transport failures — a timeout, a name that did not resolve, a
+        // refused connection — on the theory that they report the network rather than the source.
+        // The user's decision is the opposite, and it is the simpler rule: a source we cannot
+        // reach is a source we cannot use, so it is 测试失败 like any other and belongs in the same
+        // 清理不可用 set. The cost of being wrong is bounded — the switch is one click away, and the
+        // source can be re-enabled — whereas the old rule left unusable sources switched on and
+        // therefore offered in the library, which is the thing the user actually saw and objected
+        // to.
+        if result.status == "failed" || result.status == "empty" {
             source.enabled = false;
         }
         // Deliberately no branch that switches a source back on. `enabled: false` with `status:
         // true` cannot be told apart from the user having switched the source off themselves, so
-        // re-enabling on a pass would silently override an explicit choice. The transport rule
-        // above is what keeps a source from being disabled for a reason that is not about it.
+        // re-enabling on a pass would silently override an explicit choice.
         source.request_count
     };
     let sources_json = serialize_sources(&sources)?;
@@ -1909,10 +1909,13 @@ mod tests {
     }
 
     #[test]
-    fn a_transport_failure_does_not_switch_the_source_off() {
-        // A connection reset or a name that did not resolve says nothing about the source. Treating
-        // it as proof discarded sources on the strength of the local network: the author's database
-        // held 14 disabled this way, each recoverable only by finding the switch by hand.
+    fn a_failure_that_never_reached_the_server_still_switches_the_source_off() {
+        // **The rule the user asked for, and the reverse of what this test asserted before.** A
+        // source we cannot reach is a source we cannot use: a timeout, a name that did not resolve
+        // and a refused connection are 测试失败 like any other, so they switch the source off and
+        // land it in the same 清理不可用 set. The old rule exempted them on the theory that they
+        // report the network rather than the source, which left unusable sources switched on and
+        // therefore still offered in the library — the thing the user objected to.
         for message in [
             "CMS 响应请求失败：error sending request for url (https://ikunzyapi.com/...)；client error (Connect)；远程主机强迫关闭了一个现有的连接。 (os error 10054)",
             "无法解析远程主机：不知道这样的主机。 (os error 11001)",
@@ -1939,8 +1942,8 @@ mod tests {
                     .unwrap();
 
             assert!(
-                updated.sources[0].enabled,
-                "a transport failure must leave the source switched on: {message}"
+                !updated.sources[0].enabled,
+                "an unreachable source must be switched off like any other failure: {message}"
             );
             // The failure is still recorded, so the user can see what happened.
             assert_eq!(updated.sources[0].test_status.as_deref(), Some("failed"));

@@ -11,6 +11,7 @@ mod policy;
 mod resolver;
 mod script_runtime;
 mod script_source;
+mod test_runs;
 mod xbpq;
 
 use tauri::Manager;
@@ -38,6 +39,7 @@ pub fn run() {
                 connection,
             ))));
             app.manage(resolver::MediaStreamRegistry::default());
+            app.manage(test_runs::TestRunRegistry::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -60,6 +62,8 @@ pub fn run() {
             config::commands::recover_known_live_sources,
             cms::browse_source,
             cms::test_source,
+            test_runs::cancel_source_test,
+            test_runs::forget_source_test_run,
             cms::get_detail,
             live::load_live_source,
             live::test_live_source,

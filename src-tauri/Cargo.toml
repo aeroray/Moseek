@@ -44,7 +44,10 @@ scraper = "0.20"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["time"] }
+# `time` for the deadlines every fetch carries; `macros` for `select!`, which is how a cancelled
+# source test drops its in-flight future — dropping it is what closes the socket, where a flag alone
+# would only stop the code from *waiting*. `rt` is needed by `select!`'s generated code.
+tokio = { version = "1", features = ["time", "macros", "rt"] }
 sha2 = "0.10"
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 tauri = { version = "2", features = [] }

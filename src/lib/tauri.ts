@@ -329,7 +329,15 @@ export async function browseSource(
   });
 }
 
-export async function testSource(source: SourceRecord) {
+/**
+ * Tests one source.
+ *
+ * `runId` is what makes the test cancellable. It names the batch run this request belongs to, so
+ * `cancelSourceTest` can reach exactly those requests and drop them — which is what actually closes
+ * the sockets, rather than only abandoning the wait for them. Optional, because a single row's test
+ * is not part of a batch and has nothing to cancel it as a group.
+ */
+export async function testSource(source: SourceRecord, runId?: string) {
   const command =
     source.sourceType === "live"
       ? "test_live_source"
@@ -338,7 +346,24 @@ export async function testSource(source: SourceRecord) {
         : "test_source";
   return invokeCommand<SourceTestResult>(command, {
     source,
+    runId: runId ?? null,
   });
+}
+
+/**
+ * Asks the backend to drop every in-flight request belonging to a batch run.
+ *
+ * Without this, cancelling only stopped the frontend from *waiting*: the requests stayed open until
+ * their own 25 s bound and each still persisted its result, so the source list kept changing after
+ * the run had been reported as cancelled.
+ */
+export async function cancelSourceTest(runId: string) {
+  return invokeCommand<void>("cancel_source_test", { runId });
+}
+
+/** Releases a finished run's cancellation flag, so flags do not accumulate per batch. */
+export async function forgetSourceTestRun(runId: string) {
+  return invokeCommand<void>("forget_source_test_run", { runId });
 }
 
 export async function getDetail(source: SourceRecord, vodId: string) {

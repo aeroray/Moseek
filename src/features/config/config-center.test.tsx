@@ -7,7 +7,9 @@ import { ToastProvider } from "@/components/ui/toast";
 import { ConfigCenter } from "@/features/config/config-center";
 import {
   activateConfigDocument,
+  cancelSourceTest as cancelSourceTestCommand,
   fetchConfigUrl,
+  forgetSourceTestRun as forgetSourceTestRunCommand,
   probeScriptAddress,
   replaceAllConfigDocuments,
   saveConfigDocument,
@@ -29,6 +31,10 @@ vi.mock("@/lib/tauri", () => ({
   recoverKnownLiveSources: vi.fn(async () => null),
   exportConfig: vi.fn(),
   testSource: vi.fn(),
+  // Cancellation now reaches the backend, which is what actually closes the sockets. Mocked here so
+  // the batch and single-row cancel paths can be asserted rather than only observed in the UI.
+  cancelSourceTest: vi.fn(async () => undefined),
+  forgetSourceTestRun: vi.fn(async () => undefined),
   updateSourceTest: vi.fn(),
   activateConfigDocument: vi.fn(),
   deleteConfigDocument: vi.fn(),
@@ -226,8 +232,14 @@ function openVisualSection(title: string) {
  * Starts a batch test through the 测速 control.
  *
  * The toolbar used to have one 全部测速 button and clicking it started the run. It is now that button
- * plus a caret that opens a scope picker, so 全部测速 is still one click and the narrower scope is
+ * plus a caret that opens a scope menu, so 全部测速 is still one click and the narrower scope is
  * reachable. Tests name the scope rather than just clicking, which is the point of the change.
+ *
+ * **Every query here is synchronous, and that is deliberate.** The menu is a Radix `DropdownMenu`,
+ * whose popper positioning costs jsdom seconds per test that opens it (measured: a `Select` with
+ * `item-aligned` was 193 ms for three tests, `DropdownMenu` 51 775 ms). The node is in the DOM 76 ms
+ * after the key press — an act-wrapped `findByRole` on that same node did not return for 19.5 s — so
+ * an async query here would both waste seconds and risk starving `waitFor`.
  */
 function startBatchTest(scope: "全部测速" | "只测未测过的" = "全部测速") {
   if (scope === "全部测速") {
@@ -235,18 +247,16 @@ function startBatchTest(scope: "全部测速" | "只测未测过的" = "全部�
     fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
     return;
   }
-  const trigger = screen.getByLabelText("测速范围");
-  fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-  fireEvent.click(trigger);
-  const option = screen
-    .getAllByRole("option")
+  fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
+  const item = screen
+    .getAllByRole("menuitem")
     .find((node) => new RegExp(scope).test(node.textContent ?? ""));
-  if (!option) {
+  if (!item) {
     throw new Error(
-      `no option matching ${scope}; saw ${screen.getAllByRole("option").map((n) => n.textContent).join(" | ")}`,
+      `no menu item matching ${scope}; saw ${screen.getAllByRole("menuitem").map((n) => n.textContent).join(" | ")}`,
     );
   }
-  fireEvent.click(option);
+  fireEvent.click(item);
 }
 
 /**
@@ -301,6 +311,10 @@ describe("config center", () => {
     vi.mocked(replaceAllConfigDocuments).mockClear();
     vi.mocked(activateConfigDocument).mockReset();
     vi.mocked(activateConfigDocument).mockResolvedValue(null);
+    // The cancellation mocks are asserted by call count in more than one test, so a call from an
+    // earlier test would satisfy a later assertion that never actually happened.
+    vi.mocked(cancelSourceTestCommand).mockClear();
+    vi.mocked(forgetSourceTestRunCommand).mockClear();
     // The filter now lives in the store so it survives a restart, which means it also survives
     // between tests. Reset it here, or a filter one test chose narrows the next test's list.
     useAppStore.setState({
@@ -2641,6 +2655,75 @@ describe("config center", () => {
     });
   });
 
+  it("runs the batch at the full width, not four at a time", () => {
+    // The width is the whole point of the change: the user has several hundred sources and the run's
+    // length is dominated by how many dead ones can sit on their timeout at once. Measured, the
+    // database write this used to be throttled for costs 4.5 ms on a 320-source document against a
+    // 15 s request budget, so the old ceiling of 4 was limiting the batch for no reason.
+    //
+    // Asserted as a floor rather than the exact constant, so a future widening does not fail a test
+    // whose subject is "not four any more".
+    const pending: Array<(value: SourceTestResult) => void> = [];
+    vi.mocked(testSourceCommand).mockImplementation(
+      () =>
+        new Promise<SourceTestResult>((resolve) => {
+          pending.push(resolve);
+        }),
+    );
+    const many = Array.from({ length: 40 }, (_, index) => ({
+      ...supported,
+      key: `s${index}`,
+      name: `源 ${index}`,
+    }));
+    useAppStore.setState({
+      sources: many,
+      rawConfig: JSON.stringify({ sites: [] }),
+      normalizedConfig: JSON.stringify({ sites: [] }),
+      configDocuments: [
+        { id: 1, name: "主配置", sourceCount: 40, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
+      ],
+      configDocumentCache: {},
+      activeConfigId: 1,
+      lastImportedAt: "2026-01-01T00:00:00.000Z",
+    });
+    renderPage(<ConfigCenter />);
+
+    startBatchTest();
+
+    // 40 sources is more than the pool width, so this is the pool's width and not the list's size.
+    expect(pending.length).toBeGreaterThan(4);
+    expect(pending.length).toBeLessThan(40);
+
+    for (const resolve of pending) resolve(testResult());
+  });
+
+  it("disables 清理不可用 while a test is running, and re-enables it after", async () => {
+    // A running test is what creates removable sources: every failure switches one off and adds it to
+    // this count, so mid-run the number climbs under the cursor and the set behind it is still
+    // changing. Confirming a deletion whose size the user never saw is the thing to prevent.
+    let resolveTest: (result: SourceTestResult) => void = () => {};
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>((resolve) => { resolveTest = resolve; }),
+    );
+    renderCenter();
+    chooseFilter("未适配");
+
+    const before = screen.getByRole("button", { name: /清理不可用/ });
+    expect(before).toBeEnabled();
+
+    startBatchTest();
+
+    const during = await screen.findByRole("button", { name: /清理不可用/ });
+    expect(during).toBeDisabled();
+    // Kept on screen rather than removed, so the toolbar does not reflow as the run proceeds.
+    expect(during).toBeInTheDocument();
+
+    resolveTest(testResult());
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /清理不可用/ })).toBeEnabled();
+    });
+  });
+
   it("offers a way to stop a batch that is running", async () => {
     // A batch used to be unstoppable: the button became a disabled "测速中" label and the only
     // way out was to wait for every source, including the ones that hang.
@@ -2808,6 +2891,58 @@ describe("config center", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/已自动关闭该源的启用开关/)).toBeInTheDocument();
+    });
+  });
+
+  it("switches off a source it could not reach, and says so", async () => {
+    // **The user's rule.** A source we cannot reach is a source we cannot use, so a timeout is
+    // 测试失败 like any other: the switch goes off and the toast says so. This used to be the one
+    // failure that left the switch alone — and the row's own 状态 column read 连接失败 to explain
+    // why — which left unusable sources switched on and still offered in the library.
+    vi.mocked(testSourceCommand).mockResolvedValue(
+      testResult({
+        status: "failed",
+        itemCount: 0,
+        message: "测试超时（25 秒），已停止等待。该源可能无法访问或响应过慢。",
+      }),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().sources[0].enabled).toBe(false);
+    });
+    expect(useAppStore.getState().sources[0].testStatus).toBe("failed");
+    // The row carries the same word as any other failure, because the outcome is the same.
+    expect(screen.getByText("测试失败")).toBeInTheDocument();
+    expect(screen.queryByText("连接失败")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText(/已自动关闭该源的启用开关/)).toBeInTheDocument();
+    });
+  });
+
+  it("counts an unreachable source as removable, because it is unusable", async () => {
+    // 清理不可用 deletes what cannot work. A source we could not reach cannot work, so it belongs in
+    // the set — the same rule the switch follows, so the count and the switches cannot disagree.
+    vi.mocked(testSourceCommand).mockResolvedValue(
+      testResult({
+        status: "failed",
+        itemCount: 0,
+        message: "无法解析远程主机：不知道这样的主机。 (os error 11001)",
+      }),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+
+    await waitFor(() => {
+      expect(useAppStore.getState().sources[0].enabled).toBe(false);
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: /清理不可用 \(1\)/ }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -3318,21 +3453,22 @@ describe("config center", () => {
     });
     renderPage(<ConfigCenter />);
 
-    // The caret opens the scope picker, and the option carries its own count so the user can see
-    // whether the narrower scope is worth choosing.
-    const caret = screen.getByLabelText("测速范围");
-    fireEvent.pointerDown(caret, { button: 0, ctrlKey: false });
-    fireEvent.click(caret);
-    const option = screen.getByRole("option", { name: /只测未测过的（1）/ });
+    // The caret opens the scope menu, and the item carries its own count so the user can see whether
+    // the narrower scope is worth choosing. Synchronous on purpose — see `startBatchTest`.
+    fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
+    const item = screen.getByRole("menuitem", { name: /只测未测过的（1）/ });
 
-    fireEvent.click(option);
+    fireEvent.click(item);
 
     await waitFor(() => {
       expect(testedKeys).toContain("fresh");
     });
     // And only that one: the already-tested source is left alone.
     expect(testedKeys).not.toContain("tested");
-  });
+    // Opening a popper-based menu costs jsdom ~3.2 s of teardown (measured; see the
+    // `avoidCollisions` note in the component), so the 5 s default is too tight for a test that
+    // opens one.
+  }, 20000);
 
   it("disables the narrower scope when everything has been tested", () => {
     // The count is the answer to "is this worth opening", so a scope with nothing in it is disabled
@@ -3351,19 +3487,163 @@ describe("config center", () => {
     });
     renderPage(<ConfigCenter />);
 
-    const caret = screen.getByLabelText("测速范围");
-    fireEvent.pointerDown(caret, { button: 0, ctrlKey: false });
-    fireEvent.click(caret);
+    fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
 
-    expect(screen.getByRole("option", { name: /只测未测过的（0）/ })).toHaveAttribute(
-      "data-disabled",
-    );
+    // Radix marks a disabled item with `data-disabled`; `aria-disabled` is not applied, so the
+    // attribute is the contract here.
+    expect(
+      screen.getByRole("menuitem", { name: /只测未测过的（0）/ }),
+    ).toHaveAttribute("data-disabled");
+  }, 20000);
+
+  it("keeps both scopes reachable as repeatable actions, which a Select could not do", async () => {
+    // The user's report: the menu did not behave like the official ButtonGroup example. It was a
+    // `Select`, and a Radix `Select` does NOT fire `onValueChange` when the already-selected option
+    // is chosen again — correct for a picker, but it made 全部测速 unreachable from the menu as a
+    // repeat action. The official example pairs `ButtonGroup` with a `DropdownMenu`, where every
+    // item fires every time, so the menu can offer both scopes as plain actions.
+    //
+    // Asserted by running each scope THROUGH THE MENU. The narrower scope goes first: it needs a
+    // source that has never been tested, and running 全部测速 first would leave nothing untested and
+    // disable that item. A `Select` would fire the first and silently ignore the second.
+    const runs: string[] = [];
+    vi.mocked(testSourceCommand).mockImplementation(async (source: { key: string }) => {
+      runs.push(source.key);
+      return testResult();
+    });
+    renderCenter();
+
+    for (const scope of ["只测未测过的", "全部测速"]) {
+      fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
+      fireEvent.click(screen.getByRole("menuitem", { name: new RegExp(scope) }));
+      await waitFor(() => {
+        expect(runs.length, `${scope} should have started a run`).toBeGreaterThan(0);
+      });
+      // Let the run finish so the toolbar returns to the scope control.
+      await waitFor(() => {
+        expect(screen.getByLabelText("测速范围")).toBeInTheDocument();
+      });
+      runs.length = 0;
+    }
+    // Two opens, so this needs room above the ~3.2 s-per-open jsdom teardown cost.
+  }, 30000);
+
+  it("renders one caret in the scope trigger, and no leftover selected-value text", () => {
+    // This replaces a test of the `Select` workaround that is no longer needed. The bug then was
+    // that the caret rendered the selected scope as visible text clipped to a one-glyph sliver
+    // ("全") jammed against the arrow, because Radix's `SelectValue` DROPS `className` and a
+    // childless one makes Radix portal the selected item's text into it.
+    //
+    // A `Button` renders exactly the children it is given, so there is nothing to hide. What is
+    // worth pinning is the outcome that bug was about: the trigger holds exactly one icon and no
+    // text at all, so the sliver cannot come back through some other route.
+    renderCenter();
+
+    const caret = screen.getByLabelText("测速范围");
+    expect(caret.querySelectorAll("svg")).toHaveLength(1);
+    expect(caret.textContent).toBe("");
   });
 
-  it("keeps 全部测速 a single click, because a Select cannot re-fire its own value", () => {
-    // Measured: a Radix `Select` does NOT call `onValueChange` when the already-selected option is
-    // chosen again. That is right for a picker but would make the commonest action unreachable, so the
-    // main button stayed a button and only the caret is a Select.
+  it("gives the caret the outline button's surface, so the split halves match", () => {
+    // The right half kept `Select`'s own border and background while the left half was an outline
+    // button, so the two halves of one control were two visibly different greys. Now both halves are
+    // outline buttons and the shared surface comes from `variant`, so this asserts the class contract
+    // `ButtonGroup` needs: no leftover `Select` surface, and the same variant as its neighbour.
+    renderCenter();
+
+    const caret = screen.getByLabelText("测速范围");
+    expect(caret.className).not.toContain("bg-input/20");
+    expect(caret.className).not.toContain("border-input/80");
+    // Same border and background tokens as the 全部测速 button beside it, which is what makes the two
+    // halves read as one control.
+    const main = screen.getByRole("button", { name: /全部测速/ });
+    for (const token of ["border-border/80", "bg-background/60"]) {
+      expect(caret.className).toContain(token);
+      expect(main.className).toContain(token);
+    }
+  });
+
+  it("asks the backend to drop the in-flight requests when a batch is cancelled", async () => {
+    // The reported bug: "我明明点击了取消测速，但是它还在后台测，根本没有立刻停下来". Cancelling used to
+    // only stop the frontend from WAITING — the requests stayed open until their own 25 s bound and
+    // each still persisted its result, so the list kept changing after "测速已取消" was shown.
+    // Reaching the backend is the fix, and it is what this asserts: the UI stopping is not evidence.
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>(() => {}),
+    );
+    renderCenter();
+
+    startBatchTest();
+    const cancel = await screen.findByRole("button", { name: /取消测速/ });
+    fireEvent.click(cancel);
+
+    await waitFor(() => {
+      expect(cancelSourceTestCommand).toHaveBeenCalled();
+    });
+    // The id must be the run's own, so a later batch is not cancelled by this one's signal.
+    const runId = vi.mocked(cancelSourceTestCommand).mock.calls[0][0];
+    expect(typeof runId).toBe("string");
+    expect(runId.length).toBeGreaterThan(0);
+  });
+
+  it("does not write a result the backend dropped because the run was cancelled", async () => {
+    // The sentinel means "this request was abandoned", not "this source failed". Persisting it would
+    // mark the source 测试失败 or switch it off on the strength of a run the user cancelled.
+    vi.mocked(testSourceCommand).mockResolvedValue(
+      testResult({ status: "failed", message: "__moseek_cancelled__" }),
+    );
+    renderCenter();
+    const writesBefore = vi.mocked(updateSourceTestCommand).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+
+    await waitFor(() => {
+      expect(testSourceCommand).toHaveBeenCalled();
+    });
+    expect(vi.mocked(updateSourceTestCommand).mock.calls.length).toBe(writesBefore);
+    // And no failure toast, because nothing failed.
+    expect(screen.queryByText(/测试未通过/)).not.toBeInTheDocument();
+  });
+
+  it("asks the backend to stop a single row's test too, not just a batch", async () => {
+    // The row's X used to clear the spinner and drop the outcome while the request kept running.
+    vi.mocked(testSourceCommand).mockImplementation(
+      () => new Promise<SourceTestResult>(() => {}),
+    );
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+    const cancel = await screen.findByRole("button", { name: /取消测试 可用的源/ });
+    fireEvent.click(cancel);
+
+    await waitFor(() => {
+      expect(cancelSourceTestCommand).toHaveBeenCalled();
+    });
+    // The run id names THIS source, so cancelling one row cannot stop another's test. Asserted on
+    // the key rather than the display name, because the key is what the id is built from.
+    const runId = vi.mocked(cancelSourceTestCommand).mock.calls.at(-1)?.[0] as string;
+    expect(runId).toContain("single-");
+    expect(runId).toContain(supported.key);
+  });
+
+  it("releases a finished run's cancellation flag", async () => {
+    // Flags live in a registry in the Rust process, so a session of many batches would accumulate
+    // one entry per run unless each is released when it ends.
+    vi.mocked(testSourceCommand).mockResolvedValue(testResult());
+    renderCenter();
+
+    startBatchTest();
+
+    await waitFor(() => {
+      expect(forgetSourceTestRunCommand).toHaveBeenCalled();
+    });
+  });
+
+  it("keeps 全部测速 a single click, so the commonest action needs no menu", () => {
+    // The main button is the action; the caret only offers the narrower scope. This mattered more
+    // when the caret was a `Select` (which cannot re-fire its own value, making the commonest action
+    // unreachable from the menu), but it stays true now that the caret is a `DropdownMenu`: opening a
+    // menu to run the run you always run is a step nobody wants.
     vi.mocked(testSourceCommand).mockImplementation(() => new Promise(() => {}));
     renderCenter();
 

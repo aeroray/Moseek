@@ -356,6 +356,18 @@ export function mergeRawConfigs(
  * Relative paths (`./libs/js/drpy2.min.js`) only mean something together with the base URL they
  * were imported with, and a merged configuration can only keep one base. Absolutising the incoming
  * side first means nothing silently points at the wrong host after the merge.
+ *
+ * **Both collections are handled, and for a long time only `sites` was.** That omission is why the
+ * author's configuration kept 19 live sources reading 未执行: measured against the real database, 45
+ * `lives` entries hold 14 relative addresses (`url` ×11, `api` ×3) and 41 `sites` entries hold none.
+ * The one collection that needed the repair was the one it did not touch, so `./FM.json` survived
+ * the merge verbatim and could never be fetched.
+ *
+ * Live entries spell the address `url` where sites spell it `api`, so both keys are rewritten. The
+ * conservative rule is kept: only a genuine relative PATH (`./x`, `../x`) is resolved. A bare token
+ * such as `yqk`, `csp_MQiTV` or `直播链接自定义` is a name an adapter resolves, not a path — turning
+ * one into `http://host/yqk` would invent a URL that never existed and make an unusable source look
+ * fixable.
  */
 export function absolutizeRelativeSites(
   raw: JsonObject,
@@ -370,14 +382,10 @@ export function absolutizeRelativeSites(
   }
   if (base.protocol !== "http:" && base.protocol !== "https:") return raw;
 
-  const sites = raw.sites;
-  if (!Array.isArray(sites)) return raw;
-
   const absolutize = (value: unknown): unknown => {
     if (typeof value !== "string" || !value.trim()) return value;
     const trimmed = value.trim();
-    // Leave anything that already carries a scheme, and leave the dialect tokens (`csp_Bili`)
-    // alone: those are names resolved by an adapter, not URLs.
+    // Leave anything that already carries a scheme alone.
     if (/^[a-z][a-z\d+.-]*:/i.test(trimmed)) return value;
     try {
       const resolved = new URL(trimmed, base);
@@ -389,20 +397,32 @@ export function absolutizeRelativeSites(
     }
   };
 
-  return {
-    ...raw,
-    sites: sites.map((site) => {
-      if (site === null || typeof site !== "object" || Array.isArray(site)) return site;
-      const object = site as JsonObject;
-      const next: JsonObject = { ...object };
-      if (typeof object.api === "string" && /^\.{1,2}\//.test(object.api.trim())) {
-        next.api = absolutize(object.api) as JsonValue;
+  const rewrite = (
+    items: unknown,
+    addressKeys: readonly string[],
+  ): unknown => {
+    if (!Array.isArray(items)) return items;
+    return items.map((entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return entry;
       }
-      if (typeof object.ext === "string" && /^\.{1,2}\//.test(object.ext.trim())) {
-        next.ext = absolutize(object.ext) as JsonValue;
+      const object = entry as JsonObject;
+      const next: JsonObject = { ...object };
+      for (const key of [...addressKeys, "ext"]) {
+        const value = object[key];
+        if (typeof value === "string" && /^\.{1,2}\//.test(value.trim())) {
+          next[key] = absolutize(value) as JsonValue;
+        }
       }
       return next;
-    }),
+    });
+  };
+
+  return {
+    ...raw,
+    // A site addresses its endpoint as `api`; a live entry as `url` (or `api` in some packs).
+    sites: rewrite(raw.sites, ["api"]) as JsonValue,
+    lives: rewrite(raw.lives, ["url", "api"]) as JsonValue,
   };
 }
 

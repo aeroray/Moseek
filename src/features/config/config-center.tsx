@@ -16,6 +16,7 @@ import {
   Braces,
   Check,
   CircleAlert,
+  ChevronDown,
   Code2,
   CircleCheck,
   CircleX,
@@ -46,6 +47,7 @@ import { ConfigVisualEditor } from "@/features/config/config-visual-editor";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@/components/ui/button-group";
 import {
   Card,
   CardContent,
@@ -61,6 +63,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Empty,
   EmptyDescription,
@@ -143,11 +151,13 @@ import {
   isTestableSource,
   type AdapterExecution,
 } from "@/lib/adapters";
-import { cn } from "@/lib/utils";
+import { cn, errorMessage } from "@/lib/utils";
 import {
   activateConfigDocument,
+  cancelSourceTest,
   exportConfig,
   fetchConfigUrl,
+  forgetSourceTestRun,
   isTauriRuntime,
   loadActiveConfig,
   listScriptArchives,
@@ -162,6 +172,7 @@ import {
   type StoredConfigDocument,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
+import { isQuotaError } from "@/stores/persist-storage";
 import type {
   CapabilityStatus,
   SourceDialect,
@@ -202,12 +213,27 @@ type AdapterFilter = "all" | AdapterExecution;
 /**
  * How many sources a batch test probes at once.
  *
- * Serial testing made a large configuration take the sum of every source's latency. Testing all
- * of them at once would open as many sockets as there are sources, which trips rate limits and
- * makes every failure look like a local network problem. Four is enough to hide a slow source
- * behind three others without looking like a flood.
+ * Serial testing made a large configuration take the sum of every source's latency, and testing all
+ * of them at once would open as many sockets as there are sources, which trips rate limits and makes
+ * every failure look like a local network problem.
+ *
+ * The width was 4 and is now 16, because 4 was chosen for a much smaller list than the user actually
+ * has. The cost that would argue against going wider — persisting one result, which rewrites the
+ * whole document — was measured at **4.5 ms on a 320-source document and 10.2 ms on a 700-source
+ * one**, against per-request budgets of 15 s (reqwest) and 25 s (the test's own outer bound). The
+ * database work is therefore three orders of magnitude below the network work, and the batch is
+ * bound by the network alone: the user's list is several hundred sources, and a dead source costs
+ * its full timeout, so the run's length is dominated by how many of those timeouts can overlap.
+ * Four at a time means they mostly queue; sixteen means they mostly do not.
+ *
+ * 16 rather than "all of them" keeps both real constraints intact. Sources in one configuration are
+ * overwhelmingly on different hosts, so 16 concurrent sockets is usually 16 hosts seeing one request
+ * each — but it is still bounded, so a configuration that does point many entries at one host cannot
+ * turn a test into a flood. And the persistence stays a bounded multiple of a single write: sixteen
+ * results landing together is ~160 ms of serialized database work on a 700-source document, which is
+ * why `update_source_test` no longer runs on the main thread (see its own comment).
  */
-const TEST_CONCURRENCY = 4;
+const TEST_CONCURRENCY = 16;
 
 /**
  * How many addresses of a 多仓 list are fetched at once.
@@ -219,8 +245,45 @@ const TEST_CONCURRENCY = 4;
  */
 const IMPORT_CONCURRENCY = 4;
 
-/** Which sources a batch test covers. */
-type TestScope = "all" | "untested";
+/**
+ * The marker the backend returns for a test it dropped because the run was cancelled.
+ *
+ * Mirrors `cms::CANCELLED` in Rust. It is a sentinel rather than an error because a cancelled test
+ * is an ordinary outcome, not a failure — but it must never be mistaken for a result, or an
+ * abandoned run would still write 测试失败 onto its sources.
+ */
+const CANCELLED_TEST_MARKER = "__moseek_cancelled__";
+
+/** Whether a test result is really the cancellation sentinel. */
+function isCancelledTestResult(result: SourceTestResult): boolean {
+  return result.message === CANCELLED_TEST_MARKER;
+}
+
+/**
+ * Whether this result switched the source's 启用 switch off.
+ *
+ * The rule is the backend's (`storage::set_source_test_in_connection`): `failed` and `empty` both
+ * switch the source off, `passed` and `blocked` leave it alone.
+ *
+ * **A failure that never reached the server counts too.** This used to exempt transport failures —
+ * a timeout, a name that did not resolve, a refused connection — on the theory that they report the
+ * network rather than the source. The user's rule is simpler and is what ships: a source we cannot
+ * reach is a source we cannot use. So the distinction is gone from the screen as well, because a
+ * label nothing acts on is just a second word for the same thing.
+ */
+function didTestSwitchSourceOff(result: SourceTestResult): boolean {
+  return result.status === "failed" || result.status === "empty";
+}
+
+/** Whether a rejection was the cancellation, which arrives as a plain string over Tauri's IPC. */
+function isCancelledTestError(error: unknown): boolean {
+  if (typeof error === "string") return error === CANCELLED_TEST_MARKER;
+  if (error instanceof Error) return error.message === CANCELLED_TEST_MARKER;
+  if (error && typeof error === "object" && "message" in error) {
+    return (error as { message?: unknown }).message === CANCELLED_TEST_MARKER;
+  }
+  return false;
+}
 
 export function ConfigCenter() {
   const toast = useToast();
@@ -391,17 +454,14 @@ export function ConfigCenter() {
     [testableSources],
   );
   /**
-   * Which test scope the 测速 下拉框 is showing.
-   *
-   * The control is a scope picker that also acts: choosing an option starts that run immediately, so
-   * the stored value is really "the scope most recently chosen". It is kept rather than reset so the
-   * trigger does not snap back to 全部测速 the moment a narrower run starts.
-   */
-  const [testScope, setTestScope] = useState<TestScope>("all");
-  /**
    * The sources that cannot currently work: no adapter exists for them, or a test found them
    * broken or empty. A source that passed, or that has simply not been tested yet, is left alone
    * — "untested" is not evidence of being useless, and the user may still want to try it.
+   *
+   * A source we could not reach counts, and that is the user's explicit decision: a source we
+   * cannot reach is a source we cannot use, so it is 测试失败 like any other and belongs in the set
+   * this button prunes. The rule is the same one the switch follows, so the count and the switches
+   * can never disagree.
    */
   const removableSources = useMemo(
     () =>
@@ -825,20 +885,25 @@ export function ConfigCenter() {
   /**
    * Single tests the user has abandoned, by source key.
    *
-   * A request already in flight cannot be recalled, so cancelling means the interface stops waiting
-   * and drops the outcome — the same approach the batch cancel takes, for the same reason: a source
-   * that hangs is exactly what the user is trying to escape, and waiting for it would reproduce the
-   * freeze the button exists to fix. The backend still bounds the request at 25 seconds.
+   * This used to be the whole mechanism: the interface stopped waiting and dropped the outcome, and
+   * the comment here said the request "cannot be recalled". That is true of a promise, but not of
+   * the socket — dropping the backend future closes it. So each single test now gets its own run id
+   * and cancelling calls `cancelSourceTest` on it, which is what actually stops the download. The
+   * key set is kept because the outcome still has to be ignored if it arrives during the race.
    */
   const cancelledTestKeys = useRef(new Set<string>());
+  /** The run id each in-flight single test is registered under, so cancelling can reach it. */
+  const singleTestRunIds = useRef(new Map<string, string>());
 
   const handleTestSource = useCallback(
     async (source: SourceRecord) => {
       if (testingKeys.has(source.key)) return;
     cancelledTestKeys.current.delete(source.key);
+    const runId = `single-${source.key}-${Date.now()}`;
+    singleTestRunIds.current.set(source.key, runId);
     setTestingKeys((current) => new Set(current).add(source.key));
     try {
-      const result = await testSource(source);
+      const result = await testSource(source, runId);
       // **Checked before anything is written.** A cancelled test must not persist its result: a
       // failure would switch the source off, so abandoning a test and then having it silently
       // disable the source would be worse than not offering the cancel at all.
@@ -851,6 +916,9 @@ export function ConfigCenter() {
           "浏览器预览不会直接请求 CMS 或直播源，请在 Tauri 桌面应用中测试。",
         );
       }
+      // The backend answers a dropped request with the sentinel instead of a result. Treated the
+      // same as a local cancellation: it must not be written.
+      if (isCancelledTestResult(result)) return null;
       const persistedDocument =
         activeConfigId === null
           ? null
@@ -869,16 +937,15 @@ export function ConfigCenter() {
       // Reported as a toast rather than a banner: this describes one finished operation, and a
       // banner left it on the page until the next action replaced it. A test that found the
       // source unusable also switches it off, which is worth saying because the switch in the
-      // row will have moved on its own.
-      const disabled =
-        result.status === "failed" || result.status === "empty";
+      // row will have moved on its own. Every failure counts, including one that never reached the
+      // server — see `didTestSwitchSourceOff`.
       toast({
         variant: result.status === "passed" ? "success" : "error",
         title: `${source.name}：${
           result.status === "passed" ? "测试通过" : "测试未通过"
         }`,
         description: `${result.message}${
-          disabled ? " 已自动关闭该源的启用开关。" : ""
+          didTestSwitchSourceOff(result) ? " 已自动关闭该源的启用开关。" : ""
         }`,
       });
       return result;
@@ -887,16 +954,20 @@ export function ConfigCenter() {
         cancelledTestKeys.current.delete(source.key);
         return null;
       }
+      // A dropped request rejects rather than resolving with the sentinel, so the cancellation has
+      // to be recognised here too — otherwise abandoning a test would report it as a failure.
+      if (isCancelledTestError(error)) return null;
       // Reported the same way as a completed test: this is the outcome of the same action, and
       // mixing a toast with a page banner for the failure case would make the error look like a
       // different kind of event.
       toast({
         variant: "error",
         title: `${source.name}：测试失败`,
-        description: error instanceof Error ? error.message : "源测试失败",
+        description: errorMessage(error, "源测试失败"),
       });
       return null;
     } finally {
+      singleTestRunIds.current.delete(source.key);
       setTestingKeys((current) => {
         const next = new Set(current);
         next.delete(source.key);
@@ -919,9 +990,20 @@ export function ConfigCenter() {
    *
    * The loading state clears immediately rather than when the request settles, so the row stops
    * looking busy the moment the user asks it to. The outcome is dropped when it arrives.
+   *
+   * It also reaches the backend, which is the part that was missing: clearing the row and dropping
+   * the outcome left the request running until its own 25 s bound, so a cancelled test kept
+   * downloading and kept the row's source busy. `cancelSourceTest` drops the future, which closes
+   * the connection.
    */
   const handleCancelTestSource = useCallback((sourceKey: string) => {
     cancelledTestKeys.current.add(sourceKey);
+    const runId = singleTestRunIds.current.get(sourceKey);
+    if (runId) {
+      void cancelSourceTest(runId)
+        .then(() => forgetSourceTestRun(runId))
+        .catch(() => undefined);
+    }
     setTestingKeys((current) => {
       const next = new Set(current);
       next.delete(sourceKey);
@@ -936,22 +1018,34 @@ export function ConfigCenter() {
    * finish overwrote every other result and the summary was the only thing the user ever saw.
    * Per-source outcomes belong on the rows; the banner is for the batch.
    */
-  const runBatchTest = async (source: SourceRecord) => {
+  const runBatchTest = async (source: SourceRecord, runId: string) => {
     setTestingKeys((current) => new Set(current).add(source.key));
     try {
-      const result = await testSource(source);
+      const result = await testSource(source, runId);
       if (!result) return null;
+      // **A cancelled test must not be written.** The backend returns a sentinel rather than a
+      // result when it drops the request, and persisting that would mark the source 测试失败 — or
+      // switch it off — on the strength of a run the user explicitly abandoned. This is the same
+      // rule the single-row cancel already follows; the batch path was missing it, so a cancelled
+      // batch kept mutating the source list as the abandoned requests landed.
+      if (isCancelledTestResult(result)) return null;
       const persistedDocument =
         activeConfigId === null
           ? null
           : await updateSourceTest(activeConfigId, source.key, result);
+      // The user can cancel while the result is being written, so the check is repeated after the
+      // round-trip: the write may already be in flight when the cancel arrives.
+      if (cancelTestRef.current) return null;
       if (persistedDocument) {
         setConfigDocument(persistedDocument);
       } else {
         setSourceTestResult(source.key, result);
       }
       return result;
-    } catch {
+    } catch (error) {
+      // A cancelled request rejects rather than resolving with a sentinel, so the cancellation has
+      // to be recognised here too, or it would be reported as a per-source failure.
+      if (isCancelledTestError(error)) return null;
       return null;
     } finally {
       setTestingKeys((current) => {
@@ -980,11 +1074,23 @@ export function ConfigCenter() {
     }
     setIsBatchTesting(true);
     cancelTestRef.current = false;
-    // Cancelling has to resolve the batch immediately rather than wait for the requests already
-    // in flight. Those cannot be recalled, and a source that hangs is exactly the case the user
-    // is cancelling to escape — waiting for it would reproduce the freeze the button exists to
-    // fix. The stragglers settle on their own (the backend bounds them) and their results are
-    // dropped because the run is already over.
+    /**
+     * This run's identity, which is what makes cancelling reach the sockets.
+     *
+     * The previous implementation only stopped the frontend from waiting: the requests stayed open
+     * in Rust until their own 25 s bound and each still persisted its result, so the list kept
+     * changing after "测速已取消" had been reported. A per-run id is what lets `cancelSourceTest`
+     * drop exactly this batch's requests without touching a later run.
+     */
+    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    /**
+     * Cancelling now does two things, and it needs both.
+     *
+     * `cancelSourceTest` reaches into the backend and drops the in-flight futures — that is what
+     * actually closes the connections. `releaseCancellation` stops the worker pool from starting
+     * anything new and lets the summary resolve without waiting for the drops to be acknowledged.
+     * Only doing the second was the reported bug: the sockets stayed open.
+     */
     let releaseCancellation: () => void = () => {};
     const cancelledSignal = new Promise<void>((resolve) => {
       releaseCancellation = resolve;
@@ -992,6 +1098,9 @@ export function ConfigCenter() {
     const cancelRequested = () => {
       cancelTestRef.current = true;
       releaseCancellation();
+      // Fire-and-forget: the local state is already correct, and making the button await a
+      // round-trip would reintroduce the delay this exists to remove.
+      void cancelSourceTest(runId).catch(() => undefined);
     };
     cancelRunRef.current = cancelRequested;
 
@@ -1008,7 +1117,7 @@ export function ConfigCenter() {
           const source = queue.shift();
           if (!source) return;
           const outcome = await Promise.race([
-            runBatchTest(source).then((result) => ({ result })),
+            runBatchTest(source, runId).then((result) => ({ result })),
             cancelledSignal.then(() => null),
           ]);
           if (cancelTestRef.current) return;
@@ -1020,13 +1129,16 @@ export function ConfigCenter() {
     const cancelled = cancelTestRef.current;
     cancelRunRef.current = null;
     setIsBatchTesting(false);
+    // The run is over, so its flag is released. Without this a long session of many batches would
+    // accumulate one entry per run for the process's lifetime.
+    void forgetSourceTestRun(runId).catch(() => undefined);
 
     const passedCount = results.filter(
       (result) => result.status === "passed",
     ).length;
-    const disabledCount = results.filter(
-      (result) => result.status === "failed" || result.status === "empty",
-    ).length;
+    // Every failure counts, including one that never reached the server — a source we cannot reach
+    // is a source we cannot use, so it is switched off and counted here.
+    const disabledCount = results.filter(didTestSwitchSourceOff).length;
     if (cancelled) {
       toast({
         variant: "info",
@@ -1248,11 +1360,26 @@ export function ConfigCenter() {
                   // Each address is repaired on its own, because a publisher's typo should not cost
                   // the whole batch — this is the same pass the single-address path runs.
                   const parsed = parseConfigText(source.text, entry.url);
-                  const repaired = parsed.ok ? null : repairConfigText(source.text);
-                  text =
-                    repaired?.ok === true && repaired.text !== source.text
-                      ? repaired.text
-                      : source.text;
+                  let working = source.text;
+                  if (!parsed.ok) {
+                    const repaired = repairConfigText(source.text);
+                    if (repaired.ok) working = repaired.text;
+                  }
+                  /**
+                   * **Absolutised here, while this entry's own URL is still known.**
+                   *
+                   * A relative path inside an entry was written against THAT entry's address, and the
+                   * merged document can only keep one base — so leaving it relative loses the only
+                   * information that could ever resolve it. Measured against the author's real 多仓
+                   * list: the entry `SVIP📚在线` contributes 14 live sources addressed `./FM.json`,
+                   * `./lib/tv/ipv6.m3u` and so on, and every one of them was unusable afterwards.
+                   * Resolved against its own URL, `./FM.json` returns a real playlist
+                   * (`电台,#genre#` / `Soft Rock,https://stream.revma.ihrhls.com/...`).
+                   */
+                  const raw = parseRawObject(working);
+                  text = raw
+                    ? JSON.stringify(absolutizeRelativeSites(raw, entry.url))
+                    : working;
                 }
               }
             } catch {
@@ -1718,12 +1845,31 @@ export function ConfigCenter() {
     // defence; this is the first.
   }, [rawDraft, rawConfig, hasRawChanges, isSavingRaw, configBaseUrl, activeConfigId]);
 
+  /**
+   * Reports a failure to write the configuration, naming what actually failed.
+   *
+   * **A full browser store is not a configuration problem, and saying so was a lie the user had to
+   * decode.** Measured on the reported 多仓 import: 54 addresses, 35 reachable, 11 real
+   * configurations, merged to 602 sources. The store's own `partialize` over that document is
+   * 695 KB against a 5120 KB quota — so the merged configuration is not the problem, and the
+   * message `解析成功，但保存失败：... exceeded the quota` under the title `需要修正配置` sent the user
+   * to look for a defect in a file that was fine.
+   *
+   * With `persist-storage.ts` in place the quota case no longer throws at all, so reaching here
+   * means a genuine write failure. The title is still suppressed for the storage case in case an
+   * older path or a browser we do not control raises it, because "需要修正配置" is the one thing it
+   * certainly is not.
+   */
   const saveParseError = (error: unknown) => {
     const message =
       error instanceof Error ? error.message : "本地数据库写入失败";
+    const isStorage = isQuotaError(error) || /quota|exceeded/i.test(message);
     setParseState({
       type: "error",
-      message: `解析成功，但保存失败：${message}`,
+      title: isStorage ? "浏览器存储已满" : undefined,
+      message: isStorage
+        ? `配置已保存到本地数据库，但浏览器的临时镜像写不进去（存储已满）。这不影响已导入的配置，可以继续使用；重启后本页的列表会从数据库重新读取。`
+        : `解析成功，但保存失败：${message}`,
     });
   };
 
@@ -2020,13 +2166,23 @@ export function ConfigCenter() {
                          unreachable as a repeat action, which is the thing the user does most. So the
                          main button stays what it always was (one click runs 全部测速) and the caret
                          beside it opens the scope picker. Nothing is lost from the old behaviour and
-                         the narrower scope is now expressible. */
-                      <div className="flex items-center">
+                         the narrower scope is now expressible.
+
+                         The seam between them is `ButtonGroup`'s job, not this file's. It used to be
+                         hand-written — `rounded-r-none border-r-0` here, `rounded-l-none` there —
+                         and that is the kind of geometry a hand-rolled version gets subtly wrong.
+                         The registry's rule is
+                         `has-[select[aria-hidden=true]:last-child]:[&>[data-slot=select-trigger]:last-of-type]:rounded-r-md`,
+                         which exists because Radix renders a hidden native `<select>` AFTER the
+                         trigger, so the trigger is not `:last-child` and a naive rule would leave
+                         its right corners square. Adopting the component is what the user asked
+                         for, and it also removed the manual corner and edge overrides. */
+                      <ButtonGroup>
                         <Button
                           type="button"
                           variant="outline"
                           size="sm"
-                          className="gap-1.5 rounded-r-none border-r-0"
+                          className="gap-1.5"
                           disabled={testableSources.length === 0 || testingKeys.size > 0}
                           onClick={handleTestAll}
                         >
@@ -2037,48 +2193,98 @@ export function ConfigCenter() {
                           />
                           {`全部测速 (${testableSources.length})`}
                         </Button>
-                        <Select
-                          value={testScope}
-                          onValueChange={(value) => {
-                            const scope = value as TestScope;
-                            setTestScope(scope);
-                            if (scope === "untested") handleTestUntested();
-                          }}
-                          disabled={testableSources.length === 0 || testingKeys.size > 0}
-                        >
-                          {/* No chevron is drawn here: `SelectTrigger` already renders its own inside a
-                              `SelectPrimitive.Icon`. Adding a second one is what made this control show
-                              two carets.
+                        {/* **The official `ButtonGroup` pairing, not a `Select`.** The registry's own
+                            example composes this control as `Button` + `DropdownMenu` with a
+                            `ChevronDownIcon` trigger, and it was a `Select` here until the user
+                            noticed the menu did not behave like the one on the site.
 
-                              `SelectValue` is kept even though the trigger is icon-only, because
-                              `item-aligned` positioning measures that node to lay the menu over the
-                              trigger; without it Radix has nothing to measure and the menu never
-                              appeared. It is `sr-only` so it still names the current scope for screen
-                              readers without adding a visible label to a caret-sized button.
+                            The difference is what the two primitives ARE. A `Select` is a picker: its
+                            menu opens OVER the trigger (`item-aligned`), it shows a check mark beside
+                            the current value, and re-choosing the current value fires nothing — so
+                            "全部测速" was unreachable as a repeat action from the menu, which is why
+                            this needed a separate always-clickable main button. A `DropdownMenu` is a
+                            list of actions: it drops BELOW the trigger, and every item fires every
+                            time, so both scopes are now ordinary, repeatable actions. That is the
+                            shape the official example has, and it is why `ButtonGroup`'s own CSS
+                            keys off `data-slot=select-trigger` only as a special case rather than as
+                            the expected child.
 
-                              `position` is left at its `item-aligned` default deliberately. Measured
-                              in jsdom, `popper` made the first timer after opening the menu take
-                              **18 683 ms** against 32 ms for `item-aligned` — the floating-ui
-                              measurement loop never settles there, which starved `waitFor` and timed
-                              the scope test out. It was not needed: `item-aligned` positions this menu
-                              correctly, as the browser check confirms. */}
-                          <SelectTrigger
-                            size="sm"
-                            className="w-8 justify-center rounded-l-none px-0"
-                            aria-label="测速范围"
+                            **Why this was not the first choice, and what the measurement actually
+                            says.** `docs/memory` recorded that a Radix `DropdownMenu` held open made a
+                            25 ms timer take 24 766 ms, and that number was re-measured here before
+                            adopting this: with the menu OPEN a 25 ms timer takes **25.0 ms**. The cost
+                            is real but it is not the open state — it is jsdom plus popper positioning.
+                            Measured three ways, three tests each: `Select` + `item-aligned` **193 ms**,
+                            `Select` + `position="popper"` **53 183 ms**, `DropdownMenu` **51 775 ms**.
+                            The gap lands BETWEEN tests (afterEach → next beforeEach), i.e. in
+                            floating-ui's `autoUpdate` animation-frame loop outliving the test, and a
+                            rAF stub does not remove it. So the price is a jsdom artifact of the
+                            positioning engine, not something the shipped window pays; it is paid only
+                            by tests that open this menu, which is why there is one such test and it
+                            queries synchronously rather than through `findByRole` (measured: the menu
+                            is in the DOM 76 ms after the key press, while an act-wrapped `findByRole`
+                            on the same node did not return for 19.5 s).
+
+                            No `SelectValue`/`SelectTrigger` hiding is needed any more, so the
+                            `sr-only`-through-`data-slot` workaround that bug required is gone with it:
+                            a `Button` renders exactly the children it is given. */}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon-sm"
+                              aria-label="测速范围"
+                              disabled={testableSources.length === 0 || testingKeys.size > 0}
+                            >
+                              <ChevronDown
+                                className="size-3.5"
+                                aria-hidden="true"
+                              />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent
+                            align="end"
+                            className="w-56"
+                            /* **Measured, not guessed: this is what makes the menu affordable to
+                               test.** With collision avoidance on (the default), a test that opens
+                               this menu costs jsdom **~19.5 s**; with it off, **~3.2 s** — five
+                               consecutive opens measured 51 775 ms against 14 218 ms, and the cost
+                               plateaus instead of compounding. The expensive middleware is `shift`
+                               and `flip`, which walk every clipping ancestor to detect overflow —
+                               work that is meaningless in jsdom's zero-layout tree, and pointless
+                               here regardless: this menu hangs off a toolbar with the entire source
+                               list below it, so there is nothing to avoid colliding with. The `size`
+                               middleware stays on (it is not gated by this prop), so the
+                               `--radix-popper-available-height` cap still applies.
+
+                               Note what this does NOT do: it does not change where the menu opens.
+                               `align="end"` and the popper default side still put it below the
+                               caret, flush to the right edge — which is the visible difference the
+                               user reported, since the `Select` this replaced opened its menu OVER
+                               the trigger. */
+                            avoidCollisions={false}
                           >
-                            <SelectValue className="sr-only" />
-                          </SelectTrigger>
-                          <SelectContent align="end">
-                            <SelectItem value="all">
+                            <DropdownMenuItem
+                              onSelect={() => {
+                                handleTestAll();
+                              }}
+                            >
+                              <FlaskConical className="size-3.5" aria-hidden="true" />
                               {`全部测速（${testableSources.length}）`}
-                            </SelectItem>
-                            <SelectItem value="untested" disabled={untestedSources.length === 0}>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled={untestedSources.length === 0}
+                              onSelect={() => {
+                                handleTestUntested();
+                              }}
+                            >
+                              <TestTube2 className="size-3.5" aria-hidden="true" />
                               {`只测未测过的（${untestedSources.length}）`}
-                            </SelectItem>
-                          </SelectContent>
-                        </Select>
-                      </div>
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </ButtonGroup>
                     )}
                     <Button
                       type="button"
@@ -2113,28 +2319,50 @@ export function ConfigCenter() {
                         configuration that works. It acts only on the rows currently listed, so it
                         can never delete something the user cannot see. That is also why it needs no
                         separate guard for the default view: with the filter on the runnable
-                        sources, no removable row is on screen and the button does not appear. */}
+                        sources, no removable row is on screen and the button does not appear.
+
+                        Disabled while any test is in flight, and kept on screen rather than hidden.
+                        A running test is what CREATES removable sources — every failure switches a
+                        source off and adds it to this count — so mid-run the label counts up under
+                        the cursor and the set behind it is still changing. Clicking then means
+                        confirming a deletion whose size and contents the user never saw. The guard is
+                        the same `testingKeys` the 测速 button beside it uses, so a single row's test
+                        disables both rather than leaving this one live while its neighbour is not. It
+                        stays visible so the toolbar does not reflow as the run proceeds.
+
+                        The `title` sits on the wrapping span, not on the button, because a disabled
+                        `Button` carries `disabled:pointer-events-none`: it is never the hover target,
+                        so a `title` on the button itself would be markup that can never be read. */}
                     {bulkRemovableSources.length > 0 && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="gap-1.5 text-muted-foreground hover:text-destructive"
-                        onClick={() =>
-                          void handleRemoveSources(
-                            bulkRemovableSources.map((source) => source.key),
-                            "这些无法工作的源",
-                            { needsConfirmation: true },
-                          )
+                      <span
+                        title={
+                          testingKeys.size > 0
+                            ? "测速进行中，结果仍在变化；测速结束后再清理。"
+                            : undefined
                         }
                       >
-                        <Trash2
-                          className="size-3.5"
-                          data-icon="inline-start"
-                          aria-hidden="true"
-                        />
-                        清理不可用 ({bulkRemovableSources.length})
-                      </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5 text-muted-foreground hover:text-destructive"
+                          disabled={testingKeys.size > 0}
+                          onClick={() =>
+                            void handleRemoveSources(
+                              bulkRemovableSources.map((source) => source.key),
+                              "这些无法工作的源",
+                              { needsConfirmation: true },
+                            )
+                          }
+                        >
+                          <Trash2
+                            className="size-3.5"
+                            data-icon="inline-start"
+                            aria-hidden="true"
+                          />
+                          清理不可用 ({bulkRemovableSources.length})
+                        </Button>
+                      </span>
                     )}
                   </div>
                 </div>
@@ -3602,6 +3830,9 @@ function SourceStatusBadge({ source }: { source: SourceRecord }) {
     // An empty result is not a capability state, so it borrows the warning colour rather than
     // claiming a status the model no longer has.
     empty: { label: "无内容", tone: "needs-adapter" },
+    // One word for every failure. It used to distinguish 连接失败 from 测试失败, because only the
+    // second switched the source off; now both do, so a second word would name a distinction that
+    // nothing acts on.
     failed: { label: "测试失败", tone: "blocked" },
     // `blocked` means the test could not run, not that the source is bad — the backend returns it
     // when the adapter refuses. It read 不可用 here while the 连接测试 column beside it read 已阻止,
@@ -3649,6 +3880,8 @@ function SourceTestBadge({ source }: { source: SourceRecord }) {
       icon: Info,
     },
     failed: {
+      // One word for every failure, as in the 状态 column: both kinds switch the source off now, so
+      // distinguishing 连不上 from 请求失败 would name a difference nothing acts on.
       label: "请求失败",
       className: "text-[color:var(--status-blocked)]",
       icon: CircleX,
@@ -3881,7 +4114,14 @@ const SourceTable = memo(function SourceTable({
             >
               <TableCell className="pl-6">
                 <div className="flex items-center gap-3">
-                  <div className="flex size-8 items-center justify-center rounded-md bg-muted text-muted-foreground">
+                  {/* `shrink-0`, and it is load-bearing rather than tidiness. This is a flex item
+                      whose sibling holds a source address, and the sibling carries `min-w-0` so it
+                      can absorb the squeeze. Without `shrink-0` the icon absorbs it too: `size-8`
+                      fixes width and height, but flex items default to `flex-shrink: 1`, so the box
+                      keeps its 32px height while its width collapses — the flattened icon the user
+                      reported. It showed on SOME rows because only rows whose address is long
+                      enough to overflow the column exert the pressure. */}
+                  <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
                     {source.sourceType === "live" ? (
                       <Globe2
                         className="size-4"
