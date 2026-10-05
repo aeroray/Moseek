@@ -30,7 +30,19 @@ export default defineConfig({
     },
   },
   server: {
-    port: 1420,
+    /**
+     * 1430, not Vite's usual 1420.
+     *
+     * 1420 is what the Tauri template suggests, and it is what the other Tauri project on this
+     * machine already uses (`D:\Develop\Sesame`, also `strictPort: true`). Two projects cannot both
+     * hold it, and because both refuse to fall back to another port, the second one to start fails
+     * outright with "Port 1420 is already in use" and a `beforeDevCommand` that exited non-zero —
+     * which reads like a broken build rather than two windows open at once. Moving this one is the
+     * smaller change, and it lets both run side by side.
+     *
+     * `devUrl` in `src-tauri/tauri.conf.json` must name the same port; the two are a pair.
+     */
+    port: 1430,
     strictPort: true,
     watch: {
       ignored: ["**/src-tauri/**"],
