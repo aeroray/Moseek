@@ -1,6 +1,7 @@
 use rusqlite::{params, OptionalExtension};
 use std::collections::HashMap;
 use tauri::State;
+use tauri_plugin_dialog::DialogExt;
 
 use crate::{
     cms, policy, AppDatabase, ConfigDocument, ConfigDocumentSummary, ConfigDuplicateMatch,
@@ -350,6 +351,78 @@ pub fn export_config(
     .ok_or_else(|| "没有可导出的配置".to_string())?;
     Ok(document.normalized_config)
 }
+
+/// Where an exported configuration was written, so the UI can name the file.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportedConfig {
+    pub path: String,
+    pub bytes: usize,
+}
+
+/// Writes the configuration wherever the user chooses.
+///
+/// **The export button did nothing, and this is why.** The frontend built a blob URL and clicked a
+/// detached `<a download>`, which is a browser idiom that does not hold up in this webview: the
+/// object URL was revoked on the very next line, before the download had read it, and the anchor was
+/// never in the document. A download that did begin went to the default folder with no dialog and
+/// nothing reported back, so "导出" was indistinguishable from a dead button. The same job is done
+/// here the way `download::download_image` already does it — ask, then write — which also means the
+/// user picks the location and the app can tell them where the file went.
+///
+/// `Ok(None)` means the user dismissed the dialog: an ordinary outcome, not an error.
+#[tauri::command]
+pub async fn export_config_file(
+    app: tauri::AppHandle,
+    document_id: Option<i64>,
+    state: State<'_, AppDatabase>,
+) -> Result<Option<ExportedConfig>, String> {
+    // Read the text and release the lock before awaiting the dialog: the guard is not held across
+    // the await, so a slow decision by the user cannot block every other database command.
+    let text = {
+        let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+        let document = match document_id {
+            Some(id) => storage::load_config_document(&connection, id)?,
+            None => storage::load_active_document(&connection)?,
+        }
+        .ok_or_else(|| "没有可导出的配置".to_string())?;
+        document.normalized_config
+    };
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title("导出配置")
+        .set_file_name(EXPORT_FILE_NAME)
+        .add_filter("JSON 配置", &["json"])
+        .save_file(move |path| {
+            let _ = sender.send(path);
+        });
+
+    let chosen = receiver
+        .await
+        .map_err(|_| "保存对话框未能返回结果。".to_string())?;
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let path: std::path::PathBuf = chosen
+        .into_path()
+        .map_err(|error| format!("无法解析所选保存位置：{error}"))?;
+
+    let bytes = text.len();
+    std::fs::write(&path, text.as_bytes()).map_err(|error| format!("写入文件失败：{error}"))?;
+
+    Ok(Some(ExportedConfig {
+        path: path.to_string_lossy().into_owned(),
+        bytes,
+    }))
+}
+
+/// The name the save dialog opens with.
+///
+/// `moseek-config.json` rather than the old `moseek-normalized-config.json`: the file is the user's
+/// configuration, and "normalized" named an internal detail they never chose.
+const EXPORT_FILE_NAME: &str = "moseek-config.json";
 
 /// What fetching a configuration address produced.
 ///

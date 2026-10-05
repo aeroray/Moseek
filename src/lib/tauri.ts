@@ -256,6 +256,25 @@ export async function exportConfig(documentId?: number) {
   });
 }
 
+/** Where an exported configuration was written. */
+export interface ExportedConfigFile {
+  path: string;
+  bytes: number;
+}
+
+/**
+ * Writes the configuration to a file the user chooses.
+ *
+ * Resolves to `null` when the user dismisses the dialog, which is not a failure. The previous
+ * approach built a blob URL and clicked a detached anchor, which silently did nothing in this
+ * webview — see the Rust side for the mechanism.
+ */
+export async function exportConfigFile(documentId?: number) {
+  return invokeCommand<ExportedConfigFile | null>("export_config_file", {
+    documentId: documentId ?? null,
+  });
+}
+
 /**
  * What fetching a configuration address produced.
  *

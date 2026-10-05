@@ -56,6 +56,7 @@ pub fn run() {
             config::commands::set_source_script_archive,
             config::commands::update_source_test,
             config::commands::export_config,
+            config::commands::export_config_file,
             config::commands::fetch_config_url,
             config::commands::probe_script_address,
             config::commands::set_config_source_base_url,

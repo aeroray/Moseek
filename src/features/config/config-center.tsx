@@ -155,7 +155,7 @@ import { cn, errorMessage } from "@/lib/utils";
 import {
   activateConfigDocument,
   cancelSourceTest,
-  exportConfig,
+  exportConfigFile,
   fetchConfigUrl,
   forgetSourceTestRun,
   isTauriRuntime,
@@ -2003,25 +2003,26 @@ export function ConfigCenter() {
   };
 
   const handleExport = async () => {
-    let persistedConfig: string | null = null;
+    // The write happens in Rust, behind a real save dialog. The previous version built a blob URL and
+    // clicked a detached anchor, which did nothing at all in this webview while reporting no error —
+    // see `export_config_file` for the mechanism. Every outcome is now stated, including the one
+    // where the user changes their mind.
     try {
-      persistedConfig = await exportConfig(activeConfigId ?? undefined);
+      const saved = await exportConfigFile(activeConfigId ?? undefined);
+      if (!saved) {
+        // A dismissed dialog is an ordinary outcome, not a failure, so nothing is reported.
+        return;
+      }
+      setParseState({
+        type: "success",
+        message: `已导出到 ${saved.path}（${Math.round(saved.bytes / 1024)} KB）`,
+      });
     } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "本地配置导出失败";
-      setParseState({ type: "error", message });
+      setParseState({
+        type: "error",
+        message: errorMessage(error, "本地配置导出失败"),
+      });
     }
-    const exportText =
-      persistedConfig ??
-      (normalizedConfig ||
-        JSON.stringify({ sites: sources, lives: [] }, null, 2));
-    const blob = new Blob([exportText], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "moseek-normalized-config.json";
-    anchor.click();
-    URL.revokeObjectURL(url);
   };
 
   return (

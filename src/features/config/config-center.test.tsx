@@ -8,6 +8,7 @@ import { ConfigCenter } from "@/features/config/config-center";
 import {
   activateConfigDocument,
   cancelSourceTest as cancelSourceTestCommand,
+  exportConfigFile,
   fetchConfigUrl,
   forgetSourceTestRun as forgetSourceTestRunCommand,
   probeScriptAddress,
@@ -29,7 +30,7 @@ vi.mock("@/lib/tauri", () => ({
   loadActiveConfig: vi.fn(async () => null),
   listConfigDocuments: vi.fn(async () => []),
   recoverKnownLiveSources: vi.fn(async () => null),
-  exportConfig: vi.fn(),
+  exportConfigFile: vi.fn(),
   testSource: vi.fn(),
   // Cancellation now reaches the backend, which is what actually closes the sockets. Mocked here so
   // the batch and single-row cancel paths can be asserted rather than only observed in the UI.
@@ -315,6 +316,10 @@ describe("config center", () => {
     // earlier test would satisfy a later assertion that never actually happened.
     vi.mocked(cancelSourceTestCommand).mockClear();
     vi.mocked(forgetSourceTestRunCommand).mockClear();
+    // The export tests assert the outcome of one call each, so a leftover mock would let a later
+    // test pass on an earlier test's result.
+    vi.mocked(exportConfigFile).mockReset();
+    vi.mocked(exportConfigFile).mockResolvedValue(null);
     // The filter now lives in the store so it survives a restart, which means it also survives
     // between tests. Reset it here, or a filter one test chose narrows the next test's list.
     useAppStore.setState({
@@ -2300,6 +2305,64 @@ describe("config center", () => {
     // chosen scope, which changes as the user picks.
     expect(screen.getByRole("button", { name: /全部测速/ })).toBeInTheDocument();
     expect(screen.getByLabelText("测速范围")).toBeInTheDocument();
+  });
+
+  it("writes the export through the native dialog and names where it went", async () => {
+    // The reported defect: clicking 导出 did nothing at all. The old handler built a blob URL, clicked
+    // a detached anchor and revoked the URL on the next line, so the download either never started or
+    // went somewhere the user was never told about — and no outcome was reported either way. The write
+    // now happens in Rust behind a real dialog, and the page states the result.
+    vi.mocked(exportConfigFile).mockResolvedValue({
+      path: "C:\\Users\\me\\Documents\\moseek-config.json",
+      bytes: 2048,
+    });
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /导出此配置/ }));
+
+    await waitFor(() => {
+      expect(exportConfigFile).toHaveBeenCalledTimes(1);
+    });
+    expect(
+      await screen.findByText(/已导出到 C:\\Users\\me\\Documents\\moseek-config\.json/),
+    ).toBeInTheDocument();
+  });
+
+  it("says nothing when the user dismisses the export dialog", async () => {
+    // Dismissing is an ordinary outcome. Reporting it as a failure — or as success — would both be
+    // wrong, and the old handler could not tell the difference at all.
+    vi.mocked(exportConfigFile).mockResolvedValue(null);
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /导出此配置/ }));
+
+    await waitFor(() => {
+      expect(exportConfigFile).toHaveBeenCalledTimes(1);
+    });
+    // Asserted against the page's whole text rather than a single node: a toast renders its title and
+    // description as two elements, so `queryByText` on a phrase that spans them finds nothing even
+    // when the message is on screen. The node-by-node version passed while the cancel path was
+    // reporting a failure — a check that could not see the thing it claimed to rule out.
+    // Wait for the click's effect to have been rendered at all before asserting its absence.
+    // A `waitFor` whose condition is "does not contain" succeeds on its first poll, before React has
+    // rendered anything — so it passed while the cancel path was in fact reporting a failure.
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("配置中心");
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(document.body.textContent).not.toContain("本地配置导出失败");
+    expect(document.body.textContent).not.toContain("已导出到");
+  });
+
+  it("reports an export that actually failed", async () => {
+    // The distinction the old code could not make: a write that failed must say so rather than
+    // looking like the silent no-op the user reported.
+    vi.mocked(exportConfigFile).mockRejectedValue(new Error("磁盘空间不足"));
+    renderCenter();
+
+    fireEvent.click(screen.getByRole("button", { name: /导出此配置/ }));
+
+    expect(await screen.findByText(/磁盘空间不足/)).toBeInTheDocument();
   });
 
   it("keeps the list searchable", () => {
