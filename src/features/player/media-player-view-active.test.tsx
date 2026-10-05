@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ViewPane } from "@/components/view-pane";
@@ -13,6 +13,16 @@ import { MediaPlayer } from "@/features/player/media-player";
  * makes the return free: hls.js and mpegts.js keep their buffered data and position across a pause,
  * so coming back resumes rather than reloads.
  */
+/**
+ * Every hls.js instance the player built, so a test can assert on the one actually driving the
+ * element. The player may build more than one across a rebuild, and `at(-1)` is the current pipeline.
+ */
+const hlsInstances: Array<{
+  startLoad: ReturnType<typeof vi.fn>;
+  stopLoad: ReturnType<typeof vi.fn>;
+  loadSource: ReturnType<typeof vi.fn>;
+}> = [];
+
 vi.mock("hls.js", () => {
   class Hls {
     static Events = {
@@ -32,12 +42,14 @@ vi.mock("hls.js", () => {
     levels: unknown[] = [];
     currentLevel = -1;
     loadLevel = -1;
-    constructor() {}
+    startLoad = vi.fn();
+    stopLoad = vi.fn();
+    loadSource = vi.fn();
+    constructor() {
+      hlsInstances.push(this);
+    }
     on() {}
-    loadSource() {}
     attachMedia() {}
-    startLoad() {}
-    stopLoad() {}
     destroy() {}
   }
   class LoadStats {}
@@ -74,6 +86,7 @@ describe("MediaPlayer inside a hidden view", () => {
 
   beforeEach(() => {
     spies = stubMediaPlayback();
+    hlsInstances.length = 0;
   });
 
   afterEach(() => {
@@ -96,6 +109,9 @@ describe("MediaPlayer inside a hidden view", () => {
     const video = document.querySelector("video")!;
     // The player is playing when the user navigates away.
     setPaused(video, false);
+    // Plyr and hls.js are constructed on a deferred macrotask (the player must not build twice under
+    // StrictMode), so the pipeline has to exist before the resume can be observed on it.
+    await waitFor(() => expect(hlsInstances.length).toBeGreaterThan(0));
 
     rerender(
       <ViewPane active={false}>
@@ -114,6 +130,9 @@ describe("MediaPlayer inside a hidden view", () => {
     expect(document.querySelector("video")).toBe(video);
     expect(video.isConnected).toBe(true);
 
+    const hls = hlsInstances.at(-1)!;
+    hls.startLoad.mockClear();
+
     rerender(
       <ViewPane active>
         <MediaPlayer
@@ -126,7 +145,11 @@ describe("MediaPlayer inside a hidden view", () => {
       </ViewPane>,
     );
 
-    expect(spies.play).toHaveBeenCalledTimes(1);
+    // Live is resumed through the pipeline rather than by a bare `play()` here: the element was paused
+    // while the view was away, so what it holds is behind the live edge, and playing it directly would
+    // show stale content and then stall. `startLoad` is hls.js being told to fetch again from the live
+    // edge, which is the signal that the resume went through the right path.
+    expect(hls.startLoad).toHaveBeenCalled();
   });
 
   it("does not start a player the user had deliberately paused", async () => {

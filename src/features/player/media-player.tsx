@@ -547,6 +547,22 @@ export function MediaPlayer({
   const recorderRef = useRef(createDiagnosticRecorder());
   const environmentRef = useRef<MediaEnvironmentReport | null>(null);
   const retryRef = useRef<(() => void) | null>(null);
+  /**
+   * Whether this player's view is off screen, readable at any moment.
+   *
+   * **The effect below cannot be the only reader of `viewActive`, and that is the defect this exists
+   * for.** That effect pauses the element when the view goes away, but every path that *starts*
+   * playback lives inside the pipeline effect's closure — the live retry timer, the FLV reconnect,
+   * the HLS window refresh, `startLivePlayback`. Those read `viewActive` as captured on the render
+   * that created them, and they fire from timers long afterwards. So a stream that was mid-recovery
+   * when the user navigated away would call `play()` again behind a hidden pane, and audio kept
+   * coming out of a page the user had left. Measured symptom: "切到别的页面之后，还能在后台听到直播
+   * 播放的声音".
+   *
+   * A ref rather than state because these callbacks must see the value *now*, not the value from
+   * their render, and none of them should cause a re-render.
+   */
+  const viewAwayRef = useRef(false);
   const sourceRef = useRef<MediaSourceState>({
     url,
     kind,
@@ -652,9 +668,53 @@ export function MediaPlayer({
    *
    * `autoResumeRef` remembers whether it was actually playing, so a view the user had deliberately
    * paused is not started by navigating back to it.
+   *
+   * **`viewAwayRef` is what makes this hold.** Pausing once is not enough on its own: the live
+   * pipeline's own recovery paths (`startLivePlayback`, the FLV reconnect, the HLS window refresh)
+   * fire from timers and would start the element again behind a hidden pane. They consult this ref
+   * before playing, and the pipeline effect also reacts to it by cancelling the pending recovery
+   * timers — see `livePausedByView`.
    */
   const autoResumeRef = useRef(false);
+  /**
+   * Set when the view returns and a live stream was playing before it left.
+   *
+   * **Why returning needs its own path rather than just `play()`.** A live element paused for a while
+   * comes back with a stale buffer: the media it holds is seconds to minutes behind the live edge,
+   * and hls.js and mpegts.js have both stopped fetching. Calling `play()` alone therefore resumes an
+   * old fragment and then stalls — the "回来之后每次都要刷新" reported alongside it. The pipeline has to
+   * be told to catch up, and only the pipeline effect knows how, so this flag is what hands the
+   * decision to it through `liveResumeRef`.
+   *
+   * A ref because the pipeline effect must not re-run when it changes: re-running it tears down and
+   * rebuilds the player, which is the defect that effect exists to avoid.
+   */
+  const resumeLiveRef = useRef(false);
+  /** Installed by the pipeline effect; rejoins the live edge for the currently attached pipeline. */
+  const liveResumeRef = useRef<(() => void) | null>(null);
+  /**
+   * Set when a recovery path tore the pipeline down but declined to rebuild it because the view was
+   * away.
+   *
+   * **Without this, returning to an FLV channel would show a black pane.** Both live recovery paths
+   * call their teardown *before* the deferred rebuild — `hls.stopLoad()`, `mpegts.unload()` — and the
+   * away-guard then skips only the rebuild. So the pipeline is left stopped, and resuming has to know
+   * that, because for mpegts.js nothing else re-issues the request: hls.js gets `startLoad(-1)` from
+   * `seekToLiveEdge`, but the FLV loader needs an explicit `load()`.
+   */
+  const pipelineStoppedByViewRef = useRef(false);
+  /**
+   * The current pipeline's `armStartupWatchdog`, so the resume path can restart the deadline.
+   *
+   * The watchdog lives inside each pipeline branch and refuses to start while the view is away, so a
+   * load that began during the absence is left with no deadline. Re-arming it on return is what keeps
+   * a genuinely dead stream from sitting on the spinner for ever.
+   */
+  const armStartupWatchdogRef = useRef<(() => void) | null>(null);
+  const isLiveRef = useRef(isLive);
+  isLiveRef.current = isLive;
   useEffect(() => {
+    viewAwayRef.current = !viewActive;
     const video = videoRef.current;
     if (!video) return;
     if (!viewActive) {
@@ -664,6 +724,13 @@ export function MediaPlayer({
     }
     if (!autoResumeRef.current) return;
     autoResumeRef.current = false;
+    // Live is handed to the pipeline, which knows how to rejoin the live edge; `play()` alone would
+    // resume a buffer that is already behind. VOD has no live edge to catch up to, so it resumes.
+    if (isLiveRef.current) {
+      resumeLiveRef.current = true;
+      liveResumeRef.current?.();
+      return;
+    }
     void video.play().catch(() => {
       // A rejected play() is normal here: the element may still be waiting for data, and the live
       // path has its own retry policy that owns this decision (`requestLivePlayback`).
@@ -875,13 +942,27 @@ export function MediaPlayer({
         !playerReadyRef.current ||
         !playbackRequested ||
         playbackAttemptInFlight ||
+        // Never start playback for a view the user has left. Without this the retry timer below
+        // happily restarted a hidden stream, which is how audio kept playing from a page the user
+        // had navigated away from.
+        viewAwayRef.current ||
         disposed
       ) {
         return;
       }
       const attemptVersion = sourceVersion;
       playbackAttemptInFlight = true;
-      const started = await startLivePlayback(player, video);
+      const started = await startLivePlayback(player, video, () => {
+        // Recorded rather than applied silently. The player has gone quiet, and the user needs to know
+        // it was the webview refusing a sounding start rather than the app choosing to mute them —
+        // which is what the reported "为什么默认静音" was really about.
+        //
+        // No `report()` call: the status vocabulary has no "muted", and inventing one would have to be
+        // added to `MediaStatus` and to every reader of it for a note the diagnostic ring already
+        // carries. Playback continues, so the status is still whatever it was.
+        recorder.push("自动播放被拒绝", "改为静音播放；点击音量图标可打开声音");
+        scheduleDiagnosticFlush(true);
+      });
       playbackAttemptInFlight = false;
       if (disposed || attemptVersion !== sourceVersion) return;
       if (started) {
@@ -922,6 +1003,52 @@ export function MediaPlayer({
       ) {
         return;
       }
+      void requestLivePlayback();
+    };
+
+    /**
+     * Rejoins the live edge after the view comes back.
+     *
+     * Live media cannot simply be resumed. While the pane was hidden the element was paused, so the
+     * libraries stopped fetching, and what the buffer holds is however far behind the live edge the
+     * pause left it — seconds for a short absence, minutes for a long one. Playing that buffer shows
+     * old content and then stalls. So the pipeline is asked to re-seek to the live edge (hls.js) or
+     * to flush the stale transmuxer buffer (mpegts.js) before playback resumes.
+     *
+     * Installed for every pipeline rather than per-branch: each branch overwrites it, and the flag is
+     * cleared here so a resume request cannot be served twice.
+     */
+    liveResumeRef.current = () => {
+      if (!liveMode || disposed) return;
+      if (!resumeLiveRef.current) return;
+      resumeLiveRef.current = false;
+      recorder.push("视图返回", "重新对齐直播进度");
+      scheduleDiagnosticFlush(true);
+      // A recovery that was cut short by the navigation left the pipeline stopped. mpegts.js has to be
+      // told to load again — it has no equivalent of `startLoad` and will not restart on its own —
+      // whereas hls.js is restarted by `seekToLiveEdge` below.
+      const flv = mpegtsRef.current;
+      if (pipelineStoppedByViewRef.current && flv) {
+        pipelineStoppedByViewRef.current = false;
+        recorder.push("恢复 FLV 直播流", "视图返回后重新装载");
+        flv.load();
+      } else {
+        pipelineStoppedByViewRef.current = false;
+      }
+      seekToLiveEdge(video, hlsRef.current);
+      // The element was paused, so the libraries are not fetching. A paused element does not resume
+      // its own loading, and the retry path is what re-issues the request once data arrives.
+      //
+      // `hasBufferedFragment` is deliberately not set here. It means "the pipeline has data now", and
+      // claiming it would let `requestLivePlayback` play an element with nothing to show — the very
+      // state the flag exists to prevent. Each pipeline sets it truthfully when its own data arrives
+      // (`markFlvBuffered`, the HLS `FRAG_BUFFERED` handler), and that is what starts playback.
+      playbackRequested = true;
+      // **The startup deadline has to be re-armed, not merely restarted.** Both watchdogs decline to
+      // start while the view is away (see `armStartupWatchdog`), so a load that began during the
+      // absence has no deadline at all. Without this the pipeline would be given no verdict either
+      // way: a genuinely dead stream would sit on the spinner for ever instead of reporting.
+      armStartupWatchdogRef.current?.();
       void requestLivePlayback();
     };
 
@@ -1011,9 +1138,18 @@ export function MediaPlayer({
     // headers from the media host, which can only break the native path (a live mp4 or a VOD
     // file) and buys nothing: nothing here reads pixels back through canvas, captureStream,
     // or WebAudio, and the HLS path feeds the element from a same-origin MediaSource blob.
+    //
+    // **Live is not muted up front, and it used to be.** `video.muted = liveMode` made every channel
+    // start silent with its volume slider already down, which reads as a broken player rather than a
+    // policy — the reported "播放器默认静音了，这个很奇怪". The mute was there to satisfy the browser
+    // autoplay rule, which refuses a *sounding* `play()` for media the user did not explicitly start.
+    // That rule does not apply here: this is a desktop webview playing media the user just selected by
+    // clicking a channel, and `startLivePlayback` already contains the mute-and-retry fallback for the
+    // case where the element does refuse. Pre-muting therefore bought nothing and silenced every
+    // stream — the fallback is what handles a refusal, and it now tells the user it did.
     video.autoplay = liveMode;
-    video.defaultMuted = liveMode;
-    video.muted = liveMode;
+    video.defaultMuted = false;
+    video.muted = false;
     video.preload = "auto";
     const isHls = pipeline === "hls";
     const isFlv = pipeline === "flv";
@@ -1043,13 +1179,28 @@ export function MediaPlayer({
       };
 
       let startupDeadlineAt = 0;
+      /**
+       * Starts the startup deadline for this load attempt.
+       *
+       * **A watchdog that keeps counting while the pane is hidden judges a stream on time it was not
+       * being asked to play.** The element is paused and the loaders are stopped, so no fragment can
+       * arrive and the fixed budget expires however healthy the stream is. Recovery then ran behind a
+       * hidden pane, and the user returned to a channel already declared dead and reconnecting — the
+       * "回来之后每次都要刷新" half of the report. The deadline therefore only starts while someone is
+       * watching, and `liveResumeRef` re-arms it when the view returns.
+       */
       const armStartupWatchdog = () => {
         if (!liveMode || disposed || hasBufferedFragment) return;
+        // Nothing to judge while nobody is watching.
+        if (viewAwayRef.current) return;
         if (startupWatchdog !== null) clearTimeout(startupWatchdog);
         startupDeadlineAt = Date.now() + LIVE_STARTUP_BUDGET_MS;
         startupWatchdog = setTimeout(function check() {
           startupWatchdog = null;
           if (disposed) return;
+          // The user left while this timer was pending. Returning without a verdict is the point: the
+          // stream was never given a fair chance, so it must not be judged.
+          if (viewAwayRef.current) return;
           const decision = decideLiveWatchdog({
             hasBufferedFragment,
             requestInFlight: flvRequestInFlight(),
@@ -1079,6 +1230,7 @@ export function MediaPlayer({
           }
         }, LIVE_STALL_CHECK_MS);
       };
+      armStartupWatchdogRef.current = armStartupWatchdog;
       function recoverFlvStream() {
         const instance = mpegtsRef.current;
         if (
@@ -1100,9 +1252,18 @@ export function MediaPlayer({
         // `unload` then `load` is mpegts.js's own reconnect path: it tears the transmuxer down and
         // builds a fresh loader, which is what actually re-issues the request.
         instance.unload();
+        // The teardown has already happened, so the pipeline is stopped from here on. If the view is
+        // away when the rebuild comes due, that fact has to outlive this closure's return, because
+        // returning to the view must call `load()` again — unlike hls.js, mpegts.js will not restart
+        // on its own.
+        pipelineStoppedByViewRef.current = true;
         liveRecoveryTimer = setTimeout(() => {
           liveRecoveryTimer = null;
           if (disposed) return;
+          // A view the user has left is not asked to reconnect: mpegts.js's `load()` immediately
+          // starts fetching again, so reconnecting behind a hidden pane would resume both the
+          // download and the audio. Returning while paused keeps the pipeline otherwise intact.
+          if (viewAwayRef.current) return;
           instance.load();
           void Promise.resolve(instance.play()).catch(() => {});
           armStartupWatchdog();
@@ -1260,13 +1421,25 @@ export function MediaPlayer({
        * `LIVE_STARTUP_BUDGET_MS`.
        */
       let startupDeadlineAt = 0;
+      /**
+       * Starts the startup deadline for this load attempt.
+       *
+       * The same rule as the FLV watchdog above: a paused element cannot produce a fragment, so
+       * counting against it while the pane is hidden would fail a healthy stream and send the user
+       * back to a channel that was already reconnecting.
+       */
       const armStartupWatchdog = () => {
         if (!liveMode || disposed || hasBufferedFragment) return;
+        // Nothing to judge while nobody is watching.
+        if (viewAwayRef.current) return;
         if (startupWatchdog !== null) clearTimeout(startupWatchdog);
         startupDeadlineAt = Date.now() + LIVE_STARTUP_BUDGET_MS;
         startupWatchdog = setTimeout(function check() {
           startupWatchdog = null;
           if (disposed) return;
+          // The user left while this timer was pending. Returning without a verdict is the point: the
+          // stream was never given a fair chance, so it must not be judged.
+          if (viewAwayRef.current) return;
           const decision = decideLiveWatchdog({
             hasBufferedFragment,
             requestInFlight: fragmentRequestInFlight,
@@ -1296,6 +1469,7 @@ export function MediaPlayer({
           }
         }, LIVE_STALL_CHECK_MS);
       };
+      armStartupWatchdogRef.current = armStartupWatchdog;
       function recoverLiveWindow() {
         const instance = hls;
         if (
@@ -1317,6 +1491,9 @@ export function MediaPlayer({
         liveRecoveryTimer = setTimeout(() => {
           liveRecoveryTimer = null;
           if (disposed) return;
+          // Same rule as the FLV reconnect: `startLoad` would resume fetching for a view nobody is
+          // looking at, and the stream would be audible again.
+          if (viewAwayRef.current) return;
           instance.loadSource(sourceRef.current.url);
           instance.startLoad(-1);
           armStartupWatchdog();
@@ -1688,9 +1865,55 @@ export function MediaPlayer({
   );
 }
 
+/**
+ * Moves a live element back to the live edge.
+ *
+ * A live element paused for a while comes back holding stale media: what is buffered is however far
+ * behind the edge the pause left it. Playing that shows old content and then runs out, which is the
+ * "回来之后要重新连接" experience. Seeking past the end of what is buffered makes the element discard
+ * it and load the current segment instead — the standard way to rejoin a live edge, and the only one
+ * that works for both an ordinary live element and one fed by hls.js or mpegts.js.
+ *
+ * `seekable` is preferred over `buffered` because it describes the range the element can seek within,
+ * which for a live stream is the window the server still serves; `buffered` can be narrower and would
+ * leave the element short of the edge. Both are guarded because a live element reports an empty range
+ * before its first segment arrives, and `seekable.end(0)` on an empty range throws.
+ */
+function seekToLiveEdge(video: HTMLVideoElement, hls: Hls | null): void {
+  try {
+    const range = video.seekable.length > 0 ? video.seekable : video.buffered;
+    if (range.length === 0) {
+      // Nothing to align to yet. hls.js will pick the live edge itself when it starts loading again.
+      if (hls) hls.startLoad(-1);
+      return;
+    }
+    const edge = range.end(range.length - 1);
+    if (Number.isFinite(edge) && edge > 0) {
+      video.currentTime = edge;
+    }
+    // `startLoad(-1)` means "resume from the live edge" rather than from a stored position. Calling
+    // it is what makes hls.js fetch again after the pause, which pausing the element alone does not
+    // do for every stream type.
+    if (hls) hls.startLoad(-1);
+  } catch {
+    // Seeking on a live element can throw while its ranges are being updated. The retry path that
+    // follows still restarts playback, so failing to align is not worth reporting as an error.
+  }
+}
+
+/**
+ * Starts a live stream, falling back to muted playback if the element refuses to sound.
+ *
+ * The fallback is the only reason this is not a bare `video.play()`. A webview may refuse a sounding
+ * `play()` for media it considers not explicitly started, and the remedy is to start muted — a stream
+ * with no sound beats no stream at all. It is reported through `onMutedFallback` so the interface can
+ * say so, because a player that goes quiet with no explanation is exactly the "为什么默认静音" the user
+ * reported; the difference now is that it happens only when it has to, and it is stated.
+ */
 async function startLivePlayback(
   player: Plyr,
   video: HTMLVideoElement,
+  onMutedFallback?: () => void,
 ): Promise<boolean> {
   try {
     await video.play();
@@ -1698,6 +1921,7 @@ async function startLivePlayback(
   } catch {
     video.muted = true;
     player.muted = true;
+    onMutedFallback?.();
     try {
       await video.play();
       return true;
