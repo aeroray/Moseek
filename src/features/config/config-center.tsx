@@ -151,7 +151,6 @@ import {
   adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
-  hasScriptArchive,
   isTestableSource,
   type AdapterExecution,
 } from "@/lib/adapters";
@@ -164,15 +163,11 @@ import {
   forgetSourceTestRun,
   isTauriRuntime,
   loadActiveConfig,
-  listScriptArchives,
-  probeScriptAddress,
   recoverKnownLiveSources,
   replaceAllConfigDocuments,
   setConfigSourceBaseUrl,
-  setSourceScriptArchive,
   testSource,
   updateSourceTest,
-  type ScriptAddressProbe,
   type StoredConfigDocument,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
@@ -181,7 +176,6 @@ import type {
   CapabilityStatus,
   SourceDialect,
   SourceOperationStatus,
-  ScriptArchiveSummary,
   SourceRecord,
   SourceTestResult,
   SourceTestStatus,
@@ -421,9 +415,6 @@ export function ConfigCenter() {
    * buttons and the toolbar button all reach the same in-flight run.
    */
   const cancelRunRef = useRef<(() => void) | null>(null);
-  const [scriptArchives, setScriptArchives] = useState<ScriptArchiveSummary[]>(
-    [],
-  );
   const fileInputRef = useRef<HTMLInputElement>(null);
   const liveRecoveryAttempts = useRef(new Set<number>());
   /**
@@ -446,12 +437,6 @@ export function ConfigCenter() {
   );
   const inspectedSource =
     sources.find((source) => source.key === inspectedSourceKey) ?? null;
-  const boundScriptArchive =
-    inspectedSource?.scriptArchiveId == null
-      ? undefined
-      : (scriptArchives.find(
-          (archive) => archive.id === inspectedSource.scriptArchiveId,
-        ) ?? undefined);
   const testableSources = useMemo(
     () => sources.filter(isTestableSource),
     [sources],
@@ -703,12 +688,6 @@ export function ConfigCenter() {
   }, [configDocumentCount, setConfigDocument, setConfigDocuments]);
 
   useEffect(() => {
-    void listScriptArchives()
-      .then((archives) => setScriptArchives(archives ?? []))
-      .catch(() => setScriptArchives([]));
-  }, []);
-
-  useEffect(() => {
     if (
       !isTauriRuntime() ||
       activeConfigId === null ||
@@ -856,43 +835,6 @@ export function ConfigCenter() {
     setRemoveRequest(null);
     await performRemoveSources(request.keys);
   };
-
-  const handleBindScriptArchive = async (
-    source: SourceRecord,
-    value: string,
-  ) => {
-    if (activeConfigId === null) {
-      setParseState({
-        type: "error",
-        message: "请先保存当前配置，再绑定脚本档案。",
-      });
-      return;
-    }
-    const archiveId = value === "none" ? null : Number(value);
-    if (archiveId !== null && !Number.isInteger(archiveId)) return;
-    try {
-      const document = await setSourceScriptArchive(
-        activeConfigId,
-        source.key,
-        archiveId,
-      );
-      if (!document) throw new Error("浏览器预览不会保存脚本档案绑定。");
-      setConfigDocument(document);
-      setParseState({
-        type: "success",
-        message:
-          archiveId === null
-            ? `已解除「${source.name}」的本地脚本绑定。`
-            : `已为「${source.name}」绑定本地脚本档案。请启用档案并重新测试该源。`,
-      });
-    } catch (error) {
-      setParseState({
-        type: "error",
-        message: error instanceof Error ? error.message : "脚本档案绑定失败",
-      });
-    }
-  };
-
   /**
    * Single tests the user has abandoned, by source key.
    *
@@ -3284,79 +3226,6 @@ export function ConfigCenter() {
 
                   <AdapterDetail source={inspectedSource} />
 
-                  {inspectedSource.sourceType === "cms" &&
-                    (inspectedSource.siteProtocol === "js-extension" ||
-                      hasScriptArchive(inspectedSource)) && (
-                      <DetailSection title="本地脚本绑定">
-                        <div className="rounded-lg border border-border/70 bg-card/40 p-3 text-xs leading-5 text-muted-foreground">
-                          绑定后只会调用本地档案；远程 JS、JAR 和 Spider
-                          仍不会自动执行。
-                        </div>
-                        {hasScriptArchive(inspectedSource) && (
-                            <div className="flex items-start gap-3 rounded-lg border border-border/70 bg-card/40 p-3">
-                              <Badge
-                                variant={
-                                  boundScriptArchive === undefined
-                                    ? "destructive"
-                                    : boundScriptArchive.enabled
-                                      ? "default"
-                                      : "outline"
-                                }
-                              >
-                                {boundScriptArchive === undefined
-                                  ? "档案缺失"
-                                  : boundScriptArchive.enabled
-                                    ? "可执行"
-                                    : "已绑定但停用"}
-                              </Badge>
-                              <div className="min-w-0 text-xs leading-5">
-                                <p className="font-medium text-foreground">
-                                  {boundScriptArchive?.name ??
-                                    `档案 #${inspectedSource.scriptArchiveId}`}
-                                </p>
-                                <p className="text-muted-foreground">
-                                  {boundScriptArchive === undefined
-                                    ? "请重新选择一个本地脚本档案。"
-                                    : boundScriptArchive.enabled
-                                      ? "现在可以测试该源并使用 CatVod 入口。"
-                                      : "先在设置中启用档案，再测试该源。"}
-                                </p>
-                              </div>
-                            </div>
-                          )}
-                        <Select
-                          value={String(
-                            inspectedSource.scriptArchiveId ?? "none",
-                          )}
-                          onValueChange={(value) =>
-                            void handleBindScriptArchive(inspectedSource, value)
-                          }
-                        >
-                          <SelectTrigger size="sm" className="w-full">
-                            <SelectValue placeholder="选择本地脚本档案" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectGroup>
-                              <SelectItem value="none">不绑定</SelectItem>
-                              {scriptArchives.map((archive) => (
-                                <SelectItem
-                                  key={archive.id}
-                                  value={String(archive.id)}
-                                >
-                                  {archive.name}
-                                  {archive.enabled ? " · 已启用" : " · 已停用"}
-                                  {archive.hasCookie ? " · Cookie 已保护" : ""}
-                                  {archive.moduleNames.length > 0
-                                    ? ` · 模块 ${archive.moduleNames.length}`
-                                    : ""}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                      </DetailSection>
-                    )}
-
                   <DetailSection title="测试结果">
                     <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
                       <DetailRow
@@ -3675,11 +3544,6 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
         <div className="p-3.5 text-xs leading-5 text-muted-foreground bg-muted/10">
           {adapter.reason}
         </div>
-        {/* Only where the script address is the thing in question. For a source blocked by a JAR or
-            by a spider runtime, checking a script address would answer a question nobody asked. */}
-        {(adapter.id === "drpy-js" || adapter.id === "js-extension") && (
-          <ScriptAddressCheck source={source} />
-        )}
         {adapter.operations.length > 0 && (
           <div className="flex flex-wrap items-center gap-1.5 p-3 bg-muted/5">
             <span className="text-xs text-muted-foreground/70 mr-1">支持操作：</span>
@@ -3694,113 +3558,6 @@ function AdapterDetail({ source }: { source: SourceRecord }) {
     </DetailSection>
   );
 }
-
-/**
- * Checks whether this source's script address can actually be fetched.
- *
- * **This exists because "blocked" was hiding four different situations under one sentence.** A
- * script that 404s, a host that refuses the request, one that exists but needs a host API layer the
- * sandbox does not provide, and one that is not a script at all were all reported as a missing
- * sandbox. Measured on the author's configuration, 9 of the 10 distinct addresses are unusable and
- * 2 of those are a host refusing rather than a file missing — so the reader could not tell which of
- * their sources were worth keeping.
- *
- * It runs on demand rather than automatically: it makes a request to a third-party host, which is
- * not something to do behind the user's back while they scroll a list of 355 sources.
- */
-function ScriptAddressCheck({ source }: { source: SourceRecord }) {
-  const [state, setState] = useState<
-    | { kind: "idle" }
-    | { kind: "checking" }
-    | { kind: "done"; probe: ScriptAddressProbe }
-    | { kind: "failed"; message: string }
-  >({ kind: "idle" });
-
-  const run = async () => {
-    setState({ kind: "checking" });
-    try {
-      const probe = await probeScriptAddress(source.api);
-      if (!probe) {
-        // Browser preview: the command is not registered there, and saying so is better than
-        // showing a spinner that never resolves.
-        setState({
-          kind: "failed",
-          message: "浏览器预览不会请求外部地址，请在桌面应用中检测。",
-        });
-        return;
-      }
-      setState({ kind: "done", probe });
-    } catch (error) {
-      setState({
-        kind: "failed",
-        message: error instanceof Error ? error.message : "检测失败",
-      });
-    }
-  };
-
-  const tone =
-    state.kind === "done"
-      ? state.probe.verdict === "reachable"
-        ? "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]"
-        : "border-[color:var(--status-partial-border)] bg-[color:var(--status-partial-bg)] text-[color:var(--status-partial)]"
-      : "border-border/60 bg-muted/20 text-muted-foreground";
-
-  return (
-    <div className="flex flex-col gap-2 p-3.5">
-      <div className="flex items-center justify-between gap-3">
-        <span className="text-xs text-muted-foreground/70">脚本地址</span>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-7 shrink-0 gap-1.5 px-2 text-xs"
-          disabled={state.kind === "checking" || !source.api.trim()}
-          onClick={() => void run()}
-        >
-          {state.kind === "checking" ? (
-            <LoaderCircle className="size-3 animate-spin" aria-hidden="true" />
-          ) : (
-            <Search className="size-3" aria-hidden="true" />
-          )}
-          检测脚本地址
-        </Button>
-      </div>
-
-      <p className="break-all font-mono text-[11px] leading-5 text-muted-foreground">
-        {source.api || "（未填写）"}
-      </p>
-
-      {state.kind === "done" && (
-        <div
-          role="status"
-          className={cn("rounded-md border p-2.5 text-xs leading-5", tone)}
-        >
-          <p>{state.probe.message}</p>
-          {/* The mirror is offered as an address to look at, not applied silently: rewriting a
-              third-party source's address is the user's decision, and the value is worth seeing. */}
-          {state.probe.mirrorUrl && (
-            <div className="mt-2 border-t border-current/20 pt-2">
-              <p>{state.probe.mirrorReason}</p>
-              <p className="mt-1 break-all font-mono text-[11px]">
-                {state.probe.mirrorUrl}
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {state.kind === "failed" && (
-        <div
-          role="status"
-          className="rounded-md border border-destructive/40 bg-destructive/10 p-2.5 text-xs leading-5 text-destructive"
-        >
-          {state.message}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /**
  * A small icon that says whether this source can be run, and why not.
  *

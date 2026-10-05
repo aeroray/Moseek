@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   adapterStatusLabel,
   getAdapterProfile,
-  hasScriptArchive,
   isFetchableLiveUrl,
   isMovieLibrarySource,
   isTestableCmsSource,
@@ -79,7 +78,7 @@ describe("adapter registry", () => {
     expect(profile.execution).toBe("enabled");
   });
 
-  it("treats the safe HTTP parser and bound local scripts as executable adapters", () => {
+  it("treats the safe HTTP parser as an executable adapter, and a JS extension as not", () => {
     expect(
       getAdapterProfile(
         source({
@@ -89,16 +88,18 @@ describe("adapter registry", () => {
         }),
       ).execution,
     ).toBe("enabled");
+    // A CatVod JS source used to become executable once a local script archive was bound to it.
+    // That runtime is gone, so the profile is now `blocked` however the source is configured —
+    // which is the honest answer, and the one the interface shows.
     expect(
       getAdapterProfile(
         source({
           key: "kitty-js",
           siteProtocol: "js-extension",
           capability: "blocked",
-          scriptArchiveId: 7,
         }),
       ).execution,
-    ).toBe("enabled");
+    ).toBe("blocked");
   });
 
   it("uses the live adapter for live sources", () => {
@@ -159,13 +160,18 @@ describe("adapter registry", () => {
     expect(isMovieLibrarySource(source({ testStatus: "untested" }))).toBe(true);
   });
 
-  it("treats a bound script archive as present only when it is a number", () => {
-    // `scriptArchiveId` is optional, so both `null` and `undefined` mean "not bound". The same
-    // two-part check was written out seven times across the codebase; this pins the one copy.
-    expect(hasScriptArchive(source({ scriptArchiveId: 7 }))).toBe(true);
-    expect(hasScriptArchive(source({ scriptArchiveId: 0 }))).toBe(true);
-    expect(hasScriptArchive(source({ scriptArchiveId: null }))).toBe(false);
-    expect(hasScriptArchive(source({ scriptArchiveId: undefined }))).toBe(false);
+  it("offers no way to make a CatVod JS source run", () => {
+    // The script runtime and its local archives were removed, so there is nothing a user can bind,
+    // enable or point at to execute one of these. A source like this stays blocked, and the reason
+    // must not name a switch that no longer exists — that is what sends someone hunting for a
+    // setting that is not there.
+    const profile = getAdapterProfile(
+      source({ key: "kitty", siteProtocol: "js-extension", capability: "blocked" }),
+    );
+
+    expect(profile.id).toBe("js-extension");
+    expect(profile.execution).toBe("blocked");
+    expect(profile.reason).not.toContain("绑定");
   });
 
   it("refuses a live source whose address is not a fetchable HTTP URL", () => {
@@ -246,11 +252,14 @@ describe("adapter registry", () => {
   });
 
   it("does not blame a missing sandbox for a source blocked by something else", () => {
-    // The drpy reason said 未提供 JS 沙箱, which was false twice: a QuickJS sandbox has existed
-    // since the script-runtime sidecar was added, and it is not what stops these sources — measured,
-    // 9 of the 10 distinct script addresses are unusable, and running one would need a host API
-    // layer (`request`, `pdfa`/`pdfh`, `CryptoJS`) the sandbox does not provide. Telling the reader
-    // a sandbox is missing sends them looking for a switch that would change nothing.
+    // The drpy reason said 未提供 JS 沙箱, which was false: it is not what stops these sources —
+    // measured, 9 of the 10 distinct script addresses are unusable, and running one would need a
+    // host API layer (`request`, `pdfa`/`pdfh`, `CryptoJS`) no runtime here provides. Telling the
+    // reader a sandbox is missing sends them looking for a switch that would change nothing.
+    //
+    // The CatVod `js-extension` case that used to live here is covered by "offers no way to make a
+    // CatVod JS source run" above: its reason no longer names a binding, because there is nothing
+    // left to bind.
     const drpy = getAdapterProfile(
       source({ key: "drpy-one", api: "https://example.com/lib/drpy2.min.js" }),
     );
@@ -258,14 +267,5 @@ describe("adapter registry", () => {
     expect(drpy.reason).not.toContain("沙箱");
     // It names what is actually required instead.
     expect(drpy.reason).toContain("宿主 API");
-
-    // A CatVod JS source is blocked because no archive is bound to it, not because the sandbox is
-    // absent — binding one moves the source to `local-script`, which runs.
-    const jsExtension = getAdapterProfile(
-      source({ key: "kitty", siteProtocol: "js-extension" }),
-    );
-    expect(jsExtension.id).toBe("js-extension");
-    expect(jsExtension.reason).not.toContain("没有启用脚本沙箱");
-    expect(jsExtension.reason).toContain("绑定本地脚本档案");
   });
 });

@@ -122,7 +122,6 @@ fn load_legacy_sources(
                 key: row.get(0)?,
                 name: row.get(1)?,
                 source_type: row.get(2)?,
-                script_archive_id: None,
                 source_dialect: None,
                 site_type: None,
                 site_protocol: None,
@@ -514,33 +513,6 @@ fn update_normalized_source_enabled(
             }
             if let Some(object) = item.as_object_mut() {
                 object.insert("enabled".to_string(), Value::Bool(enabled));
-            }
-        }
-    }
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| normalized_config.to_string())
-}
-
-fn update_normalized_source_script_archive(
-    normalized_config: &str,
-    source_key: &str,
-    archive_id: Option<i64>,
-) -> String {
-    let Ok(mut value) = serde_json::from_str::<Value>(normalized_config) else {
-        return normalized_config.to_string();
-    };
-    for section in ["sites", "lives"] {
-        let Some(items) = value.get_mut(section).and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for item in items {
-            if item.get("key").and_then(Value::as_str) != Some(source_key) {
-                continue;
-            }
-            if let Some(object) = item.as_object_mut() {
-                let value = archive_id
-                    .map(|id| Value::Number(id.into()))
-                    .unwrap_or(Value::Null);
-                object.insert("scriptArchiveId".to_string(), value);
             }
         }
     }
@@ -1079,53 +1051,6 @@ pub(super) fn set_source_enabled_in_connection(
     load_config_document(connection, document_id)?.ok_or_else(|| "配置更新后无法读取".to_string())
 }
 
-pub(super) fn set_source_script_archive_in_connection(
-    connection: &mut Connection,
-    document_id: i64,
-    source_key: &str,
-    archive_id: Option<i64>,
-) -> Result<ConfigDocument, String> {
-    if let Some(archive_id) = archive_id {
-        let exists = connection
-            .query_row(
-                "SELECT 1 FROM script_archives WHERE id = ?1 AND deleted_at IS NULL",
-                params![archive_id],
-                |_| Ok(()),
-            )
-            .optional()
-            .map_err(|error| error.to_string())?;
-        if exists.is_none() {
-            return Err("脚本档案不存在、已删除或不可用".to_string());
-        }
-    }
-    let document = load_config_document(connection, document_id)?
-        .ok_or_else(|| "配置不存在或已被删除".to_string())?;
-    let mut sources = document.sources.clone();
-    let source = sources
-        .iter_mut()
-        .find(|source| source.key == source_key)
-        .ok_or_else(|| "配置中找不到该资源源".to_string())?;
-    source.script_archive_id = archive_id;
-    let sources_json = serialize_sources(&sources)?;
-    let normalized_config = update_normalized_source_script_archive(
-        &document.normalized_config,
-        source_key,
-        archive_id,
-    );
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
-            params![sources_json, normalized_config, document_id],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction.commit().map_err(|error| error.to_string())?;
-    load_config_document(connection, document_id)?
-        .ok_or_else(|| "绑定保存后无法读取配置".to_string())
-}
-
 pub(super) fn set_source_test_in_connection(
     connection: &mut Connection,
     document_id: i64,
@@ -1192,60 +1117,6 @@ pub(super) fn set_source_test_in_connection(
     transaction.commit().map_err(|error| error.to_string())?;
     load_config_document(connection, document_id)?
         .ok_or_else(|| "测试结果保存后无法读取配置".to_string())
-}
-
-pub(crate) fn clear_script_archive_bindings(
-    connection: &mut Connection,
-    archive_id: i64,
-) -> Result<(), String> {
-    let rows = connection
-        .prepare("SELECT id, normalized_config, sources_json FROM config_documents")
-        .map_err(|error| error.to_string())?
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    let transaction = connection
-        .transaction()
-        .map_err(|error| error.to_string())?;
-    for (document_id, normalized_config, sources_json) in rows {
-        let Some(mut sources) = deserialize_sources(sources_json)? else {
-            continue;
-        };
-        let bound_keys = sources
-            .iter_mut()
-            .filter_map(|source| {
-                if source.script_archive_id == Some(archive_id) {
-                    source.script_archive_id = None;
-                    Some(source.key.clone())
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-        if bound_keys.is_empty() {
-            continue;
-        }
-        let sources_json = serialize_sources(&sources)?;
-        let normalized_config = bound_keys
-            .iter()
-            .fold(normalized_config, |config, source_key| {
-                update_normalized_source_script_archive(&config, source_key, None)
-            });
-        transaction
-            .execute(
-                "UPDATE config_documents SET sources_json = ?1, normalized_config = ?2 WHERE id = ?3",
-                params![sources_json, normalized_config, document_id],
-            )
-            .map_err(|error| error.to_string())?;
-    }
-    transaction.commit().map_err(|error| error.to_string())
 }
 
 /// Finds a stored document that the configuration about to be imported resembles, so the
@@ -1588,7 +1459,6 @@ mod tests {
             key: key.to_string(),
             name: "同名源".to_string(),
             source_type: "cms".to_string(),
-            script_archive_id: None,
             source_dialect: None,
             site_type: Some(1),
             site_protocol: Some("json-http".to_string()),

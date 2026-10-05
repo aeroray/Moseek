@@ -18,8 +18,6 @@ pub struct SourceRecord {
     pub name: String,
     pub source_type: String,
     #[serde(default)]
-    pub script_archive_id: Option<i64>,
-    #[serde(default)]
     pub source_dialect: Option<String>,
     pub site_type: Option<i64>,
     pub site_protocol: Option<String>,

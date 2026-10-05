@@ -1,17 +1,7 @@
-import { normalizeCatVodResult } from "@/features/script/catvod-normalizer";
 import { parseParseServices } from "@/features/config/config-parser";
-import { hasScriptArchive } from "@/lib/adapters";
 import { inferMediaKind } from "@/lib/media-kind";
-import {
-  executeScriptArchive,
-  resolvePlayback,
-} from "@/lib/tauri";
-import type {
-  MediaKind,
-  SourceRecord,
-  VodEpisode,
-  VodItem,
-} from "@/types/moseek";
+import { resolvePlayback } from "@/lib/tauri";
+import type { MediaKind, VodEpisode, VodItem } from "@/types/moseek";
 
 export interface ResolvedEpisode {
   url: string;
@@ -27,47 +17,21 @@ export interface ResolvedEpisode {
  * A second implementation would drift, and the drift would show up as "this plays in the library
  * but not from favourites" — the hardest kind of bug to explain to a user.
  *
- * `source` is optional because a favourite outlives its source. The script step below is the only
- * part that needs it: a script-backed source returns an opaque episode id that only its archive
- * can turn into a URL. When the source is gone the saved URL is used as-is, which is exactly what
- * makes a favourite playable after its source was deleted.
+ * The address may still be behind a parser service, which `resolvePlayback` unwraps.
  *
- * Two things happen here. A script-backed source may return an opaque episode id rather than a
- * URL, which has to be handed to the archive's `parseIframe`; and the resulting address may still
- * be behind a parser service, which `resolvePlayback` unwraps.
+ * The `source` parameter is gone. It existed only so a script-backed source could turn an opaque
+ * episode id into a URL through its archive; with the script runtime removed, nothing here needed
+ * it, and keeping an unused parameter would leave every call site passing an argument that means
+ * nothing.
  */
 export async function resolveEpisodePlayback(
-  source: SourceRecord | undefined,
   episode: VodEpisode,
   normalizedConfig: string,
 ): Promise<ResolvedEpisode> {
-  let playbackUrl = episode.url;
-  let headers: Record<string, string> = {};
-
-  if (
-    source &&
-    hasScriptArchive(source) &&
-    !/^https?:\/\//i.test(playbackUrl)
-  ) {
-    const scriptResult = await executeScriptArchive(
-      source.scriptArchiveId,
-      { url: playbackUrl, id: episode.id },
-      "parseIframe",
-    );
-    if (!scriptResult) throw new Error("脚本档案没有返回 parseIframe 结果");
-    const normalized = normalizeCatVodResult("parseIframe", scriptResult.value, {
-      sourceKey: source.key,
-      sourceName: source.name,
-    });
-    if (normalized.kind !== "playback" || !normalized.value) {
-      throw new Error("parseIframe 返回值无法转换为播放地址");
-    }
-    playbackUrl = normalized.value.url;
-    headers = normalized.value.headers;
-  }
+  const headers: Record<string, string> = {};
 
   const resolution = await resolvePlayback(
-    playbackUrl,
+    episode.url,
     parseParseServices(normalizedConfig),
     // An episode address is very often a player page (`/share/<id>`, `/play/<id>`) rather than a
     // media file, so the resolver is asked to look inside it before falling back to a parser

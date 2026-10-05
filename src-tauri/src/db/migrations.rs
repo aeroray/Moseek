@@ -113,22 +113,6 @@ pub(crate) fn create_tables(connection: &Connection) -> Result<(), String> {
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL,
                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-             );
-             CREATE TABLE IF NOT EXISTS script_archives (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               name TEXT NOT NULL,
-               file_name TEXT NOT NULL,
-               sha256 TEXT NOT NULL UNIQUE,
-               script TEXT NOT NULL,
-               entry TEXT NOT NULL DEFAULT 'main',
-               http_hosts_json TEXT NOT NULL DEFAULT '[]',
-               http_headers_json TEXT NOT NULL DEFAULT '{}',
-               modules_json TEXT NOT NULL DEFAULT '{}',
-               cookie_present INTEGER NOT NULL DEFAULT 0,
-               enabled INTEGER NOT NULL DEFAULT 0,
-               imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-               last_used_at TEXT,
-               deleted_at TEXT
              );",
         )
         .map_err(|error| error.to_string())
@@ -138,11 +122,33 @@ pub(crate) fn run(connection: &Connection) -> Result<(), String> {
     ensure_config_source_base_url_column(connection)?;
     ensure_config_sources_column(connection)?;
     ensure_sources_epg_column(connection)?;
-    ensure_script_archives_deleted_at_column(connection)?;
-    ensure_script_archives_http_headers_column(connection)?;
-    ensure_script_archives_modules_column(connection)?;
-    ensure_script_archives_cookie_column(connection)?;
-    crate::script_runtime::archive::migrate_script_archive_cookies(connection)
+    drop_script_archive_tables(connection)
+}
+
+/// Removes the two tables that backed 本地脚本档案.
+///
+/// The feature is gone: it existed to run CatVod JS sources from a manually imported `.js` file, it
+/// was never used (both tables measured empty), and nothing reads them now. Leaving them behind would
+/// keep a schema that describes a capability the app does not have — the next person to read
+/// `migrations.rs` would find tables with no writer and have to work out why.
+///
+/// Dropped rather than merely no longer created, because `CREATE TABLE IF NOT EXISTS` is exactly what
+/// would leave them in place on every existing install. `script_archives` goes first: it is the table
+/// `script_execution_logs.archive_id` referred to, and dropping a referenced table first keeps the
+/// intent readable even though SQLite does not enforce it here.
+///
+/// The cookies those archives could store lived in the Windows credential store, keyed by archive id
+/// (`com.moseek.desktop` / `script-archive-<id>`). A user who imported an archive and gave it a
+/// cookie would leave that entry behind; it is unreachable now that nothing looks it up. Enumerating
+/// and deleting it would need the archive ids, which is the table being dropped — so the entries are
+/// left rather than guessed at, and they hold nothing the app can use.
+fn drop_script_archive_tables(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "DROP TABLE IF EXISTS script_execution_logs;
+             DROP TABLE IF EXISTS script_archives;",
+        )
+        .map_err(|error| error.to_string())
 }
 
 fn ensure_config_source_base_url_column(connection: &Connection) -> Result<(), String> {
@@ -185,35 +191,4 @@ fn ensure_config_sources_column(connection: &Connection) -> Result<(), String> {
 
 fn ensure_sources_epg_column(connection: &Connection) -> Result<(), String> {
     add_column_if_missing(connection, "sources", "epg", "TEXT")
-}
-
-fn ensure_script_archives_deleted_at_column(connection: &Connection) -> Result<(), String> {
-    add_column_if_missing(connection, "script_archives", "deleted_at", "TEXT")
-}
-
-fn ensure_script_archives_http_headers_column(connection: &Connection) -> Result<(), String> {
-    add_column_if_missing(
-        connection,
-        "script_archives",
-        "http_headers_json",
-        "TEXT NOT NULL DEFAULT '{}'",
-    )
-}
-
-fn ensure_script_archives_modules_column(connection: &Connection) -> Result<(), String> {
-    add_column_if_missing(
-        connection,
-        "script_archives",
-        "modules_json",
-        "TEXT NOT NULL DEFAULT '{}'",
-    )
-}
-
-fn ensure_script_archives_cookie_column(connection: &Connection) -> Result<(), String> {
-    add_column_if_missing(
-        connection,
-        "script_archives",
-        "cookie_present",
-        "INTEGER NOT NULL DEFAULT 0",
-    )
 }

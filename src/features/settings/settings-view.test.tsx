@@ -9,14 +9,6 @@ import { SettingsView } from "@/features/settings/settings-view";
 // a real setting and a decorative one.
 vi.mock("@/lib/tauri", () => ({
   isTauriRuntime: () => true,
-  listScriptArchives: vi.fn(async () => []),
-  listScriptExecutionLogs: vi.fn(async () => []),
-  saveScriptArchive: vi.fn(),
-  setScriptArchiveEnabled: vi.fn(),
-  deleteScriptArchive: vi.fn(),
-  purgeScriptArchive: vi.fn(),
-  restoreScriptArchive: vi.fn(),
-  executeScriptArchive: vi.fn(),
 }));
 
 function renderSettings(overrides: Partial<Parameters<typeof SettingsView>[0]> = {}) {
@@ -202,37 +194,20 @@ describe("settings page", () => {
     expect(screen.getByRole("button", { name: "清除收藏" })).toBeDisabled();
   });
 
-  it("keeps the script tooling out of the way until it is asked for", () => {
-    // Importing a local CatVod script and supplying an entry function, an HTTP allowlist and a
-    // module map is not something an ordinary user does. The card explains what it is for and
-    // stays collapsed, so the page does not read as though it expects that work.
+  it("no longer offers any script tooling", () => {
+    // The local script archives, the import form and the execution log were all removed along with
+    // the script runtime — the feature ran CatVod JS sources from a manually imported file and had
+    // never been used. Nothing about scripts belongs on this page now, so the assertions are the
+    // absence of every one of those controls rather than the shape of a collapsed card.
     renderSettings();
     openTab("安全与网络");
 
+    expect(screen.queryByText("本地脚本档案")).not.toBeInTheDocument();
+    expect(screen.queryByText("脚本执行诊断")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "导入本地脚本" })).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "展开" }));
-
-    expect(screen.getByRole("button", { name: "导入本地脚本" })).toBeInTheDocument();
-  });
-
-  it("no longer offers a free-form script console", () => {
-    // The runtime playground asked for a script, a JSON input, an allowlist and a module map.
-    // It was a developer tool in the settings page; the per-archive check covers the real need.
-    renderSettings();
-    openTab("安全与网络");
-    fireEvent.click(screen.getByRole("button", { name: "展开" }));
-
+    expect(screen.queryByRole("button", { name: "执行本地脚本" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("运行时脚本")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("脚本执行结果")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "执行本地脚本" })).not.toBeInTheDocument();
-  });
-
-  it("still exposes the execution log for scripts that do run", () => {
-    renderSettings();
-    openTab("安全与网络");
-
-    expect(screen.getByText("脚本执行诊断")).toBeInTheDocument();
   });
 
   it("offers the theme as a real choice", () => {

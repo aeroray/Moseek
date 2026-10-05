@@ -492,7 +492,6 @@ mod tests {
             key: "html".to_string(),
             name: "HTML".to_string(),
             source_type: "cms".to_string(),
-            script_archive_id: None,
             source_dialect: Some("tvbox".to_string()),
             site_type: Some(5),
             site_protocol: Some("html-http".to_string()),

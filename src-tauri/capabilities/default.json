@@ -7,15 +7,6 @@
     "core:default",
     "opener:default",
     "updater:default",
-    "process:allow-restart",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "binaries/moseek-script-runtime",
-          "sidecar": true
-        }
-      ]
-    }
+    "process:allow-restart"
   ]
 }

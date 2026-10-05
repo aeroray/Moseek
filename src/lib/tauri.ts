@@ -1,12 +1,10 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 
-import { hasScriptArchive } from "@/lib/adapters";
 import type {
   CatalogPage,
   EpgCatalog,
   LiveCatalog,
   ParseServiceRecord,
-  ScriptArchiveSummary,
   SourceRecord,
   SourceTestResult,
   VodItem,
@@ -99,58 +97,6 @@ export interface StreamProbe {
   message: string;
 }
 
-export interface ScriptExecutionRequest {
-  script: string;
-  entry?: string;
-  input?: unknown;
-  httpHosts?: string[];
-  httpHeaders?: Record<string, string>;
-  modules?: Record<string, string>;
-}
-
-export interface ScriptExecutionResult {
-  value: unknown;
-  adapterId: string;
-  httpCallCount: number;
-  diagnostics: ScriptExecutionDiagnostics;
-}
-
-export interface ScriptHttpDiagnostic {
-  host: string;
-  durationMs: number;
-  status: string;
-  errorKind?: string | null;
-}
-
-export interface ScriptExecutionDiagnostics {
-  status: string;
-  phase: string;
-  durationMs: number;
-  httpCallCount: number;
-  httpHosts: string[];
-  httpCalls: ScriptHttpDiagnostic[];
-  errorKind?: string | null;
-  timedOut: boolean;
-  credentialLookupFailed: boolean;
-}
-
-export interface ScriptExecutionLog extends ScriptExecutionDiagnostics {
-  id: number;
-  archiveId?: number | null;
-  entry: string;
-  createdAt: string;
-}
-
-export interface SaveScriptArchiveInput {
-  name: string;
-  fileName: string;
-  script: string;
-  entry?: string;
-  httpHosts?: string[];
-  httpHeaders?: Record<string, string>;
-  modules?: Record<string, string>;
-}
-
 export function isTauriRuntime() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
@@ -226,18 +172,6 @@ export async function removeSources(documentId: number, sourceKeys: string[]) {
   });
 }
 
-export async function setSourceScriptArchive(
-  documentId: number,
-  sourceKey: string,
-  archiveId: number | null,
-) {
-  return invokeCommand<StoredConfigDocument>("set_source_script_archive", {
-    documentId,
-    sourceKey,
-    archiveId,
-  });
-}
-
 export async function updateSourceTest(
   documentId: number,
   sourceKey: string,
@@ -297,28 +231,6 @@ export async function fetchConfigUrl(url: string) {
   return invokeCommand<FetchedConfig>("fetch_config_url", { url });
 }
 
-/** What checking one script address found. */
-export interface ScriptAddressProbe {
-  url: string;
-  /** `reachable`, `refused`, `missing` or `unreachable`. */
-  verdict: string;
-  message: string;
-  /** A mirror address that serves the same file, when one works. */
-  mirrorUrl: string | null;
-  mirrorReason: string | null;
-}
-
-/**
- * Checks whether a source's script address can actually be fetched.
- *
- * Returns null in browser preview, where the command is not registered. The probe distinguishes a
- * host refusing from a file being gone, which is what lets the interface stop reporting both as a
- * missing sandbox.
- */
-export async function probeScriptAddress(url: string) {
-  return invokeCommand<ScriptAddressProbe>("probe_script_address", { url });
-}
-
 export async function setConfigSourceBaseUrl(
   documentId: number,
   sourceBaseUrl: string,
@@ -361,12 +273,7 @@ export async function browseSource(
  * is not part of a batch and has nothing to cancel it as a group.
  */
 export async function testSource(source: SourceRecord, runId?: string) {
-  const command =
-    source.sourceType === "live"
-      ? "test_live_source"
-      : hasScriptArchive(source)
-        ? "test_script_source"
-        : "test_source";
+  const command = source.sourceType === "live" ? "test_live_source" : "test_source";
   return invokeCommand<SourceTestResult>(command, {
     source,
     runId: runId ?? null,
@@ -521,57 +428,6 @@ export async function probeStreamUrls(urls: string[], timeoutMs?: number) {
   return invokeCommand<StreamProbe[]>("probe_stream_urls", {
     urls,
     timeoutMs: timeoutMs ?? null,
-  });
-}
-
-export async function listScriptExecutionLogs(limit = 20) {
-  return invokeCommand<ScriptExecutionLog[]>("list_script_execution_logs", {
-    limit,
-  });
-}
-
-export async function listScriptArchives() {
-  return invokeCommand<ScriptArchiveSummary[]>("list_script_archives");
-}
-
-export async function saveScriptArchive(input: SaveScriptArchiveInput) {
-  return invokeCommand<ScriptArchiveSummary>("save_script_archive", { input });
-}
-
-export async function setScriptArchiveEnabled(id: number, enabled: boolean) {
-  return invokeCommand<ScriptArchiveSummary>("set_script_archive_enabled", {
-    archiveId: id,
-    enabled,
-  });
-}
-
-export async function deleteScriptArchive(id: number) {
-  return invokeCommand<ScriptArchiveSummary[]>("delete_script_archive", {
-    archiveId: id,
-  });
-}
-
-export async function restoreScriptArchive(id: number) {
-  return invokeCommand<ScriptArchiveSummary[]>("restore_script_archive", {
-    archiveId: id,
-  });
-}
-
-export async function purgeScriptArchive(id: number) {
-  return invokeCommand<ScriptArchiveSummary[]>("purge_script_archive", {
-    archiveId: id,
-  });
-}
-
-export async function executeScriptArchive(
-  id: number,
-  input: unknown,
-  entry?: string,
-) {
-  return invokeCommand<ScriptExecutionResult>("execute_script_archive", {
-    archiveId: id,
-    input,
-    entry: entry ?? null,
   });
 }
 

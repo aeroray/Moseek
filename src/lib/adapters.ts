@@ -11,7 +11,6 @@ export type AdapterId =
   | "http-extension"
   | "http-parser"
   | "js-extension"
-  | "local-script"
   | "html-http"
   | "spider-runtime"
   | "remote-jar"
@@ -61,18 +60,11 @@ const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
     label: "JS 扩展源",
     execution: "blocked",
     operations: ["分类", "首页", "搜索", "详情", "iframe 解析"],
-    // Same correction as `drpy-js`: the sandbox exists, and the reason this source is blocked is
-    // that no archive is bound to it. A source the user binds an archive to moves to `local-script`
-    // and runs; this label is what an unbound one reads.
-    reason:
-      "小猫/CatVod JS 源需要绑定本地脚本档案后才能运行；未绑定时不执行任何远程代码。",
-  },
-  "local-script": {
-    label: "本地脚本适配器",
-    execution: "enabled",
-    operations: ["分类", "首页", "搜索", "详情", "iframe 解析"],
-    reason:
-      "用户明确绑定并启用本地脚本档案后，完整调用 CatVod 入口；脚本执行受 sidecar、哈希和 HTTP allowlist 限制。",
+    // This used to promise that binding a local script archive would make the source run. That
+    // feature is gone, so the sentence now states the fact that remains: Moseek does not execute
+    // these sources, and nothing the user can do in the app changes that. Naming a switch that no
+    // longer exists would send them looking for it.
+    reason: "小猫/CatVod JS 源需要脚本运行时，Moseek 不执行远程脚本，只记录和展示配置。",
   },
   "html-http": {
     label: "声明式 HTML 适配器",
@@ -157,7 +149,6 @@ export const adapterRegistry: AdapterProfile[] = [
   createProfile("http-extension", "cms"),
   createProfile("http-parser", "parser"),
   createProfile("js-extension", "cms"),
-  createProfile("local-script", "cms"),
   createProfile("html-http", "cms"),
   createProfile("spider-runtime", "cms"),
   createProfile("remote-jar", "cms"),
@@ -195,13 +186,7 @@ function remoteScriptFamily(key: string, api: string): AdapterId | null {
 export function getAdapterProfile(
   source: Pick<
     SourceRecord,
-    | "key"
-    | "api"
-    | "jar"
-    | "sourceType"
-    | "siteProtocol"
-    | "capability"
-    | "scriptArchiveId"
+    "key" | "api" | "jar" | "sourceType" | "siteProtocol" | "capability"
   >,
 ): AdapterProfile {
   const key = source.key.toLowerCase();
@@ -227,8 +212,6 @@ export function getAdapterProfile(
     // for them — it stores `needs-adapter` with the note 「直播源使用非 HTTP 协议，需要单独适配器，
     // 当前不执行」, which is this profile's own wording.
     id = isFetchableLiveUrl(source.api) ? "builtin-live" : "private-protocol";
-  } else if (hasScriptArchive(source)) {
-    id = "local-script";
   } else if (source.siteProtocol === "http-extension") {
     id = "http-extension";
   } else if (source.siteProtocol === "js-extension") {
@@ -304,11 +287,7 @@ export function isTestableCmsSource(source: SourceRecord) {
   if (source.sourceType !== "cms" || source.capability === "invalid") {
     return false;
   }
-  const profile = getAdapterProfile(source);
-  if (hasScriptArchive(source)) {
-    return profile.id === "local-script";
-  }
-  return profile.execution === "enabled";
+  return getAdapterProfile(source).execution === "enabled";
 }
 
 /**
@@ -340,21 +319,6 @@ export function isTestableLiveSource(source: SourceRecord) {
   // the check here is what let the two columns disagree before.
   return getAdapterProfile(source).execution === "enabled";
 }
-
-/**
- * Whether this source is bound to a local script archive.
- *
- * Extracted because the same two-part nullable check was written out seven times across the codebase
- * — in the adapter registry, the CMS adapter, the player's episode lookup, the config centre and the
- * Tauri bridge. Each copy is a place a future `undefined` handling change could be applied to six of
- * them, and `scriptArchiveId` being optional makes both halves necessary.
- */
-export function hasScriptArchive(
-  source: Pick<SourceRecord, "scriptArchiveId">,
-): source is Pick<SourceRecord, "scriptArchiveId"> & { scriptArchiveId: number } {
-  return source.scriptArchiveId !== null && source.scriptArchiveId !== undefined;
-}
-
 export function isTestableSource(source: SourceRecord) {
   return isTestableCmsSource(source) || isTestableLiveSource(source);
 }

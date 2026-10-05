@@ -51,21 +51,6 @@ export interface ParseServiceRecord {
   capabilityNote: string;
 }
 
-export interface ScriptArchiveSummary {
-  id: number;
-  name: string;
-  fileName: string;
-  sha256: string;
-  entry: string;
-  httpHosts: string[];
-  httpHeaderNames: string[];
-  moduleNames: string[];
-  hasCookie: boolean;
-  enabled: boolean;
-  importedAt: string;
-  lastUsedAt?: string | null;
-}
-
 export type SiteProtocol =
   | "xml-http"
   | "json-http"
@@ -261,7 +246,6 @@ export interface SourceRecord {
   key: string;
   name: string;
   sourceType: SourceType;
-  scriptArchiveId?: number | null;
   sourceDialect?: SourceDialect | null;
   siteType?: number | null;
   siteProtocol?: SiteProtocol | null;

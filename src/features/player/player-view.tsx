@@ -191,7 +191,7 @@ export function PlayerView({
     }
     setResolvedPlayback(null);
     setStatus("loading");
-    void resolveEpisodePlayback(source, activeEpisode, normalizedConfig)
+    void resolveEpisodePlayback(activeEpisode, normalizedConfig)
       .then((resolution) => {
         if (!cancelled) setResolvedPlayback(resolution);
       })
@@ -203,7 +203,7 @@ export function PlayerView({
     return () => {
       cancelled = true;
     };
-  }, [episodeUrl, episodeId, normalizedConfig, source.key, source.scriptArchiveId]);
+  }, [episodeUrl, episodeId, normalizedConfig, source.key]);
 
   const selectEpisode = (line: VodPlayLine, episode: VodEpisode) => {
     setActiveLineId(line.id);

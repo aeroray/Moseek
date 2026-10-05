@@ -114,12 +114,13 @@ impl SiteAdapterKind {
             Some("json-http") | Some("1") => Self::JsonHttp,
             Some("http-extension") | Some("4") => Self::HttpExtension,
             Some("html-http") | Some("5") => Self::Html,
-            // A `js-extension` source is a CatVod script source. It is only executable once the
-            // user binds a local script archive, which the config parser records as
-            // `local-script`; without one there is no safe adapter and `ensure_executable`
-            // rejects it on its capability. Naming it here keeps this match aligned with the
-            // protocol vocabulary the parser actually produces — it previously fell through to
-            // the `source_type == "cms"` catch-all and was treated as plain JSON.
+            // A `js-extension` source is a CatVod script source, and it is enforced as a spider:
+            // `ensure_executable` refuses the family below because it needs a script runtime this
+            // app does not have. The comment here used to say the source became executable once the
+            // user bound a local script archive; that runtime has been removed, so there is no
+            // longer any path that makes one of these run. Naming the protocol here keeps this match
+            // aligned with the vocabulary the parser actually produces — it previously fell through
+            // to the `source_type == "cms"` catch-all and was treated as plain JSON.
             Some("js-extension") | Some("spider") | Some("3") => Self::Spider,
             Some("unknown") => Self::Unsupported,
             _ if source.source_type == "cms" => Self::JsonHttp,
@@ -194,7 +195,6 @@ mod tests {
             key: "demo".to_string(),
             name: "Demo".to_string(),
             source_type: "cms".to_string(),
-            script_archive_id: None,
             source_dialect: None,
             site_type,
             site_protocol: site_protocol.map(ToOwned::to_owned),

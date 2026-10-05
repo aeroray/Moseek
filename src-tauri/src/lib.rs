@@ -9,8 +9,6 @@ mod models;
 mod page_stream;
 mod policy;
 mod resolver;
-mod script_runtime;
-mod script_source;
 mod test_runs;
 mod xbpq;
 
@@ -31,7 +29,6 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -55,12 +52,10 @@ pub fn run() {
             config::commands::delete_config_document,
             config::commands::set_source_enabled,
             config::commands::remove_sources,
-            config::commands::set_source_script_archive,
             config::commands::update_source_test,
             config::commands::export_config,
             config::commands::export_config_file,
             config::commands::fetch_config_url,
-            config::commands::probe_script_address,
             config::commands::set_config_source_base_url,
             config::commands::recover_known_live_sources,
             cms::browse_source,
@@ -79,15 +74,6 @@ pub fn run() {
             resolver::probe_stream_urls,
             resolver::sniff_with_companion,
             download::download_image,
-            script_runtime::archive::test_script_source,
-            script_runtime::archive::list_script_archives,
-            script_runtime::archive::list_script_execution_logs,
-            script_runtime::archive::save_script_archive,
-            script_runtime::archive::set_script_archive_enabled,
-            script_runtime::archive::delete_script_archive,
-            script_runtime::archive::restore_script_archive,
-            script_runtime::archive::purge_script_archive,
-            script_runtime::archive::execute_script_archive,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Moseek");

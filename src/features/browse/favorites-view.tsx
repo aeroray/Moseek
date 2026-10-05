@@ -944,7 +944,7 @@ function ResolvedEpisodePlayer({
     let cancelled = false;
     setResolveError(null);
     setResolved(null);
-    void resolveEpisodePlayback(source, episodeRef.current, normalizedConfig)
+    void resolveEpisodePlayback(episodeRef.current, normalizedConfig)
       .then((resolution) => {
         if (!cancelled) setResolved(resolution);
       })
