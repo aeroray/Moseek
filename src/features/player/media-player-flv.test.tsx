@@ -149,6 +149,49 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
   };
 });
 
+/**
+ * The player is faked rather than loaded.
+ *
+ * jsdom cannot reproduce what actually matters about Plyr here: it has no `MediaSource`, and the
+ * behaviour this suite pins — that the player is built **once** for an element and never rebuilt
+ * when the pipeline changes under it — is a property of *our* wiring, not of Plyr's internals. The
+ * numbers behind it were measured in a real browser; see `MediaPipelineEvents` in the component.
+ */
+interface FakePlyr {
+  media: HTMLVideoElement;
+  options: Record<string, unknown>;
+  destroyCount: number;
+  emit(event: string, ...args: unknown[]): void;
+}
+const createdPlyrs = [] as FakePlyr[];
+vi.mock("plyr", () => {
+  class Plyr {
+    handlers = new Map<string, ((...args: unknown[]) => void)[]>();
+    currentTime = 0;
+    duration = 0;
+    muted = false;
+    destroyCount = 0;
+    constructor(
+      public media: HTMLVideoElement,
+      public options: Record<string, unknown>,
+    ) {
+      createdPlyrs.push(this as unknown as FakePlyr);
+    }
+    on(event: string, handler: (...args: unknown[]) => void) {
+      const list = this.handlers.get(event) ?? [];
+      list.push(handler);
+      this.handlers.set(event, list);
+    }
+    emit(event: string, ...args: unknown[]) {
+      for (const handler of this.handlers.get(event) ?? []) handler(...args);
+    }
+    destroy() {
+      this.destroyCount += 1;
+    }
+  }
+  return { default: Plyr };
+});
+
 interface ControllablePlayer {
   emit(event: string, ...args: unknown[]): void;
   loaded: number;
@@ -200,6 +243,7 @@ async function mountPlayer(url: string, kind: "hls" | "mp4" | "unknown" = "unkno
 describe("MediaPlayer FLV pipeline wiring", () => {
   beforeEach(() => {
     createdPlayers.length = 0;
+    createdPlyrs.length = 0;
     lastLoader = null;
     streamCallbacks = null;
     streamMediaResource.mockReset();
@@ -256,6 +300,49 @@ describe("MediaPlayer FLV pipeline wiring", () => {
     expect(createdPlayers[0].dataSource.url).toBe(
       "https://live.ottiptv.cc/douyu/431460",
     );
+  });
+
+  it("keeps the same player standing when the pipeline changes under it", async () => {
+    // The defect the user reported as "nothing plays, not even the player appears". Plyr refuses to
+    // initialise an element twice — `setup()` returns early on `if (this.media.plyr)` and nothing,
+    // including `destroy()`, ever clears that back-reference — and `destroy()` also replaces the
+    // element with a clone. So tearing the player down to rebuild it for the next pipeline left the
+    // app driving an element that was no longer in the document, with no player around it at all:
+    // measured against the real channel, mpegts.js decoded 425 frames into a detached element while
+    // the DOM held a source-less clone and zero `.plyr` surfaces. The player therefore belongs to
+    // the element and survives the swap.
+    //
+    // The pipeline is moved here by changing the source rather than by a probe answer, because that
+    // is the part jsdom can actually perform: it has no `MediaSource`, so `Hls.isSupported()` is
+    // false and the HLS half of a probe-driven switch never builds a player for the teardown to
+    // lose. What is asserted is our own contract either way — one player per element, never rebuilt.
+    const { rerender } = render(
+      <MediaPlayer
+        title="斗鱼 431460"
+        url="http://cdn.example/live/stream.flv"
+        kind="unknown"
+        isLive
+        fill
+      />,
+    );
+    await waitFor(() => expect(createdPlyrs).toHaveLength(1));
+    const player = createdPlyrs[0];
+
+    rerender(
+      <MediaPlayer
+        title="斗鱼 431460"
+        url="http://cdn.example/live/stream.flv"
+        kind="mp4"
+        isLive={false}
+        fill
+      />,
+    );
+
+    await waitFor(() => expect(createdPlayers.length).toBeGreaterThan(0));
+    expect(createdPlyrs).toHaveLength(1);
+    expect(createdPlyrs[0]).toBe(player);
+    expect(player.destroyCount).toBe(0);
+    expect(player.media).toBe(document.querySelector("video"));
   });
 
   it("forwards chunks in arrival order with the stream offset they begin at", async () => {

@@ -86,6 +86,17 @@ export function PlayerView({
   // when the detail request returns a fuller record.
   const [detail, setDetail] = useState(item);
   const [detailError, setDetailError] = useState<string | null>(null);
+  /**
+   * Whether the detail request is still outstanding.
+   *
+   * Without this the page cannot tell "the source gave us nothing" from "the answer is still on its
+   * way", and it renders the empty state for the whole round trip. The user saw exactly that: the
+   * work opened on 暂无可播放的剧集, which then vanished into a loading state and finally played, and
+   * the play-line rail was empty before suddenly filling. Some sources do return slim catalog rows
+   * (the 采集集合 extension returns no play addresses in its listing at all), so the row alone is not
+   * enough to decide — the answer has to be waited for before the empty state is claimed.
+   */
+  const [isDetailLoading, setIsDetailLoading] = useState(true);
   // Empty means "not chosen yet", and the derived values below fall back to the first line and
   // its first episode. That is what makes the player ready on entry without an extra effect:
   // when the detail request replaces the play lines, the fallback picks up the new first
@@ -124,10 +135,12 @@ export function PlayerView({
 
   useEffect(() => {
     let cancelled = false;
+    setIsDetailLoading(true);
     void getVodDetail(source, item).then((result) => {
       if (cancelled) return;
       if (result.data) setDetail(result.data);
       setDetailError(result.error);
+      setIsDetailLoading(false);
     });
     return () => {
       cancelled = true;
@@ -300,7 +313,21 @@ export function PlayerView({
             their natural size, and the page never scrolls. */}
         <div className="flex min-h-0 flex-col gap-3 pr-3">
           <div className="flex min-h-0 flex-1 items-center justify-center">
-            {!activeEpisode ? (
+            {isDetailLoading && !activeEpisode ? (
+              /* The detail request is still in flight and the catalog row carried no play lines.
+                 This branch must precede the empty one: an empty state is a claim about the source,
+                 and until the answer arrives there is nothing to base that claim on. Rendering it
+                 early is what produced the reported flash — 暂无可播放的剧集, then a loading state,
+                 then playback, all within a second. */
+              <div
+                className="flex size-full flex-col items-center justify-center gap-3 rounded-md border border-dashed border-border/60 bg-black/40 text-center"
+                aria-live="polite"
+              >
+                <Loader2 className="size-6 animate-spin text-primary" aria-hidden="true" />
+                <p className="text-xs text-muted-foreground">正在获取剧集…</p>
+                <p className="max-w-sm text-xs text-muted-foreground/70">{detail.name}</p>
+              </div>
+            ) : !activeEpisode ? (
               /* Nothing to play: the source returned no lines or episodes. A dashed placeholder
                  fills the surface instead of a small grey box floating in a large empty area. */
               <Empty className="size-full border-border/60 bg-card/20">
@@ -563,13 +590,30 @@ export function PlayerView({
                 <ListVideo className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
                 线路与选集
               </CardTitle>
+              {/* While the detail is still in flight the counts are not known yet, and "0 线路 · 0 集"
+                  states a fact that is about to be contradicted. */}
               <span className="shrink-0 text-xs text-muted-foreground">
-                {detail.playLines.length} 线路 · {activeLine?.episodes.length ?? 0} 集
+                {detail.playLines.length === 0 && isDetailLoading
+                  ? "正在获取…"
+                  : `${detail.playLines.length} 线路 · ${activeLine?.episodes.length ?? 0} 集`}
               </span>
             </div>
           </CardHeader>
           <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-            {detail.playLines.length === 0 ? (
+            {detail.playLines.length === 0 && isDetailLoading ? (
+              /* Same distinction as the player surface: an empty rail is a claim about the source,
+                 so it waits for the answer. This is the "rail was empty and then suddenly filled"
+                 the user saw. */
+              <div
+                className="flex flex-1 items-center justify-center px-4"
+                aria-live="polite"
+              >
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <Loader2 className="size-5 animate-spin text-primary" aria-hidden="true" />
+                  <p className="text-xs text-muted-foreground">正在获取播放线路…</p>
+                </div>
+              </div>
+            ) : detail.playLines.length === 0 ? (
               /* An empty rail used to be a blank card, which reads as "still loading" rather
                  than "this source gave us nothing". */
               <div className="flex flex-1 items-center justify-center px-4">

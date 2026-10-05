@@ -315,7 +315,7 @@ describe("PlayerView composition", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("fills the surface with a placeholder when the source has no episodes", () => {
+  it("fills the surface with a placeholder when the source has no episodes", async () => {
     // A small grey box floating in a large empty area read as a broken layout. The empty state
     // now occupies the whole surface.
     getVodDetail.mockResolvedValue({
@@ -331,10 +331,61 @@ describe("PlayerView composition", () => {
       />,
     );
 
-    expect(screen.getByText("暂无可播放的剧集")).toBeInTheDocument();
+    // The empty state is a claim about the source, so it is only made once the detail request has
+    // answered — see the test below for what is shown before that.
+    expect(await screen.findByText("暂无可播放的剧集")).toBeInTheDocument();
     expect(screen.getByText(/未解析出播放线路或剧集/)).toBeInTheDocument();
     // The rail says why it is empty instead of rendering a blank card.
     expect(screen.getByText("没有可用线路")).toBeInTheDocument();
+  });
+
+  it("does not claim the source is empty before the detail request answers", async () => {
+    // The reported flash: opening a work showed 暂无可播放的剧集, which then vanished into a loading
+    // state and finally played, while the play-line rail sat empty and then filled. The cause was
+    // that a slim catalog row and a source with nothing to offer looked identical, so the empty
+    // state was rendered during the round trip. A deferred promise reproduces that window exactly.
+    let release: (value: unknown) => void = () => {};
+    getVodDetail.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(
+      <PlayerView
+        item={{ ...item(), playLines: [] }}
+        source={source()}
+        onBack={() => {}}
+      />,
+    );
+
+    // While the answer is outstanding: a loading state, and NO claim about the source.
+    expect(screen.getByText("正在获取剧集…")).toBeInTheDocument();
+    expect(screen.getByText("正在获取播放线路…")).toBeInTheDocument();
+    expect(screen.queryByText("暂无可播放的剧集")).not.toBeInTheDocument();
+    expect(screen.queryByText("没有可用线路")).not.toBeInTheDocument();
+    // The rail header must not state "0 线路 · 0 集" either, which is about to be contradicted.
+    expect(screen.getByText("正在获取…")).toBeInTheDocument();
+
+    // The detail arrives with real lines: the loading state gives way to the player, and the empty
+    // state is never shown at any point.
+    release({
+      data: {
+        ...item(),
+        playLines: [
+          {
+            id: "line-1",
+            name: "线路一",
+            episodes: [{ id: "ep-1", name: "第 1 集", url: "https://example.com/a.m3u8" }],
+          },
+        ],
+      },
+      mode: "remote",
+      error: null,
+    });
+
+    expect(await screen.findByText(/线路一/)).toBeInTheDocument();
+    expect(screen.queryByText("暂无可播放的剧集")).not.toBeInTheDocument();
+    expect(screen.queryByText("没有可用线路")).not.toBeInTheDocument();
   });
 
   it("labels the back control with the word, not only an icon", () => {

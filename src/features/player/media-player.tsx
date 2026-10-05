@@ -23,6 +23,7 @@ import {
   type MediaStreamMeta,
 } from "@/lib/tauri";
 import { getByteRangeHeader, isEmptyFragmentResponse } from "@/features/player/media-range";
+import { useViewActive } from "@/components/view-pane";
 import {
   clearsFailureNote,
   decideLiveWatchdog,
@@ -82,6 +83,37 @@ interface MediaPlayerProps {
 }
 
 let cachedTransmuxWorkerSupport: boolean | null = null;
+
+/**
+ * What the player reports to whichever pipeline is currently attached.
+ *
+ * The player instance is created once for the element's lifetime and never rebuilt; the library
+ * behind it (hls.js, mpegts.js, or the element's own native playback) is what gets swapped when the
+ * pipeline changes. So the player's listeners cannot close over one pipeline's state — they reach
+ * the current pipeline's handlers through this, which each pipeline effect installs on the way in
+ * and clears on the way out.
+ *
+ * **Rebuilding the player instead is not an option, and that is what broke live FLV playback.**
+ * Plyr refuses to initialise an element twice — `setup()` returns early on `if (this.media.plyr)`
+ * with "Target already setup", and nothing in Plyr ever clears that back-reference, including
+ * `destroy()`. Measured on the real channel this was reported from: after the container probe turned
+ * the URL-derived HLS guess into an FLV pipeline, `new Plyr(video)` produced **no container, no
+ * `ready`, and no error**, so the app never received a `playing` event — while mpegts.js was decoding
+ * 425 frames into that element. Plyr's `destroy()` also replaces the element with a *clone*, leaving
+ * the one being driven outside the document. The user saw both halves at once: nothing played, and no
+ * player appeared.
+ */
+interface MediaPipelineEvents {
+  onReady: () => void;
+  onPlay: () => void;
+  onPlaying: () => void;
+  onWaiting: () => void;
+  onStalled: () => void;
+  onPause: () => void;
+  onEnded: () => void;
+  onError: () => void;
+  onTimeUpdate: (currentTime: number) => void;
+}
 
 /**
  * Playlists are a few kilobytes, so a manifest request gets a much smaller budget than a
@@ -497,6 +529,10 @@ export function MediaPlayer({
 }: MediaPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<Plyr | null>(null);
+  /** Whether the player can be driven yet; shared by every pipeline, so it lives in a ref. */
+  const playerReadyRef = useRef(false);
+  /** The current pipeline's handlers, installed by the pipeline effect. See `MediaPipelineEvents`. */
+  const pipelineEventsRef = useRef<MediaPipelineEvents | null>(null);
   const hlsRef = useRef<Hls | null>(null);
   /**
    * The mpegts.js instance, held in a ref rather than only in the effect's closure.
@@ -537,6 +573,16 @@ export function MediaPlayer({
     useState<MediaContainerEvidence | null>(null);
 
   const pipeline = resolveMediaPipeline(kind, isLive, url, containerEvidence);
+  /**
+   * Whether the view this player lives in is on screen.
+   *
+   * The views are kept alive while the user is elsewhere (see `ViewPane`), which is what preserves
+   * the library's search and the live workspace's channel. A *player* must not be kept alive with
+   * them: a hidden live stream keeps downloading until the process exits, and a hidden VOD keeps
+   * buffering. So playback is paused while the view is away and resumed when it comes back — the
+   * pipeline, the position and the buffered data all survive, because nothing is torn down.
+   */
+  const viewActive = useViewActive();
 
   useEffect(() => {
     callbackRef.current = { onProgress, onStatus, onDiagnostic, onPlayable };
@@ -581,6 +627,49 @@ export function MediaPlayer({
     loadSourceRef.current?.(source);
   }, [headers, isLive, kind, poster, url]);
 
+  /**
+   * The player instance belongs to the element, not to the pipeline: it is created by whichever
+   * pipeline boots first and destroyed here, with the component. See `MediaPipelineEvents` for what
+   * rebuilding it in between actually does.
+   */
+  useEffect(
+    () => () => {
+      playerRef.current?.destroy();
+      playerRef.current = null;
+      playerReadyRef.current = false;
+      pipelineEventsRef.current = null;
+    },
+    [],
+  );
+
+  /**
+   * Stops playback while this player's view is off screen, and picks it up again on return.
+   *
+   * Kept alive, a hidden live stream downloads for as long as the app is open, and a hidden VOD
+   * buffers ahead of a user who is not watching. Pausing is enough to stop both: hls.js and
+   * mpegts.js stop fetching when the element is paused, and the pipeline keeps its buffered data and
+   * position, so returning resumes where the user left rather than reloading.
+   *
+   * `autoResumeRef` remembers whether it was actually playing, so a view the user had deliberately
+   * paused is not started by navigating back to it.
+   */
+  const autoResumeRef = useRef(false);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (!viewActive) {
+      autoResumeRef.current = !video.paused;
+      if (!video.paused) video.pause();
+      return;
+    }
+    if (!autoResumeRef.current) return;
+    autoResumeRef.current = false;
+    void video.play().catch(() => {
+      // A rejected play() is normal here: the element may still be waiting for data, and the live
+      // path has its own retry policy that owns this decision (`requestLivePlayback`).
+    });
+  }, [viewActive]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -595,9 +684,7 @@ export function MediaPlayer({
     let playbackRetryTimer: ReturnType<typeof setTimeout> | null = null;
     let diagnosticTimer: ReturnType<typeof setTimeout> | null = null;
     let lastDiagnosticFlush = 0;
-    let livePlayer: Plyr | null = null;
     let hasBufferedFragment = false;
-    let playerReady = false;
     let playbackRequested = liveMode;
     let playbackAttemptInFlight = false;
     let playbackAttempts = 0;
@@ -664,6 +751,16 @@ export function MediaPlayer({
       scheduleDiagnosticFlush(isFailure);
     };
 
+    /**
+     * Runs once per pipeline, and *only* installs the handlers this pipeline wants the player to
+     * call. The player itself may already exist — it belongs to the element, and every pipeline
+     * change (a probe contradicting the URL-derived guess is the routine one for live channels)
+     * must leave it standing.
+     */
+    const installPipelineEvents = (events: MediaPipelineEvents) => {
+      pipelineEventsRef.current = events;
+    };
+
     // Plyr wraps the <video> element in its own DOM and hls.js attaches a MediaSource
     // to it. Neither can be constructed twice on the same element, but React StrictMode
     // mounts, unmounts and remounts effects in development, which would build both
@@ -697,12 +794,85 @@ export function MediaPlayer({
       }, 0);
     };
 
+    /**
+     * Builds the player if it does not exist yet, and otherwise leaves the existing one alone.
+     *
+     * Its listeners are bound once, here, and dispatch through `pipelineEventsRef` — see
+     * `MediaPipelineEvents` for why a second Plyr on this element is not an option.
+     */
+    const ensurePlayer = () => {
+      const existing = playerRef.current;
+      if (existing) {
+        if (liveMode) playerReadyRef.current = true;
+        return existing;
+      }
+      const player = new Plyr(video, {
+        autoplay: liveMode,
+        seekTime: 10,
+        settings: ["quality", "speed"],
+        speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
+        controls: liveMode
+          ? [
+              "play-large",
+              "play",
+              "mute",
+              "volume",
+              "settings",
+              "pip",
+              "fullscreen",
+            ]
+          : [
+              "play-large",
+              "restart",
+              "play",
+              "progress",
+              "current-time",
+              "duration",
+              "mute",
+              "volume",
+              "settings",
+              "pip",
+              "fullscreen",
+            ],
+      });
+      playerRef.current = player;
+      if (liveMode) {
+        // HLS live playback can buffer before Plyr emits its ready event.
+        // The media element is the source of truth for starting playback.
+        playerReadyRef.current = true;
+      }
+      player.on("ready", () => {
+        playerReadyRef.current = true;
+        const resume = resumeRef.current;
+        if (
+          resume > 5 &&
+          Number.isFinite(player.duration) &&
+          player.duration > resume
+        ) {
+          player.currentTime = resume;
+        }
+        pipelineEventsRef.current?.onReady();
+      });
+      player.on("play", () => pipelineEventsRef.current?.onPlay());
+      player.on("playing", () => pipelineEventsRef.current?.onPlaying());
+      player.on("waiting", () => pipelineEventsRef.current?.onWaiting());
+      player.on("stalled", () => pipelineEventsRef.current?.onStalled());
+      player.on("pause", () => pipelineEventsRef.current?.onPause());
+      player.on("ended", () => pipelineEventsRef.current?.onEnded());
+      player.on("error", () => pipelineEventsRef.current?.onError());
+      player.on("timeupdate", () => {
+        pipelineEventsRef.current?.onTimeUpdate(player.currentTime);
+      });
+      return player;
+    };
+
     const requestLivePlayback = async () => {
+      const player = playerRef.current;
       if (
         !liveMode ||
-        !livePlayer ||
+        !player ||
         !hasBufferedFragment ||
-        !playerReady ||
+        !playerReadyRef.current ||
         !playbackRequested ||
         playbackAttemptInFlight ||
         disposed
@@ -711,7 +881,7 @@ export function MediaPlayer({
       }
       const attemptVersion = sourceVersion;
       playbackAttemptInFlight = true;
-      const started = await startLivePlayback(livePlayer, video);
+      const started = await startLivePlayback(player, video);
       playbackAttemptInFlight = false;
       if (disposed || attemptVersion !== sourceVersion) return;
       if (started) {
@@ -744,9 +914,9 @@ export function MediaPlayer({
     const startBufferedLivePlayback = () => {
       if (
         !liveMode ||
-        !livePlayer ||
+        !playerRef.current ||
         !hasBufferedFragment ||
-        !playerReady ||
+        !playerReadyRef.current ||
         !playbackRequested ||
         disposed
       ) {
@@ -754,86 +924,45 @@ export function MediaPlayer({
       }
       void requestLivePlayback();
     };
-    const createPlayer = () => {
-      const player = new Plyr(video, {
-        autoplay: liveMode,
-        seekTime: 10,
-        settings: ["quality", "speed"],
-        speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
-        controls: liveMode
-          ? [
-              "play-large",
-              "play",
-              "mute",
-              "volume",
-              "settings",
-              "pip",
-              "fullscreen",
-            ]
-          : [
-              "play-large",
-              "restart",
-              "play",
-              "progress",
-              "current-time",
-              "duration",
-              "mute",
-              "volume",
-              "settings",
-              "pip",
-              "fullscreen",
-            ],
-      });
-      livePlayer = player;
-      playerRef.current = player;
-      if (liveMode) {
-        // HLS live playback can buffer before Plyr emits its ready event.
-        // The media element is the source of truth for starting playback.
-        playerReady = true;
-      }
-      player.on("ready", () => {
-        playerReady = true;
-        const resume = resumeRef.current;
-        if (
-          resume > 5 &&
-          Number.isFinite(player.duration) &&
-          player.duration > resume
-        ) {
-          player.currentTime = resume;
-        }
+
+    // This pipeline's half of the player's events. Everything the player reports lands here, in the
+    // pipeline that is *currently* attached — the handlers close over this effect's state, which is
+    // exactly why they are reached through a ref rather than bound to the player once.
+    installPipelineEvents({
+      onReady: () => {
         if (!liveMode) report("ready");
         startBufferedLivePlayback();
-      });
-      player.on("play", () => {
+      },
+      onPlay: () => {
         recorder.push("媒体元素开始播放请求");
         if (liveMode) {
           playbackRequested = true;
           setIsBuffering(true);
         }
-      });
-      player.on("playing", () => {
+      },
+      onPlaying: () => {
         playbackRequested = false;
         playbackAttempts = 0;
         setIsBuffering(false);
         report("playing");
-      });
-      player.on("waiting", () => {
+      },
+      onWaiting: () => {
         recorder.push("缓冲等待");
         scheduleDiagnosticFlush();
         if (liveMode) setIsBuffering(true);
-      });
-      player.on("stalled", () => {
+      },
+      onStalled: () => {
         recorder.push("数据停滞", `networkState=${video.networkState}`);
         scheduleDiagnosticFlush();
         if (liveMode) setIsBuffering(true);
-      });
-      player.on("pause", () => {
+      },
+      onPause: () => {
         if (!liveMode) report("paused");
-      });
-      player.on("ended", () => {
+      },
+      onEnded: () => {
         if (!liveMode) report("ended");
-      });
-      player.on("error", () => {
+      },
+      onError: () => {
         const mediaError = video.error;
         report(
           "error",
@@ -841,17 +970,22 @@ export function MediaPlayer({
             ? `媒体元素解码失败（code ${mediaError.code}：${mediaError.message || "无详细信息"}）。`
             : "Plyr 无法播放当前媒体地址。",
         );
-      });
-      player.on("timeupdate", () => {
-        const currentTime = player.currentTime;
+      },
+      onTimeUpdate: (currentTime) => {
         if (Number.isFinite(currentTime) && currentTime - lastProgress >= 5) {
           lastProgress = currentTime;
           callbackRef.current.onProgress?.(currentTime);
         }
-      });
-      return player;
-    };
+      },
+    });
 
+    // A pipeline the user has moved on from does not get to keep its verdict on screen. This
+    // effect runs again exactly when the pipeline changes, and for a live address that says nothing
+    // about its container the *first* pipeline is a guess: hls.js rejects an FLV as "not a valid
+    // HLS playlist", which is a true statement about a pipeline that is about to be replaced by the
+    // one that actually plays the stream. Without this the user saw 无法播放当前内容 for the ~1.2 s
+    // between the probe answering and the picture starting, on a channel that was about to work.
+    setHasFailed(false);
     if (!liveMode) report("loading");
     video.poster = initialSource.poster ?? "";
 
@@ -885,7 +1019,6 @@ export function MediaPlayer({
     const isFlv = pipeline === "flv";
     if (isFlv && Mpegts.isSupported()) {
       let flvRecoveryAttempts = 0;
-      let playerCreated = false;
       /** When the loader last delivered bytes. See `flvRequestInFlight`. */
       let lastChunkAt = 0;
       /**
@@ -1019,10 +1152,7 @@ export function MediaPlayer({
             recorder.push("FLV 传输速率", `${Math.round(speed)} KB/s`);
           }
         });
-        if (!playerCreated) {
-          createPlayer();
-          playerCreated = true;
-        }
+        ensurePlayer();
         instance.attachMediaElement(video);
         instance.load();
         // A rejected play() is expected before the element has data; `startLivePlayback` below owns
@@ -1049,7 +1179,7 @@ export function MediaPlayer({
         sourceVersion += 1;
         setIsBuffering(liveMode);
         previous?.destroy();
-        mpegtsRef.current = null;
+        mpegtsRef.current = null;      mpegtsRef.current = null;
         if (disposed) return;
         createFlvPlayerNow();
         armStartupWatchdog();
@@ -1102,7 +1232,6 @@ export function MediaPlayer({
       let hls: Hls | null = null;
       let liveRecoveryAttempts = 0;
       let workerFallbackUsed = false;
-      let playerCreated = false;
 
       const markMediaBuffered = () => {
         liveRecoveryAttempts = 0;
@@ -1344,10 +1473,7 @@ export function MediaPlayer({
           markMediaBuffered();
         });
         instance.on(Hls.Events.ERROR, handleHlsError);
-        if (!playerCreated) {
-          createPlayer();
-          playerCreated = true;
-        }
+        ensurePlayer();
         instance.loadSource(sourceRef.current.url);
         instance.attachMedia(video);
         return instance;
@@ -1445,7 +1571,7 @@ export function MediaPlayer({
         video.load();
       };
       scheduleBoot(() => {
-        createPlayer();
+        ensurePlayer();
         loadSourceRef.current?.(initialSource);
       });
     }
@@ -1471,18 +1597,19 @@ export function MediaPlayer({
       // already navigated away.
       mpegtsRef.current?.destroy();
       mpegtsRef.current = null;
-      playerRef.current?.destroy();
-      playerRef.current = null;
-      livePlayer = null;
+      // The player is deliberately *not* destroyed here. It belongs to the element, not to this
+      // pipeline, and Plyr refuses to initialise an element twice — see `MediaPipelineEvents`.
+      pipelineEventsRef.current = null;
       loadSourceRef.current = null;
       retryRef.current = null;
       video.removeAttribute("src");
       video.load();
     };
-    // Keyed on the pipeline rather than on `isLive` alone. A probed container can change the
+    // Keyed on the pipeline rather than on `isLive` alone: a probed container can change the
     // pipeline for an address that stays the same, and each pipeline owns a different library
     // attached to the same <video> element — hls.js and mpegts.js both attach a MediaSource, and
-    // neither can be swapped for the other without rebuilding the player.
+    // neither can be swapped for the other without tearing the library down. The player around them
+    // survives the change; that is the whole point of the split.
   }, [pipeline]);
 
   return (

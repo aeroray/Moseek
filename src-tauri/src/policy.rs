@@ -187,13 +187,29 @@ pub(crate) async fn fetch_text_following_redirects(
     resource_name: &str,
     max_redirects: usize,
 ) -> Result<String, String> {
+    fetch_text_following_redirects_with_headers(url, max_bytes, resource_name, &[], max_redirects)
+        .await
+}
+
+/// The same fetch, with caller headers.
+///
+/// Needed because a player frame is routinely hotlink-protected: measured on the real
+/// `us-m3u8.urldwz.com/index.php/play/2179.html` frame, the address answers 404 on its own but 200
+/// with the page that embeds it as `Referer`, which is exactly what a browser would send.
+pub(crate) async fn fetch_text_following_redirects_with_headers(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+    headers: &[(String, String)],
+    max_redirects: usize,
+) -> Result<String, String> {
     validate_remote_url(&url)?;
     let (body, _, _) = fetch_response_bytes(
         url,
         Method::GET,
         max_bytes,
         resource_name,
-        &[],
+        headers,
         None,
         max_redirects,
     )
@@ -366,13 +382,66 @@ pub(crate) async fn fetch_media_prefix(
     Ok((body, content_type, final_url))
 }
 
+/// Reads a media body to completion under a byte cap, on a client whose deadline is a *gap*
+/// between reads rather than a whole-exchange budget.
+///
+/// Media is not a document, and giving it the document's deadline is silently wrong. A VOD
+/// fragment is routinely several megabytes, and a slow CDN can need far longer than 15 s to
+/// deliver one while still sending steadily. Measured on the fragments of a real source
+/// (`https://p.hhwenjian.com:65/hls/946/20260923/4461270/`): one 2.5 MiB fragment took 48 s at
+/// 54 KiB/s, and through this function 3 of 6 consecutive fragments failed after exactly
+/// 15 010 ms — the `Buffered` client's whole-exchange deadline — reporting the misleading
+/// "error decoding response body". The upstream was healthy; only the deadline was wrong. The
+/// symptom on screen was a player stuck on "正在确认可以播放" forever, because hls.js kept retrying
+/// fragments that could never finish inside the budget.
+///
+/// `Streaming` keeps the guarantee that matters — a host that goes silent for `STREAM_READ_TIMEOUT`
+/// still fails — without failing a host that is merely slow. The callers above this one keep their
+/// own bounds: the live probe wraps it in `tokio::time::timeout`, and the player's loader has its
+/// own timeout, so nothing here can hang unbounded.
 pub(crate) async fn fetch_media_bytes(
     url: Url,
     max_bytes: usize,
     resource_name: &str,
     headers: &[(String, String)],
 ) -> Result<(Vec<u8>, Option<String>, Url), String> {
-    fetch_response_bytes(url, Method::GET, max_bytes, resource_name, headers, None, 3).await
+    let (mut response, final_url) = open_media_response(url, resource_name, headers).await?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    // Refuse an oversized body from its declared length before reading a byte of it, matching the
+    // buffered path: a mislabelled address must not stream megabytes into memory.
+    if response
+        .content_length()
+        .is_some_and(|size| size > max_bytes as u64)
+    {
+        return Err(format!(
+            "{resource_name}响应超过 {} MB 限制",
+            max_bytes / 1024 / 1024
+        ));
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .map(|size| size.min(max_bytes as u64) as usize)
+            .unwrap_or_default(),
+    );
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("{resource_name}读取失败：{error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(format!(
+                "{resource_name}响应超过 {} MB 限制",
+                max_bytes / 1024 / 1024
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, content_type, final_url))
 }
 
 pub(crate) async fn fetch_json(

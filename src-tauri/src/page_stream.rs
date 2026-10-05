@@ -139,9 +139,95 @@ pub(crate) fn media_urls_matching(html: &str, base_url: &Url, tokens: &[String])
     out
 }
 
+/// Every `<iframe src>` in a page, in document order, resolved and de-duplicated.
+///
+/// A player page very often does not carry the stream itself — it embeds a second player, and the
+/// manifest is one level down. Measured on the real `哆啦(XBPQ)` episode pages: the page holds no
+/// media address at all, and its only frame is
+/// `https://us-m3u8.urldwz.com/index.php/play/2179.html`, which serves the `.m3u8`.
+///
+/// Only `<iframe>` is followed. A `<script src>` is a library and an `<a href>` is navigation, so
+/// following those would turn one scan into an unbounded crawl.
+pub(crate) fn iframe_urls_in_page(html: &str, base_url: &Url) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let lowered = html.to_ascii_lowercase();
+    let mut cursor = 0usize;
+    while let Some(found) = lowered[cursor..].find("<iframe") {
+        let tag_start = cursor + found;
+        let Some(tag_end) = html[tag_start..].find('>').map(|at| tag_start + at) else {
+            break;
+        };
+        let tag = &html[tag_start..tag_end];
+        if let Some(src) = attribute(tag, "src") {
+            if let Some(url) = resolve_candidate(base_url, &src) {
+                let url = url.to_string();
+                if !out.contains(&url) {
+                    out.push(url);
+                }
+            }
+        }
+        cursor = tag_end + 1;
+        if cursor >= html.len() {
+            break;
+        }
+    }
+    out
+}
+
+/// Reads one attribute out of a tag, tolerating both quote styles.
+fn attribute(tag: &str, name: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let needle = format!("{name}={quote}");
+        if let Some(at) = tag.find(&needle) {
+            let rest = &tag[at + needle.len()..];
+            if let Some(end) = rest.find(quote) {
+                return Some(rest[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_media_url, media_urls_in_page, media_urls_matching};
+    use super::{iframe_urls_in_page, is_media_url, media_urls_in_page, media_urls_matching};
+
+    /// The frame hop that makes the XBPQ family playable.
+    ///
+    /// Verbatim shape from `https://www.dora-video.cn/archives/192/?action=get&p=1`: the page
+    /// carries no media address of its own, and its only frame serves the manifest.
+    #[test]
+    fn finds_the_embedded_player_frame() {
+        let html = r#"
+            <div class="video"><iframe src="https://us-m3u8.urldwz.com/index.php/play/2179.html?" allowfullscreen></iframe></div>
+            <a href="/archives/193/">next</a>
+        "#;
+        let found = iframe_urls_in_page(html, &"https://www.dora-video.cn/archives/192/".parse().unwrap());
+        assert_eq!(
+            found,
+            vec!["https://us-m3u8.urldwz.com/index.php/play/2179.html?".to_string()]
+        );
+        // A page with no frame yields nothing rather than a stray navigation link.
+        assert!(iframe_urls_in_page("<a href=\"/x/\">x</a>", &base()).is_empty());
+    }
+
+    /// A single-quoted `src` is the same thing, and duplicates collapse.
+    #[test]
+    fn tolerates_quote_style_and_duplicate_frames() {
+        let html = r#"
+            <iframe src='/play/a.html'></iframe>
+            <iframe src="/play/a.html"></iframe>
+            <iframe src="/play/b.html"></iframe>
+        "#;
+        let found = iframe_urls_in_page(html, &"https://host.example/page/".parse().unwrap());
+        assert_eq!(
+            found,
+            vec![
+                "https://host.example/play/a.html".to_string(),
+                "https://host.example/play/b.html".to_string(),
+            ]
+        );
+    }
 
     fn base() -> reqwest::Url {
         "https://vip.lz-cdn11.com/share/0c72cb7ee1512f800abe27823a792d03"

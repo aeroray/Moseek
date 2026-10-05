@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::policy::{
-    fetch_media_bytes, fetch_media_prefix, fetch_text_following_redirects, fetch_text_with_headers,
-    fetch_text_with_method, open_media_response, validate_remote_url,
+    fetch_media_bytes, fetch_media_prefix, fetch_text_following_redirects,
+    fetch_text_following_redirects_with_headers, fetch_text_with_headers, fetch_text_with_method,
+    open_media_response, validate_remote_url,
 };
 
 #[derive(Clone, Deserialize)]
@@ -68,11 +69,9 @@ pub struct MediaContainerProbe {
 ///
 /// An FLV header is 9 bytes plus the first tag, and an HLS playlist starts with `#EXTM3U`, so this
 /// is two orders of magnitude more than the verdict needs. The size is chosen for what it avoids
-/// rather than for what it reads: a live stream never ends, so a *buffered* read of this address
-/// could only ever fail — measured, the 1 MiB budget reported "error decoding response body" after
-/// 16 441 ms while the 512 KiB budget failed the same way after 5 630 ms. Reading a small window and
-/// hanging up turns that into a single fast round trip (the first chunk of this stream arrived at
-/// 1 244 ms).
+/// rather than for what it reads: a live stream never ends, so reading it to completion would wait
+/// on a body that never finishes. Reading a small window and hanging up turns that into a single
+/// fast round trip (the first chunk of a real stream arrived at 1 244 ms).
 const CONTAINER_PROBE_BYTES: usize = 64 * 1024;
 
 /// Identifies the container behind a media address from its leading bytes.
@@ -179,11 +178,8 @@ pub struct MediaStreamRegistry(
 /// Streams a live media response to the frontend over a channel.
 ///
 /// The buffered `fetch_media_resource` command cannot serve this: it reads a body to completion, and
-/// a live HTTP-FLV body never completes. Measured on `https://live.ottiptv.cc/douyu/431460`, asking
-/// it for 1 MiB returned "error decoding response body" after 16 441 ms — reqwest reports a
-/// total-timeout hit during a body read as a *decode* error — even though the same response had
-/// already delivered 267 280 bytes of healthy `video/x-flv`. The stream is therefore forwarded as it
-/// arrives, under a per-read deadline instead of a total one.
+/// a live HTTP-FLV body never completes. The stream is therefore forwarded as it arrives, under a
+/// per-read deadline instead of a total one.
 ///
 /// The first message is always metadata, so the caller learns the final address and content type
 /// before any media arrives.
@@ -356,6 +352,13 @@ const PARSE_SERVICE_TIMEOUT_MS: u64 = 6_000;
 /// How long the player page may take to answer.
 const PAGE_SCAN_TIMEOUT_MS: u64 = 10_000;
 
+/// How many embedded frames one page scan will open.
+///
+/// The scan is serial and each frame gets `PAGE_SCAN_TIMEOUT_MS`, so this is also the worst-case
+/// added wait. Three covers the player plus a mirror without letting an ad-heavy page stall an
+/// episode for a minute.
+const MAX_SCANNED_FRAMES: usize = 3;
+
 /// Enough for a player page: they are a few kilobytes of markup.
 const PAGE_SCAN_MAX_BYTES: usize = 1024 * 1024;
 
@@ -477,12 +480,18 @@ async fn resolve_with_services(
     select_ok(attempts).await.ok().map(|(resolution, _)| resolution)
 }
 
-/// Scans a player page for a media address it embeds.
+/// Scans a player page for a media address it embeds, descending into one embedded player frame.
 ///
 /// Returns `None` for any reason at all — unreachable, not a page, no address in it — because this
 /// is an optimisation on the way to the parser fallback, not a verdict about the address. Reporting
 /// the first failure here would tell the user their source is broken when a parser might still
 /// have resolved it.
+///
+/// The frame hop is what makes the XBPQ family playable. Its episode addresses are pages like
+/// `…/archives/192/?action=get&p=1` that carry no media address at all; the stream is inside the
+/// page's only `<iframe>`. Measured on the real page, the frame needs the embedding page as
+/// `Referer` — on its own the same address answers 404 — which is what a browser would send and is
+/// therefore exactly what the scan must send to predict what the player would get.
 async fn scan_episode_page(url: &Url) -> Option<PlaybackResolution> {
     let fetched = tokio::time::timeout(
         Duration::from_millis(PAGE_SCAN_TIMEOUT_MS),
@@ -494,7 +503,49 @@ async fn scan_episode_page(url: &Url) -> Option<PlaybackResolution> {
     .ok()?
     .ok()?;
 
-    let media = crate::page_stream::media_urls_in_page(&fetched, url);
+    if let Some(resolution) = resolution_from_page(&fetched, url) {
+        return Some(resolution);
+    }
+
+    // One level down only: a frame of a frame is not a shape these sites use, and following
+    // further would make one scan into an unbounded crawl.
+    //
+    // The frame list is capped because the timeout below is per frame and the loop is serial. These
+    // pages carry advertising frames alongside the player, so an uncapped list would let one episode
+    // take 10 s per ad before the player gave up. The player frame is the one these sites put first;
+    // the cap is what keeps a hostile page from turning a single episode into a minute of waiting.
+    let referer = url.to_string();
+    for frame in crate::page_stream::iframe_urls_in_page(&fetched, url)
+        .into_iter()
+        .take(MAX_SCANNED_FRAMES)
+    {
+        let Ok(frame_url) = reqwest::Url::parse(&frame) else {
+            continue;
+        };
+        let fetched_frame = tokio::time::timeout(
+            Duration::from_millis(PAGE_SCAN_TIMEOUT_MS),
+            fetch_text_following_redirects_with_headers(
+                frame_url.clone(),
+                PAGE_SCAN_MAX_BYTES,
+                "播放框架页",
+                &[("Referer".to_string(), referer.clone())],
+                3,
+            ),
+        )
+        .await;
+        let Ok(Ok(inner)) = fetched_frame else {
+            continue;
+        };
+        if let Some(resolution) = resolution_from_page(&inner, &frame_url) {
+            return Some(resolution);
+        }
+    }
+    None
+}
+
+/// The media address a fetched page embeds, as a resolution, if it has one.
+fn resolution_from_page(html: &str, base_url: &Url) -> Option<PlaybackResolution> {
+    let media = crate::page_stream::media_urls_in_page(html, base_url);
     let first = media.first()?;
     let resolved = reqwest::Url::parse(first).ok()?;
     validate_remote_url(&resolved).ok()?;
@@ -1274,6 +1325,91 @@ mod tests {
         runtime.block_on(async {
             for case in cases {
                 let url = reqwest::Url::parse(case).unwrap();
+                let resolution = super::scan_episode_page(&url)
+                    .await
+                    .unwrap_or_else(|| panic!("{case} yielded no playable address"));
+                assert_eq!(resolution.adapter_id, "page-scan");
+                assert_eq!(resolution.media_kind, "hls", "{case}");
+                assert!(
+                    resolution.url.contains(".m3u8"),
+                    "{case} resolved to {}",
+                    resolution.url
+                );
+                println!("{case}\n  -> {}", resolution.url);
+            }
+        });
+    }
+
+    /// A real VOD fragment must survive a slow delivery.
+    ///
+    /// The defect this pins: `fetch_media_bytes` used the document client, whose deadline covers the
+    /// whole exchange, so a fragment needing more than 15 s was reported as "error decoding response
+    /// body" even while the host was delivering steadily. Measured through this function on the real
+    /// source, 3 of 6 consecutive fragments failed that way; with the per-read deadline, 0 of 6 fail
+    /// and the slowest took 26 s. The user saw the consequence as a player stuck on
+    /// "正在确认可以播放" forever, because no fragment could ever finish in time.
+    ///
+    /// Ignored by default because it needs the network and transfers tens of megabytes.
+    #[test]
+    #[ignore]
+    fn a_slow_real_fragment_is_not_cut_off_by_a_total_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let playlist = reqwest::Url::parse(
+                "https://play.hhuus.com/play/bW68KKEa/index.m3u8",
+            )
+            .unwrap();
+            let (manifest, _, _) =
+                crate::policy::fetch_media_bytes(playlist, 4 * 1024 * 1024, "测试清单", &[])
+                    .await
+                    .expect("the playlist answers");
+            let text = String::from_utf8(manifest).unwrap();
+            let fragments: Vec<&str> = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+                .take(6)
+                .collect();
+            assert!(!fragments.is_empty(), "the playlist lists fragments");
+
+            let mut slowest = 0u128;
+            for fragment in &fragments {
+                let url = reqwest::Url::parse(fragment).unwrap();
+                let started = std::time::Instant::now();
+                let (body, _, _) =
+                    crate::policy::fetch_media_bytes(url, 16 * 1024 * 1024, "测试分片", &[])
+                        .await
+                        .unwrap_or_else(|error| {
+                            panic!("{fragment} failed after {}ms: {error}", started.elapsed().as_millis())
+                        });
+                let elapsed = started.elapsed().as_millis();
+                slowest = slowest.max(elapsed);
+                println!("{}ms {} bytes", elapsed, body.len());
+            }
+            println!("slowest fragment: {slowest}ms");
+        });
+    }
+
+    /// The XBPQ episode pages need the embedded-frame hop to yield anything.
+    ///
+    /// These pages carry no media address of their own — the stream is inside the page's only
+    /// `<iframe>`, which answers 404 unless the embedding page is sent as `Referer`. Measured on the
+    /// real page, this is the difference between "暂无可播放的剧集" and a playable manifest.
+    ///
+    /// Ignored by default because it needs the network.
+    #[test]
+    #[ignore]
+    fn a_real_xbpq_episode_page_resolves_through_its_frame() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for episode in ["?action=get&p=1", "?action=get&p=2"] {
+                let case = format!("https://www.dora-video.cn/archives/192/{episode}");
+                let url = reqwest::Url::parse(&case).unwrap();
                 let resolution = super::scan_episode_page(&url)
                     .await
                     .unwrap_or_else(|| panic!("{case} yielded no playable address"));

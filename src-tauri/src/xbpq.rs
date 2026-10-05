@@ -97,12 +97,29 @@ struct XbpqConfig {
     #[serde(rename = "线路标题", default)]
     line_title: Option<String>,
     /// Episode separator within a play line.
+    ///
+    /// In this dialect the pair means **container** (`播放数组`) and **element inside it**
+    /// (`播放列表`), not the other way round. Measured on the real `哆啦(XBPQ)` detail page:
+    /// `播放数组 = class="card-body button-list"&&</div>` bounds the block that holds all 29
+    /// episode anchors, and `播放列表 = <a&&a>` is one anchor. Splitting the region by the
+    /// *element* first leaves a fragment with no container marker in it, so the split then finds
+    /// nothing and the line is dropped — which is what produced "暂无可播放的剧集" for a page that
+    /// plainly has 29 episodes.
     #[serde(rename = "播放数组", default)]
     play_array: Option<String>,
     /// The episode list within a play line, for the dialect that names both a container and the
-    /// links inside it.
+    /// links inside it. See `play_array` for which of the two is the container.
     #[serde(rename = "播放列表", default)]
     play_list: Option<String>,
+    /// Where the address sits inside one episode's fragment.
+    ///
+    /// This dialect splits an episode out with a marker that deliberately excludes the tag —
+    /// `播放列表 = <a&&a>` yields what is *between* two anchors, so the `href` is not in the slice.
+    /// `播放链接 = href="&&"` is how the address is recovered from it. Without this field the
+    /// value fell into `extra_keys` (parsed, never read), every episode slice produced no link, and
+    /// the whole line was dropped — the real `哆啦(XBPQ)` page parsed to 1 episode instead of 29.
+    #[serde(rename = "播放链接", default)]
+    play_link: Option<String>,
     #[serde(rename = "播放标题", default)]
     play_title: Option<String>,
     #[serde(rename = "导演", default)]
@@ -736,11 +753,17 @@ fn parse_list_item(
         return None;
     }
 
+    // The configured marker first, then the image's own lazy-load address. These sites ship a
+    // placeholder in `src` and keep the real cover in a `data-*` attribute that a script swaps in
+    // on scroll; a fetch never runs that script. Measured on the real 哆啦 listing: `src` was
+    // `.../img/load.gif` while `data-url` held the cover — which is why every one of its 146 cards
+    // rendered without a poster even though the markup carries one.
     let poster = config
         .poster
         .as_deref()
         .and_then(Marker::parse)
         .and_then(|marker| marker.first(segment))
+        .or_else(|| lazy_cover_url(segment))
         .and_then(|value| resolve(base_url, &value))
         .map(|url| url.to_string())
         .unwrap_or_default();
@@ -959,45 +982,38 @@ fn parse_episodes(
     vod_id: &str,
     line_index: usize,
 ) -> Vec<VodEpisode> {
-    // `播放列表` narrows the region to search when it is configured: it bounds the element that
-    // holds the episode links, so the scan does not pick up unrelated links (navigation, ads)
-    // from elsewhere in the same segment. Real configs pair it with `播放数组`.
-    let scoped = config
-        .play_list
-        .as_deref()
-        .and_then(Marker::parse)
-        .and_then(|marker| marker.slices(segment).into_iter().next())
-        .unwrap_or(segment);
+    let container = config.play_array.as_deref().and_then(Marker::parse);
+    let element = config.play_list.as_deref().and_then(Marker::parse);
 
-    // An explicit episode separator is authoritative when configured.
-    if let Some(marker) = config.play_array.as_deref().and_then(Marker::parse) {
+    // When both keys are configured they name two different levels, and the order matters:
+    // `播放数组` bounds the block that holds the episode list and `播放列表` bounds one episode
+    // inside it. Applying them the other way round — splitting by the element first — leaves a
+    // fragment that no longer contains the container marker, so the second split matches nothing
+    // and the whole line is dropped. That is exactly what happened on the real `哆啦(XBPQ)` detail
+    // page: 29 episode anchors in the page, 0 lines parsed, and the user saw "暂无可播放的剧集".
+    if let (Some(container), Some(element)) = (&container, &element) {
+        let episodes: Vec<VodEpisode> = container
+            .slices(segment)
+            .into_iter()
+            .flat_map(|region| element.slices(region))
+            .enumerate()
+            .filter_map(|(index, slice)| {
+                build_episode(slice, base_url, config, vod_id, line_index, index)
+            })
+            .collect();
+        if !episodes.is_empty() {
+            return episodes;
+        }
+    }
+
+    // Only one key configured: it separates the episodes directly, which is the older shape.
+    if let Some(marker) = container.or(element) {
         let episodes = marker
-            .slices(scoped)
+            .slices(segment)
             .into_iter()
             .enumerate()
             .filter_map(|(index, slice)| {
-                let url = extract_links(slice, base_url).into_iter().next()?;
-                // `播放标题` names the element holding the episode label when it is configured;
-                // otherwise the anchor's own text is the best available label.
-                let name = config
-                    .play_title
-                    .as_deref()
-                    .and_then(Marker::parse)
-                    .and_then(|title| title.first(slice))
-                    .filter(|text| !text.is_empty())
-                    .or_else(|| {
-                        extract_links_with_text(slice, base_url)
-                            .into_iter()
-                            .find(|(candidate, _)| candidate == &url)
-                            .map(|(_, text)| text)
-                            .filter(|text| !text.is_empty())
-                    })
-                    .unwrap_or_else(|| format!("第 {} 集", index + 1));
-                Some(VodEpisode {
-                    id: format!("{vod_id}-{line_index}-{index}"),
-                    name,
-                    url: url.to_string(),
-                })
+                build_episode(slice, base_url, config, vod_id, line_index, index)
             })
             .collect::<Vec<_>>();
         if !episodes.is_empty() {
@@ -1007,7 +1023,7 @@ fn parse_episodes(
 
     // Otherwise every episode link in the segment is one episode, which is how these sites
     // normally lay the selector out.
-    extract_links_with_text(scoped, base_url)
+    extract_links_with_text(segment, base_url)
         .into_iter()
         .enumerate()
         .filter(|(_, (url, _))| is_episode_link(url.as_str()))
@@ -1021,6 +1037,50 @@ fn parse_episodes(
             url: url.to_string(),
         })
         .collect()
+}
+
+/// One episode from the fragment that holds it, or `None` when it carries no usable link.
+///
+/// Shared by both separator paths above so the label rule cannot drift between them.
+fn build_episode(
+    slice: &str,
+    base_url: &reqwest::Url,
+    config: &XbpqConfig,
+    vod_id: &str,
+    line_index: usize,
+    index: usize,
+) -> Option<VodEpisode> {
+    // `播放链接` first: when the config declares it, the slice is the text *between* the episode
+    // anchors and holds no tag of its own, so an `<a href>` scan can only ever find a neighbour's
+    // link. Falling back to the anchor scan keeps the older shape working.
+    let url = config
+        .play_link
+        .as_deref()
+        .and_then(Marker::parse)
+        .and_then(|marker| marker.first(slice))
+        .and_then(|href| resolve(base_url, &href))
+        .or_else(|| extract_links(slice, base_url).into_iter().next())?;
+    // `播放标题` names the element holding the episode label when it is configured; otherwise the
+    // anchor's own text is the best available label.
+    let name = config
+        .play_title
+        .as_deref()
+        .and_then(Marker::parse)
+        .and_then(|title| title.first(slice))
+        .filter(|text| !text.is_empty())
+        .or_else(|| {
+            extract_links_with_text(slice, base_url)
+                .into_iter()
+                .find(|(candidate, _)| candidate == &url)
+                .map(|(_, text)| text)
+                .filter(|text| !text.is_empty())
+        })
+        .unwrap_or_else(|| format!("第 {} 集", index + 1));
+    Some(VodEpisode {
+        id: format!("{vod_id}-{line_index}-{index}"),
+        name,
+        url: url.to_string(),
+    })
 }
 
 fn is_detail_link(url: &str) -> bool {
@@ -1084,6 +1144,45 @@ fn extract_links_with_text(segment: &str, base_url: &reqwest::Url) -> Vec<(reqwe
         }
     }
     out
+}
+
+/// The cover a lazily-loaded `<img>` is holding, for listings that ship a placeholder in `src`.
+///
+/// These sites render `<img class="b-lazy" src=".../load.gif" data-url="<real cover>">` and swap the
+/// attribute in with JavaScript as the card scrolls into view. Fetching the page never runs that
+/// script, so reading only `src` yields the placeholder for every card — measured on the real 哆啦
+/// listing, where all 146 items had a `load.gif` and the covers sat in `data-url`.
+///
+/// The placeholder itself is recognised and refused rather than returned, because a card showing a
+/// generic loading spinner is not better than a card showing nothing.
+fn lazy_cover_url(segment: &str) -> Option<String> {
+    let at = segment.find("<img")?;
+    let end = segment[at..].find('>').map(|offset| at + offset)?;
+    let tag = &segment[at..end];
+    for name in ["data-url", "data-src", "data-original", "data-lazy-src", "data-echo"] {
+        if let Some(value) = attribute(tag, name) {
+            let value = value.trim();
+            if !value.is_empty() && !is_placeholder_image(value) {
+                return Some(value.to_string());
+            }
+        }
+    }
+    // A plain `src` is still worth reading when it is not one of those placeholders: most listings
+    // carry the real cover there and have no lazy attribute at all.
+    let src = attribute(tag, "src")?;
+    let src = src.trim();
+    if src.is_empty() || is_placeholder_image(src) {
+        return None;
+    }
+    Some(src.to_string())
+}
+
+/// Whether an image address is a theme's loading spinner rather than a cover.
+fn is_placeholder_image(url: &str) -> bool {
+    let lowered = url.to_ascii_lowercase();
+    ["load.gif", "loading.gif", "lazy.gif", "placeholder", "blank.gif", "spacer.gif", "px.gif"]
+        .iter()
+        .any(|needle| lowered.contains(needle))
 }
 
 /// Reads one attribute out of a tag's text, tolerating both quote styles.
@@ -1423,6 +1522,73 @@ mod tests {
         assert_eq!(item.poster, "https://img.example/a.jpg");
     }
 
+    /// A lazily-loaded cover must be read from its `data-*` attribute, not the `src` placeholder.
+    ///
+    /// The real 哆啦 listing renders
+    /// `<img class="card-img-top b-lazy" src=".../img/load.gif" data-url="<the real cover>">`
+    /// and swaps the attribute in with JavaScript as the card scrolls into view. Fetching the page
+    /// never runs that script, so reading only `src` gave every one of its 146 cards the spinner —
+    /// which is why that source's whole library had no covers.
+    #[test]
+    fn reads_a_lazy_cover_instead_of_its_placeholder() {
+        let item = lazy_cover_item(concat!(
+            r#"<a href="https://www.dora-video.cn/archives/192/">"#,
+            r#"<img class="card-img-top b-lazy y10r5" "#,
+            r#"src="https://www.dora-video.cn/usr/themes/yingshiyihao/img/load.gif" "#,
+            r#"data-url="https://img.xiaoxinbk.cn/uploads/20210228/2/2_b4AHCZqP.jpg" "#,
+            r#"alt="哆啦A梦新番 897~至今"></a>"#,
+        ));
+
+        assert_eq!(
+            item.poster,
+            "https://img.xiaoxinbk.cn/uploads/20210228/2/2_b4AHCZqP.jpg"
+        );
+        assert!(
+            !item.poster.contains("load.gif"),
+            "the loading spinner must never be used as a cover"
+        );
+    }
+
+    /// A placeholder with no lazy attribute yields no cover, rather than the spinner.
+    ///
+    /// An empty poster makes the card show its own "no cover" state; a card showing a generic
+    /// loading animation would look permanently half-loaded.
+    #[test]
+    fn refuses_a_placeholder_that_has_no_lazy_alternative() {
+        let item = lazy_cover_item(concat!(
+            r#"<a href="https://www.dora-video.cn/archives/192/">"#,
+            r#"<img class="card-img-top b-lazy" src="/img/load.gif" alt="某片"></a>"#,
+        ));
+
+        assert_eq!(item.poster, "");
+    }
+
+    /// A plain `src` that is not a placeholder is still used.
+    ///
+    /// Most listings carry the real cover in `src` and have no lazy attribute at all, so the
+    /// fallback must not have narrowed to `data-*` only.
+    #[test]
+    fn still_reads_an_ordinary_src_cover() {
+        let item = lazy_cover_item(concat!(
+            r#"<a href="https://www.dora-video.cn/archives/192/">"#,
+            r#"<img src="https://img.example/cover.jpg" alt="某片"></a>"#,
+        ));
+
+        assert_eq!(item.poster, "https://img.example/cover.jpg");
+    }
+
+    /// Parses one listing card with a config that configures no `图片` marker, so the cover has to
+    /// come from the image tag itself — the situation the lazy-cover tests above are about.
+    fn lazy_cover_item(segment: &str) -> crate::cms::VodItem {
+        let config: XbpqConfig = serde_json::from_str(
+            r#"{"数组":"<li&&</li>","标题":"alt=\"&&\"","链接":"href=\"&&\""}"#,
+        )
+        .unwrap();
+        let source = dora_source();
+        let base: reqwest::Url = "https://www.dora-video.cn/search/sy/".parse().unwrap();
+        parse_list_item(segment, &base, &source, &config, 0).unwrap()
+    }
+
     #[test]
     fn reads_a_marker_slice_from_html_the_real_config_bounds() {
         // The `简介` marker from the real config, applied to the kind of HTML it targets.
@@ -1645,5 +1811,163 @@ mod tests {
             lines[0].episodes[0].url,
             "https://cdn.example/hls/z/index.m3u8"
         );
+    }
+
+    /// The real `哆啦(XBPQ)` detail page, reduced to the shape that broke it.
+    ///
+    /// Verbatim structure from `https://www.dora-video.cn/archives/192/`: the container the config
+    /// names in `播放数组` holds 29 anchors, each of which the config splits out with
+    /// `播放列表 = <a&&a>` — a marker that deliberately lands *between* two anchors, so the `href`
+    /// is not inside the slice and must come from `播放链接 = href="&&"`.
+    const DORA_DETAIL: &str = r#"
+        <div class="card-body button-list">
+          <a href="https://www.dora-video.cn/archives/192/?action=get&p=1"class="btn">第897集</a>
+          <a href="https://www.dora-video.cn/archives/192/?action=get&p=2"class="btn">第898集</a>
+          <a href="https://www.dora-video.cn/archives/192/?action=get&p=3"class="btn">第899集</a>
+        </div>
+    "#;
+
+    /// The config that broke it, taken from the author's database.
+    const DORA_CONFIG: &str = r#"{
+      "请求头": "User-Agent$MOBILE_UA",
+      "编码": "UTF-8",
+      "主页url": "https://dora.xiaoxinbk.com/",
+      "数组": "class=\"card-img-bili\"&&</a>",
+      "标题": "alt=\"&&\"",
+      "链接": "href=\"&&\"",
+      "播放数组": "class=\"card-body button-list\"&&</div>",
+      "播放列表": "<a&&a>",
+      "播放链接": "href=\"&&\"",
+      "播放标题": ".:雷蒙影视:.+>&&</"
+    }"#;
+
+    fn dora_source() -> crate::SourceRecord {
+        crate::SourceRecord {
+            key: "csp_XBPQ_哆啦".to_string(),
+            name: "雷蒙影视 | 🍚哆啦(XBPQ)".to_string(),
+            source_type: "cms".to_string(),
+            script_archive_id: None,
+            source_dialect: None,
+            site_type: Some(3),
+            site_protocol: Some("xbpq".to_string()),
+            api: "csp_XBPQ".to_string(),
+            logo: None,
+            description: None,
+            nsfw: false,
+            status: true,
+            ext: Some(DORA_CONFIG.to_string()),
+            extra: None,
+            jar: None,
+            epg: None,
+            searchable: true,
+            filterable: true,
+            capability: "supported".to_string(),
+            capability_note: "ok".to_string(),
+            test_status: None,
+            test_message: None,
+            tested_at: None,
+            test_item_count: None,
+            test_category_count: None,
+            test_duration_ms: None,
+            test_operations: Vec::new(),
+            enabled: true,
+            last_checked_at: "刚刚".to_string(),
+            request_count: 0,
+        }
+    }
+
+    /// The bug the user reported as "暂无可播放的剧集" on a source with 29 episodes.
+    ///
+    /// Two separate faults met here, so both are pinned: the container/element nesting was
+    /// inverted (splitting by the element first left a fragment with no container marker in it),
+    /// and `播放链接` was not modelled at all, so even a correctly-sliced episode yielded no
+    /// address. Either fault alone produces zero lines from a page that plainly has episodes.
+    #[test]
+    fn reads_every_episode_from_a_container_and_element_pair() {
+        let config: XbpqConfig = serde_json::from_str(DORA_CONFIG).unwrap();
+        let source = dora_source();
+        let base: reqwest::Url = "https://www.dora-video.cn/archives/192/".parse().unwrap();
+
+        let lines = super::parse_play_lines(DORA_DETAIL, &base, &source, &config, "192");
+
+        assert_eq!(lines.len(), 1, "the page's one play line must survive");
+        assert_eq!(
+            lines[0].episodes.len(),
+            3,
+            "every anchor in the container is an episode"
+        );
+        // The address comes from `播放链接`, which is the only way to recover it: the slice is the
+        // text *between* two anchors, so no `href` is inside it.
+        assert_eq!(
+            lines[0].episodes[0].url,
+            "https://www.dora-video.cn/archives/192/?action=get&p=1"
+        );
+        assert_eq!(
+            lines[0].episodes[2].url,
+            "https://www.dora-video.cn/archives/192/?action=get&p=3"
+        );
+    }
+
+    /// The two keys must not be applied in the other order.
+    ///
+    /// Splitting by `播放列表` first scopes to the text between two anchors, which no longer
+    /// contains the `播放数组` container marker, so the container split matches nothing.
+    #[test]
+    fn the_container_marker_is_applied_before_the_element_marker() {
+        let container = Marker::parse("class=\"card-body button-list\"&&</div>").unwrap();
+        let element = Marker::parse("<a&&a>").unwrap();
+
+        // The correct nesting finds the episodes...
+        let regions = container.slices(DORA_DETAIL);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(element.slices(regions[0]).len(), 3);
+
+        // ...while the inverted one cannot, which is the defect that was shipped.
+        let inverted_scope = element.slices(DORA_DETAIL).into_iter().next().unwrap();
+        assert_eq!(
+            container.slices(inverted_scope).len(),
+            0,
+            "the element-first scope drops the container marker entirely"
+        );
+    }
+
+    /// The user-visible consequence, measured against the live page.
+    #[test]
+    #[ignore = "requires network access"]
+    fn the_real_dora_source_now_reports_playback() {
+        // The user-visible consequence of both faults: this source's 连接测试 reported
+        // `playback: empty` ("首批影视内容没有可识别的播放地址") while the page plainly has 29 episodes.
+        // This runs the shipped parser over the live detail page and asserts the first line yields
+        // episodes whose addresses the resolver can act on.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let ext = DORA_CONFIG;
+            let config: XbpqConfig = serde_json::from_str(ext).unwrap();
+            let source = dora_source();
+            let base: reqwest::Url = "https://www.dora-video.cn/archives/192/".parse().unwrap();
+            let html = crate::policy::fetch_text_following_redirects(
+                base.clone(),
+                4 * 1024 * 1024,
+                "测试详情页",
+                3,
+            )
+            .await
+            .expect("the detail page answers");
+
+            let lines = super::parse_play_lines(&html, &base, &source, &config, "192");
+            assert_eq!(lines.len(), 1, "the page's one play line must survive");
+            assert!(
+                lines[0].episodes.len() >= 20,
+                "expected the full episode list, got {}",
+                lines[0].episodes.len()
+            );
+            println!("episodes: {}", lines[0].episodes.len());
+            for episode in lines[0].episodes.iter().take(3) {
+                println!("  {} | {}", episode.name, episode.url);
+            }
+        });
     }
 }
