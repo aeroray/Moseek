@@ -5,6 +5,7 @@ import {
   findCurrentProgram,
   findNextProgram,
   isPlaceholderGuide,
+  normalizeEpgChannelName,
   resolveEpgRequest,
   resolveEpgUrl,
 } from "@/lib/live-adapter";
@@ -115,6 +116,67 @@ describe("placeholder guide detection", () => {
 
   it("does not treat an empty guide as a placeholder", () => {
     expect(isPlaceholderGuide([])).toBe(false);
+  });
+
+  it("rejects 51zmt's longer filler wording", () => {
+    // **The reported defect: "一些中央电视台的节目怎么获取不到节目单呢？而且是 CCTV-1".** The check used to
+    // compare the title for equality against "精彩节目", and 51zmt's filler reads
+    // "精彩节目-暂未提供节目预告信息 --免费使用" — never equal, so the filler was accepted as a real guide
+    // and every row on screen read "exciting programming — no schedule provided". Rendering filler is
+    // worse than admitting the channel is not covered: it says the guide works.
+    //
+    // The exact string is copied from the provider's live response, not invented.
+    const filler = Array.from({ length: 24 }, (_, i) =>
+      program(
+        "精彩节目-暂未提供节目预告信息 --免费使用",
+        `${String(i).padStart(2, "0")}:00`,
+        `${String(i).padStart(2, "0")}:59`,
+      ),
+    );
+    expect(isPlaceholderGuide(filler)).toBe(true);
+  });
+
+  it("still accepts a guide that merely contains a filler word", () => {
+    // Matched as a prefix on *every* row, so one programme whose title happens to start with the same
+    // word does not discard the day's schedule.
+    expect(
+      isPlaceholderGuide([
+        program("精彩节目回顾", "01:00", "02:00"),
+        program("晚间新闻", "02:00", "02:30"),
+      ]),
+    ).toBe(false);
+  });
+});
+
+describe("channel name normalisation", () => {
+  it("produces the compact spelling the providers key on", () => {
+    // Measured against 51zmt: `CCTV1` returns the real schedule for `CCTV-1综合`, while `CCTV-1`,
+    // `CCTV 1` and `CCTV1综合` all return the "未提供" filler. A playlist that writes `CCTV-1` — the
+    // usual spelling, and the one in the user's report — therefore got no guide at all.
+    expect(normalizeEpgChannelName("CCTV-1")).toBe("CCTV1");
+    expect(normalizeEpgChannelName("CCTV 1")).toBe("CCTV1");
+    expect(normalizeEpgChannelName("CCTV1综合")).toBe("CCTV1");
+    expect(normalizeEpgChannelName("CCTV-13")).toBe("CCTV13");
+    expect(normalizeEpgChannelName("cctv-5")).toBe("CCTV5");
+  });
+
+  it("keeps the + because it names a different channel", () => {
+    // `CCTV5+` is not `CCTV5`; 51zmt lists it separately as `CCTV-5+体育赛事`.
+    expect(normalizeEpgChannelName("CCTV-5+")).toBe("CCTV5+");
+  });
+
+  it("returns null when there is nothing to try", () => {
+    // The caller uses null to decide whether a retry is worth making, so an already-compact name must
+    // not produce a second identical request.
+    expect(normalizeEpgChannelName("CCTV1")).toBeNull();
+    expect(normalizeEpgChannelName("cctv1")).toBeNull();
+  });
+
+  it("leaves names outside the CCTV family alone", () => {
+    // Guessing at other providers' spellings without measurement is how a working lookup gets broken.
+    expect(normalizeEpgChannelName("湖南卫视")).toBeNull();
+    expect(normalizeEpgChannelName("Phoenix Chinese")).toBeNull();
+    expect(normalizeEpgChannelName("")).toBeNull();
   });
 });
 

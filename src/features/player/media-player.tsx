@@ -722,6 +722,30 @@ export function MediaPlayer({
       if (!video.paused) video.pause();
       return;
     }
+    /**
+     * Restore what the pipeline withheld while the view was away.
+     *
+     * The pipeline sets `autoplay`/`preload` only at mount and skips them when the pane is hidden — see
+     * the note there. Without this, a player mounted during the absence (the favourites page remounts
+     * one when a stream probe resolves, which can happen after the user has left) would stay inert for
+     * ever: `preload="none"` means nothing is even fetched, so returning would show a spinner that
+     * never resolves.
+     *
+     * Done before the resume decision below, because that decision may call `play()` and the element
+     * has to be allowed to load by then.
+     */
+    if (video.preload === "none") {
+      video.preload = "auto";
+      video.autoplay = isLiveRef.current;
+      // A player that mounted while hidden was never played, so `autoResumeRef` is false and the
+      // resume path below would decline. Starting it here is the same intent as resuming a paused one:
+      // the user asked for this stream and is now looking at it.
+      if (video.paused && video.src) {
+        void video.play().catch(() => {
+          // Rejection is ordinary before data arrives; the live retry policy owns the decision.
+        });
+      }
+    }
     if (!autoResumeRef.current) return;
     autoResumeRef.current = false;
     // Live is handed to the pipeline, which knows how to rejoin the live edge; `play()` alone would
@@ -1147,10 +1171,20 @@ export function MediaPlayer({
     // clicking a channel, and `startLivePlayback` already contains the mute-and-retry fallback for the
     // case where the element does refuse. Pre-muting therefore bought nothing and silenced every
     // stream — the fallback is what handles a refusal, and it now tells the user it did.
-    video.autoplay = liveMode;
+    //
+    // **`autoplay` and `preload` are withheld while the view is away, and that is what stops the audio
+    // the user reported.** Everything else here guards *our* calls to `play()`; the `autoplay`
+    // attribute is not ours — the element starts itself, and nothing in this component is consulted.
+    // That matters because the favourites page keys its player on the resolved stream URL, and
+    // `useStreamProbes` changes that URL when a probe finishes. A probe can land after the user has
+    // navigated away, which unmounts the old player and mounts a new one — and a new player has no
+    // memory of having been paused, so it would start playing to an empty room. `preload` goes with it:
+    // fetching ahead for a view nobody is looking at is the same waste as playing to one.
+    const viewAway = viewAwayRef.current;
+    video.autoplay = liveMode && !viewAway;
     video.defaultMuted = false;
     video.muted = false;
-    video.preload = "auto";
+    video.preload = viewAway ? "none" : "auto";
     const isHls = pipeline === "hls";
     const isFlv = pipeline === "flv";
     if (isFlv && Mpegts.isSupported()) {

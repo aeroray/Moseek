@@ -60,19 +60,35 @@ export async function loadLiveCatalog(
 export const DEFAULT_EPG_TEMPLATE = "https://epg.112114.xyz/?ch={name}&date={date}";
 
 /**
- * 112114 answers HTTP 200 with a dozen identical "精彩节目" rows for any channel it does not
- * know — including obvious nonsense. That is indistinguishable from a real guide unless it is
- * rejected explicitly, and rendering it would tell the user the guide works while every row
- * reads "exciting programming", which is worse than admitting the channel is not covered.
+ * The titles providers use as filler when they do not carry a channel.
+ *
+ * **Matched as a prefix, not by equality, and that is the fix.** 112114 answers HTTP 200 with a dozen
+ * identical `精彩节目` rows for any channel it does not know — including obvious nonsense. 51zmt does
+ * the same thing with a longer string: `精彩节目-暂未提供节目预告信息 --免费使用`. The check here used to
+ * be `title === "精彩节目"`, which the 51zmt rows never satisfy, so the filler was accepted as a real
+ * guide and every row on screen read "exciting programming — no schedule provided". Rendering filler
+ * is worse than admitting the channel is not covered: it tells the user the guide works.
+ *
+ * The two providers also disagree on the channel-name field (`channel_name: "未提供"` versus a real
+ * name), so the titles are the only signal that generalises. A prefix match keeps the check honest for
+ * both without enumerating every wording a provider might add later.
  */
-const PLACEHOLDER_PROGRAM_TITLE = "精彩节目";
+const PLACEHOLDER_TITLES = ["精彩节目", "暂未提供", "未提供"] as const;
 
+/**
+ * Whether a guide is entirely filler.
+ *
+ * Deliberately "entirely": a real guide can legitimately contain a programme whose title starts with
+ * one of these words, and rejecting a whole day's schedule over one row would lose the rest of it. The
+ * providers pad a whole response, so requiring every row to match is both safer and sufficient.
+ */
 export function isPlaceholderGuide(programs: EpgProgram[]) {
   return (
     programs.length > 0 &&
-    programs.every(
-      (program) => program.title.trim() === PLACEHOLDER_PROGRAM_TITLE,
-    )
+    programs.every((program) => {
+      const title = program.title.trim();
+      return PLACEHOLDER_TITLES.some((filler) => title.startsWith(filler));
+    })
   );
 }
 
@@ -103,6 +119,13 @@ export function resolveEpgRequest(
  * filled per channel. Sending the template verbatim makes the provider answer for the
  * literal string `{name}` (112114 replies with `channel_name: "{NAME}"` and a generic
  * "精彩节目" placeholder), so the guide looked like it had no data for any channel.
+ *
+ * **The name is also normalised for the providers that need it.** 51zmt keys on a compact form:
+ * measured, `CCTV1` and `cctv1` return the real schedule for `CCTV-1综合`, while `CCTV-1`, `CCTV 1`,
+ * `CCTV1综合` and `CCTV1高清` all return the "未提供" placeholder. A playlist that writes `CCTV-1` —
+ * which is the usual spelling in the wild, and what the user reported — therefore got no guide for
+ * CCTV-1 at all. `normalizeEpgChannelName` produces the compact form and `loadEpg` falls back to it
+ * when the literal name yields nothing.
  */
 export function resolveEpgUrl(
   template: string,
@@ -125,12 +148,44 @@ export function resolveEpgUrl(
 }
 
 /**
+ * The compact channel spelling some guide providers key on, or null when there is nothing to change.
+ *
+ * Only the CCTV family is normalised, and only in the ways measured to matter: strip the separator
+ * (`CCTV-1` → `CCTV1`), the space (`CCTV 1` → `CCTV1`), and a trailing quality marker
+ * (`CCTV1高清` → `CCTV1`). The `+` is kept because it is part of the name — `CCTV5+` is a different
+ * channel from `CCTV5`, and 51zmt lists it as `CCTV-5+体育赛事`.
+ *
+ * **Returns null when nothing would change**, so a caller can tell "no alternative to try" from
+ * "try this instead" and avoid a duplicate request for every channel that is already correct. A name
+ * that is not in the CCTV family is left alone: guessing at other providers' spellings without
+ * measurement is how a working lookup gets broken.
+ */
+export function normalizeEpgChannelName(name: string): string | null {
+  const trimmed = name.trim();
+  const match = /^cctv[\s-]*(\d+\+?)/i.exec(trimmed);
+  if (!match) return null;
+  const compact = `CCTV${match[1]}`;
+  return compact.toLowerCase() === trimmed.toLowerCase() ? null : compact;
+}
+
+/**
  * Guides are requested per channel, so flicking through the list otherwise re-fetches the
  * same day repeatedly. The date is part of the resolved URL, so entries go stale on their
  * own and the cache needs no expiry sweep — only a size bound.
  */
 const epgCache = new Map<string, EpgCatalog>();
 const EPG_CACHE_LIMIT = 64;
+
+/**
+ * Whether a guide URL is requested per channel, rather than being one address for every channel.
+ *
+ * A template (`?ch={name}&date={date}`) is asked about exactly one channel; a fixed URL is an XMLTV
+ * document covering many. The distinction decides whether the returned programmes may be filtered by
+ * channel identity at all — see `loadEpg`.
+ */
+export function isPerChannelTemplate(template: string) {
+  return template.includes("{");
+}
 
 export interface EpgAdapterResult {
   data: EpgCatalog;
@@ -143,6 +198,56 @@ export interface EpgAdapterResult {
 export async function loadEpg(
   request: EpgRequest,
   channel: Pick<LiveChannel, "name" | "epgId">,
+): Promise<EpgAdapterResult> {
+  const first = await requestGuide(request, channel);
+  if (first.mode === "remote") return first;
+
+  /**
+   * One retry, with the compact spelling, and only when there is a different spelling to try.
+   *
+   * Measured against 51zmt: `CCTV-1` returns the "未提供" placeholder while `CCTV1` returns the real
+   * schedule. The retry is what makes a playlist's own spelling irrelevant, and it costs one request
+   * only for the channels where the first attempt found nothing — a correct name never reaches here.
+   *
+   * `unrecognized` counts as "nothing": the provider answered, but only with filler, which is exactly
+   * the response a name it does not know produces.
+   */
+  const alternative = normalizeEpgChannelName(
+    channel.epgId?.trim() || channel.name?.trim() || "",
+  );
+  if (alternative === null) return first;
+
+  /**
+   * The retry is made under the compact name but the programmes are **claimed under the channel's own
+   * name**, and that distinction is the whole point.
+   *
+   * `requestGuide` labels a per-channel guide with the channel it was given. Passing the substituted
+   * name straight through would label them `CCTV1` — while the live view filters by the channel the
+   * user selected, `CCTV-1`, so the retry would fetch the right schedule and then have every row
+   * dropped on the client. That is the same failure the claiming step exists to fix, reintroduced one
+   * level down.
+   */
+  const retry = await requestGuide(
+    request,
+    // The `epgId` would otherwise win inside `resolveEpgUrl` and re-send the name that just failed.
+    { name: alternative, epgId: undefined },
+    channel,
+  );
+  // A retry that fails must not mask the first answer's reason: an empty first result is more
+  // informative than the retry's, because the retry only ran because the first one was empty.
+  return retry.mode === "remote" ? retry : first;
+}
+
+/**
+ * One guide request for one channel spelling, with its own cache entry.
+ *
+ * `identity` is the channel the result is attributed to, which is not always the spelling that was
+ * requested — see the retry in `loadEpg`.
+ */
+async function requestGuide(
+  request: EpgRequest,
+  channel: Pick<LiveChannel, "name" | "epgId">,
+  identity: Pick<LiveChannel, "name" | "epgId"> = channel,
 ): Promise<EpgAdapterResult> {
   const { origin } = request;
   const url = resolveEpgUrl(request.template, channel);
@@ -158,7 +263,7 @@ export async function loadEpg(
       // Deliberately not cached: a provider may list the channel later.
       return { data: { programs: [] }, mode: "unrecognized", origin, error: null };
     }
-    const catalog = { programs };
+    const catalog = { programs: claimPrograms(programs, request.template, identity) };
     if (epgCache.size >= EPG_CACHE_LIMIT) {
       const oldest = epgCache.keys().next().value;
       if (oldest !== undefined) epgCache.delete(oldest);
@@ -173,6 +278,40 @@ export async function loadEpg(
       error: getErrorMessage(error, "EPG 请求失败"),
     };
   }
+}
+
+/**
+ * Re-labels a per-channel guide's programmes with the channel they were requested for.
+ *
+ * **This is what made a working request show "暂无节目单".** The guide is asked about one channel, and
+ * the provider answers with *its own* name for it — 51zmt answers a request for `CCTV1` with
+ * `channel_name: "CCTV-1综合"`. The live view then filters the programmes by the channel's own
+ * identifiers (`epgId`, `name`, `id`), none of which is `CCTV-1综合`, so every programme was discarded
+ * on the client and the panel said the guide was empty while the request had in fact succeeded.
+ *
+ * The provider's name is not something the client can predict: it differs per provider, and it is the
+ * provider's own canonical spelling rather than the playlist's. Since a template response contains
+ * exactly one channel by construction, the honest reading is "these programmes are this channel's" —
+ * so they are claimed for it rather than matched against it.
+ *
+ * A fixed URL is left alone: it genuinely covers many channels, and re-labelling it would attribute
+ * every channel's programmes to whichever one happened to be selected.
+ */
+function claimPrograms(
+  programs: EpgProgram[],
+  template: string,
+  channel: Pick<LiveChannel, "name" | "epgId">,
+): EpgProgram[] {
+  if (!isPerChannelTemplate(template)) return programs;
+  const identity = channel.name.trim() || channel.epgId?.trim();
+  if (!identity) return programs;
+  // Re-keyed as well as re-labelled: `id` is derived from `channel_id` by the Rust parser, so leaving
+  // it would make two channels' guides collide in any map keyed by programme id.
+  return programs.map((program, index) => ({
+    ...program,
+    id: `${identity}-${index}`,
+    channelId: identity,
+  }));
 }
 
 /** Parses the `HH:MM` clock the Rust parser emits for both XMLTV and JSON guides. */
