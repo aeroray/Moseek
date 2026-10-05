@@ -233,6 +233,84 @@ export function migrateLiveFavorites(persisted: unknown): LiveFavorite[] {
   );
 }
 
+/**
+ * Validates the saved playback positions.
+ *
+ * This was the one persisted collection that was trusted wholesale, and it is the only one whose
+ * values are read as numbers by arithmetic rather than displayed. A stored entry that is not a finite
+ * number — a `null` written by an older shape, a string, a `NaN` that survived JSON as `null` — makes
+ * the progress bar compute `NaN%` and the resume seek land nowhere, without naming a cause. Dropping
+ * the unusable entries keeps every position that is actually a position.
+ *
+ * Negative and non-finite values are dropped rather than clamped: a negative position is not "almost
+ * right", it is a value this app never writes, and treating it as zero would silently restart a work
+ * the user had watched.
+ */
+export function migratePlaybackProgress(
+  persisted: unknown,
+): Record<string, number> {
+  if (!persisted || typeof persisted !== "object" || Array.isArray(persisted)) {
+    return {};
+  }
+  const progress: Record<string, number> = {};
+  for (const [id, seconds] of Object.entries(persisted)) {
+    if (typeof seconds === "number" && Number.isFinite(seconds) && seconds >= 0) {
+      progress[id] = seconds;
+    }
+  }
+  return progress;
+}
+
+/**
+ * Validates the stored theme.
+ *
+ * `theme` was the one persisted preference that flowed through the merge unvalidated, spread in with
+ * the rest. It only ever holds three strings, so an unrecognised value means the mirror was written by
+ * a different version or edited by hand — and the consequence is silent: `App` toggles the `dark`
+ * class for `dark` and `system` only, so anything else renders light for ever while the settings
+ * dropdown shows no selection at all. Falling back to `system` is the same choice `sourceFilter` makes
+ * for an unknown group: the sensible default rather than a state the user cannot explain.
+ */
+export function migrateTheme(value: unknown): ThemeMode {
+  return value === "light" || value === "dark" || value === "system"
+    ? value
+    : "system";
+}
+
+/**
+ * The views, as a value rather than a type, so a persisted one can be checked against them.
+ *
+ * `VIEW_KEYS` mirrors `ViewKey` in `@/types/moseek`. The type cannot be iterated at runtime, and the
+ * validation below needs the list — writing it out a second time is the smallest cost of being able to
+ * check it at all. A test asserts the two agree, so adding a view without adding it here fails loudly
+ * rather than silently rejecting the new key.
+ */
+export const VIEW_KEYS = [
+  "browse",
+  "live",
+  "favorites",
+  "history",
+  "config",
+  "settings",
+] as const;
+
+/**
+ * Validates the view the app was left on.
+ *
+ * **An unrecognised value here renders a blank window.** `App` seeds `visitedViews` with the active
+ * view and mounts a pane only for a key it recognises, so a stored `"home"` — the name this view had
+ * before the library-first rename — or any value from a future version leaves the workspace empty
+ * while the navigation bar still looks functional. Nothing reports it, because nothing went wrong as
+ * far as the running code can tell: every condition is simply false.
+ *
+ * `"home"` is mapped rather than defaulted, because it is the one old name that carried meaning and
+ * mapping it preserves where the user actually was.
+ */
+export function migrateActiveView(value: unknown): ViewKey {
+  if (value === "home") return "browse";
+  return VIEW_KEYS.includes(value as ViewKey) ? (value as ViewKey) : "browse";
+}
+
 interface AppStore {
   activeView: ViewKey;
   theme: ThemeMode;
@@ -736,24 +814,55 @@ export const useAppStore = create<AppStore>()(
       storage: createAppPersistStorage(),
       merge: (persistedState, currentState) => {
         const persisted = persistedState as Partial<AppStore> | undefined;
-        const hasImportedConfig = Boolean(persisted?.rawConfig?.trim());
-        const hasConfigDocuments = Boolean(persisted?.configDocuments?.length);
-        const keepUserContent = hasImportedConfig || hasConfigDocuments;
-        const persistedActiveView = (
-          persisted as { activeView?: string } | undefined
-        )?.activeView;
+        /**
+         * Whether the mirror's configuration looks like a real import.
+         *
+         * **This gates only the fields SQLite owns**, and keeping that distinction is the whole point
+         * of the two constants below. `sources`, `rawConfig` and `normalizedConfig` are a *mirror* of
+         * the database: `App` reloads them from the backend on every launch, so a persisted copy that
+         * does not describe an actual import is stale and dropping it is correct — the backend is
+         * about to supply the truth.
+         *
+         * It used to gate the collections as well, which was a data-loss bug: `favorites`, `history`,
+         * `liveFavorites` and `playbackProgress` live **only** here. Measured — the Rust tables
+         * `favorites` and `play_history` exist but are never read or written by any command, so
+         * localStorage is their single home. Gating them on an imported configuration meant an install
+         * with no configuration (a fresh one, or one whose import was cleared) silently discarded the
+         * user's collection on the next launch, with nothing to restore it from.
+         *
+         * `persist-storage.ts` states the same rule from the other side: when a full localStorage
+         * forces the mirror to shrink, the document payload is what it drops, because those are the
+         * three fields SQLite can supply again — "the small fields that have no other home (theme,
+         * view, filter, favourites, footprint) are kept".
+         */
+        const hasImportedConfig =
+          typeof persisted?.rawConfig === "string" &&
+          Boolean(persisted.rawConfig.trim());
+        const hasConfigDocuments = Array.isArray(persisted?.configDocuments)
+          ? persisted.configDocuments.length > 0
+          : false;
+        const keepMirroredDocument = hasImportedConfig || hasConfigDocuments;
         return {
           ...currentState,
           ...persisted,
+          // Validated like the others rather than trusted from the spread above. See `migrateTheme`.
+
           // Defaults to on for existing installs that predate the setting.
           autoEpgEnabled:
             persisted?.autoEpgEnabled ?? currentState.autoEpgEnabled,
           // The stored filter is validated rather than trusted: it is a persisted shape that a
           // newer version could have widened, and a value the filter module does not know would
           // silently exclude every source. An unrecognised group folds back to the default instead.
+          theme: migrateTheme(persisted?.theme),
           sourceFilter: migrateSourceFilter(persisted?.sourceFilter),
           isSourceFilterOpen: persisted?.isSourceFilterOpen ?? false,
-          configDocuments: persisted?.configDocuments ?? [],
+          // Shape-checked rather than defaulted: `?? []` only replaces `null`/`undefined`, so a
+          // non-array from an older or hand-edited mirror would reach the UI, where every reader maps
+          // over it. `configDocuments` is also the other half of the gate above, so a non-array there
+          // has to answer "no documents" rather than a truthy object.
+          configDocuments: Array.isArray(persisted?.configDocuments)
+            ? persisted.configDocuments
+            : [],
           // The cache is stored stripped, so the active document's payload is put back from the top
           // level — which is where it lives and what it describes. See
           // `src/stores/config-cache-persistence.ts` for why it is stored that way.
@@ -768,21 +877,18 @@ export const useAppStore = create<AppStore>()(
             },
           ),
           activeConfigId: persisted?.activeConfigId ?? null,
-          activeView:
-            persistedActiveView === "home"
-              ? "browse"
-              : (persisted?.activeView ?? currentState.activeView),
-          sources: keepUserContent ? migrateSources(persisted?.sources) : [],
-          history: keepUserContent ? migrateHistory(persisted?.history) : [],
-          favorites: keepUserContent
-            ? migrateFavorites(persisted?.favorites)
-            : [],
-          playbackProgress: keepUserContent
-            ? (persisted?.playbackProgress ?? {})
-            : {},
-          liveFavorites: keepUserContent
-            ? migrateLiveFavorites(persisted?.liveFavorites)
-            : [],
+          activeView: migrateActiveView(persisted?.activeView),
+          // The mirror. Safe to drop when it does not describe an import, because the backend
+          // reloads these on startup.
+          sources: keepMirroredDocument ? migrateSources(persisted?.sources) : [],
+          // The user's own content, kept unconditionally. The migrations above are what validate the
+          // stored shape — each returns `[]` for anything that is not the array it expects — so a
+          // second, coarser check here would only ever remove data that the migration had already
+          // vouched for.
+          history: migrateHistory(persisted?.history),
+          favorites: migrateFavorites(persisted?.favorites),
+          playbackProgress: migratePlaybackProgress(persisted?.playbackProgress),
+          liveFavorites: migrateLiveFavorites(persisted?.liveFavorites),
         };
       },
       partialize: (state) => ({
