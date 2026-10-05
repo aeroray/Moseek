@@ -15,14 +15,6 @@ import { ChannelLogo } from "@/components/channel-logo";
 import { ClearRecordsDialog } from "@/components/clear-records-dialog";
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { MediaPlayer, type MediaStatus } from "@/features/player/media-player";
 import { PlaybackDiagnostics } from "@/features/player/playback-diagnostics";
@@ -36,6 +28,7 @@ import {
 import { useStreamProbes } from "@/features/player/use-stream-probes";
 import { getVodDetail } from "@/features/browse/cms-adapter";
 import { relinkFavorite } from "@/features/browse/favorite-relink";
+import { CollectionEmpty } from "@/features/browse/collection-empty";
 import {
   ColumnEmpty,
   ColumnHeader,
@@ -177,7 +170,7 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
       >
         <div className="px-6 py-5">
           {isEmpty ? (
-            <EmptyState
+            <CollectionEmpty
               icon={<Bookmark className="size-4 text-primary" />}
               title="还没有收藏"
               description="在影视库或电视直播里点击心形图标，收藏的内容就会汇聚在这里，点开即可接着看。"
@@ -1154,33 +1147,4 @@ async function resolvePlaybackSafe(url: string) {
   }
 }
 
-function EmptyState({
-  icon,
-  title,
-  description,
-  actionLabel,
-  onAction,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  actionLabel: string;
-  onAction: () => void;
-}) {
-  return (
-    <div className="flex h-full items-center justify-center p-8">
-      <Empty className="max-w-md border-border/40 bg-card/20 py-8">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">{icon}</EmptyMedia>
-          <EmptyTitle className="text-sm">{title}</EmptyTitle>
-          <EmptyDescription className="text-xs">{description}</EmptyDescription>
-        </EmptyHeader>
-        <EmptyContent>
-          <Button type="button" size="sm" onClick={onAction}>
-            {actionLabel}
-          </Button>
-        </EmptyContent>
-      </Empty>
-    </div>
-  );
-}
+

@@ -34,7 +34,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppStore } from "@/stores/app-store";
-import type { CatalogViewMode, ViewKey, VodItem } from "@/types/moseek";
+import type { CatalogPage, CatalogViewMode, ViewKey, VodItem } from "@/types/moseek";
 import { searchVod } from "@/features/browse/cms-adapter";
 import { isMovieLibrarySource } from "@/lib/adapters";
 import { isFavoriteItem } from "@/lib/favorite-key";
@@ -67,9 +67,22 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
   const [categoryId, setCategoryId] = useState("all");
   const [page, setPage] = useState(1);
   const [viewMode, setViewMode] = useState<CatalogViewMode>("grid");
-  const [catalog, setCatalog] = useState<
-    Awaited<ReturnType<typeof searchVod>>["data"] | null
-  >(null);
+  /**
+   * The page the user is looking at, stamped with the scope it describes.
+   *
+   * The stamp is what keeps the header and the footer honest. They used to render `catalog?.total`
+   * and `catalog?.pageCount ?? 1`, so the moment the user switched source or paged on, the numbers
+   * on screen described the *previous* request — or, with no catalog yet at all, a fabricated
+   * "第 1 / 1 页" — while the content area showed a skeleton. That is exactly the state the user
+   * reported as "the pagination and the total are already there but the page never stops loading":
+   * two parts of the same screen asserting different things, and the fabricated one being the more
+   * confident of the two. A catalog that does not belong to the current scope is now simply not
+   * displayed; nothing has to be cleared on the way out, and nothing stale can survive a switch.
+   */
+  const [catalog, setCatalog] = useState<{
+    scope: string;
+    data: CatalogPage;
+  } | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedItem, setSelectedItem] = useState<VodItem | null>(null);
@@ -77,6 +90,28 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
   const selectedSource =
     browseSources.find((source) => source.key === sourceKey) ??
     browseSources[0];
+
+  /**
+   * What the request in flight is for: the source, the search term and the category.
+   *
+   * The page is deliberately not part of it — the result *set* is what the total and the page count
+   * describe, and those do not change when the user pages through it. It is used both to decide
+   * whether a resolved catalog still belongs on screen and to key the enrichment below.
+   */
+  const scope = [
+    selectedSource?.key ?? "",
+    query,
+    categoryId,
+  ].join("\u0000");
+  /**
+   * The catalog that may be rendered: the one for this scope, and only that one.
+   *
+   * The page number is deliberately not part of the check. Paging stays inside the same result set,
+   * so its total and page count are still true — the footer reads "第 2 / 4205 页" while page two
+   * loads, which is exactly what is happening, rather than the previous page's number dressed up as
+   * the current one.
+   */
+  const visibleCatalog = catalog?.scope === scope ? catalog.data : null;
 
   useEffect(() => {
     if (!selectedSource && browseSources.length > 0) {
@@ -94,7 +129,10 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
     void searchVod(selectedSource, query, categoryId, page, pageSize)
       .then((result) => {
         if (cancelled) return;
-        setCatalog(result.data);
+        // This is the whole request the library makes. A source whose listing carries no covers is
+        // shown as it is — see the note in `cms-adapter` for why the app does not go looking for
+        // covers per work, and why that is a deliberate choice rather than an omission.
+        setCatalog({ scope, data: result.data });
         setLoadError(result.error);
         setIsLoading(false);
       })
@@ -111,7 +149,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
     return () => {
       cancelled = true;
     };
-  }, [categoryId, page, query, selectedSource]);
+  }, [categoryId, page, query, scope, selectedSource]);
 
   /**
    * Drop the category when the source changes.
@@ -163,8 +201,11 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
     );
   }
 
-  const categories = catalog?.categories ?? [];
-  const itemCountText = catalog ? `${catalog.total} 部` : "读取中";
+  // Both the category list and the work count describe the catalog that is actually on screen. A
+  // category id only means anything inside the source that issued it, so offering the previous
+  // source's categories while the new one loads was never defensible.
+  const categories = visibleCatalog?.categories ?? [];
+  const itemCountText = visibleCatalog ? `${visibleCatalog.total} 部` : "读取中";
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -315,10 +356,10 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
 
           {isLoading ? (
             <CatalogSkeleton viewMode={viewMode} />
-          ) : catalog?.items.length ? (
+          ) : visibleCatalog?.items.length ? (
             viewMode === "grid" ? (
               <div className={catalogGridClassName}>
-                {catalog.items.map((item) => (
+                {visibleCatalog.items.map((item) => (
                   <CatalogCard
                     key={item.id}
                     item={item}
@@ -328,7 +369,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
               </div>
             ) : (
               <div className="flex flex-col gap-2">
-                {catalog.items.map((item) => (
+                {visibleCatalog.items.map((item) => (
                   <CatalogListItem
                     key={item.id}
                     item={item}
@@ -357,8 +398,15 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
       {/* 40px Compact Pagination Footer */}
       <footer className="flex h-10 shrink-0 items-center justify-between border-t border-border/70 bg-card/30 px-4 text-xs select-none">
         <div className="flex items-center gap-2 text-muted-foreground text-xs">
+          {/* Both numbers have to be true or absent.
+              The page shown is the one being *requested* (`page`), not the one whose data happens
+              to still be in state: on a slow source the old number sat here unchanged for 10–25 s
+              while the content area spun, so the footer said "page 1" and the skeleton said "not
+              yet" at the same time. The page count is only known once a catalog for this scope has
+              arrived; "…" says so instead of the fabricated "1" that made a loading page look like
+              a finished one-page result. */}
           <span>
-            第 {catalog?.page ?? page} / {catalog?.pageCount ?? 1} 页
+            第 {page} / {visibleCatalog ? visibleCatalog.pageCount : "…"} 页
           </span>
           {query && (
             <span className="text-primary font-medium">搜索：「{query}」</span>
@@ -369,7 +417,7 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
             type="button"
             variant="ghost"
             size="sm"
-            disabled={!catalog || catalog.page <= 1 || isLoading}
+            disabled={!visibleCatalog || visibleCatalog.page <= 1 || isLoading}
             onClick={() => setPage((current) => Math.max(1, current - 1))}
           >
             <ChevronLeft className="size-3.5" data-icon="inline-start" aria-hidden="true" />
@@ -380,7 +428,9 @@ export function BrowseView({ onNavigate }: BrowseViewProps) {
             variant="ghost"
             size="sm"
             disabled={
-              !catalog || catalog.page >= catalog.pageCount || isLoading
+              !visibleCatalog ||
+              visibleCatalog.page >= visibleCatalog.pageCount ||
+              isLoading
             }
             onClick={() => setPage((current) => current + 1)}
           >

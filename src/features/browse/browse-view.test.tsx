@@ -5,6 +5,7 @@ import { BrowseView } from "@/features/browse/browse-view";
 import type { CatalogPage, SourceRecord, VodItem } from "@/types/moseek";
 
 const searchVod = vi.fn();
+const getDetail = vi.fn();
 
 // Only the adapter's network call is stubbed. The real module is spread back in so its other
 // exports still resolve.
@@ -13,6 +14,16 @@ vi.mock("@/features/browse/cms-adapter", async (importOriginal) => {
   return {
     ...actual,
     searchVod: (...args: unknown[]) => searchVod(...args),
+  };
+});
+
+// The lowest choke point for a per-work fetch. The library must not reach it: that is the rule this
+// suite pins (see "shows a coverless listing exactly as the source gave it").
+vi.mock("@/lib/tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/tauri")>();
+  return {
+    ...actual,
+    getDetail: (...args: unknown[]) => getDetail(...args),
   };
 });
 
@@ -56,7 +67,7 @@ function vodItem(overrides: Partial<VodItem> = {}): VodItem {
   };
 }
 
-function page(items: VodItem[]) {
+function page(items: VodItem[], overrides: Partial<CatalogPage> = {}) {
   // searchVod resolves an AdapterResult, not a bare page; returning the page directly leaves
   // `result.data` undefined and the view renders its empty state.
   return {
@@ -68,6 +79,7 @@ function page(items: VodItem[]) {
       pageCount: 1,
       pageSize: 12,
       total: items.length,
+      ...overrides,
     } satisfies CatalogPage,
     mode: "remote" as const,
     error: null,
@@ -314,5 +326,71 @@ describe("BrowseView catalog metadata", () => {
         expect.anything(),
       );
     });
+  });
+});
+
+describe("BrowseView loading states", () => {
+  afterEach(cleanup);
+
+  beforeEach(() => {
+    searchVod.mockReset();
+    getDetail.mockReset();
+    useAppStore.setState({
+      sources: [cmsSource()],
+      favorites: [],
+    });
+  });
+
+  it("shows a coverless listing exactly as the source gave it", async () => {
+    // The library makes one request and renders its answer. It does **not** go and fetch a detail
+    // record per work to fill in covers: that fan-out was measured (20 requests, 6 762 ms against
+    // one page-wide request at 26 207 ms) and rejected by the user, because twenty requests against
+    // one host invites rate limiting and a library must not be nondeterministic. The card shows its
+    // own "暂无海报" state, which is the honest rendering of what the source published — and no
+    // per-work request is made at all.
+    searchVod.mockResolvedValue(page([vodItem({ name: "无封面影片" })]));
+
+    render(<BrowseView onNavigate={() => {}} />);
+
+    expect(await screen.findByText("无封面影片")).toBeInTheDocument();
+    // Scoped to the poster: the "no poster" placeholder draws the app mark, which is also an img.
+    expect(document.querySelector('img[alt="无封面影片 海报"]')).toBeNull();
+    expect(
+      screen.getByRole("img", { name: "无封面影片 海报，暂无可用图片" }),
+    ).toBeInTheDocument();
+
+    // Give anything asynchronous a chance to land, then confirm the library never went looking.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(getDetail).not.toHaveBeenCalled();
+    expect(document.querySelector('img[alt="无封面影片 海报"]')).toBeNull();
+  });
+
+  it("renders the cover the listing itself provided", async () => {
+    // The other half of the same rule: a source that *does* publish covers in its listing keeps them.
+    searchVod.mockResolvedValue(
+      page([vodItem({ name: "有封面影片", poster: "https://img.example/a.jpg" })]),
+    );
+
+    render(<BrowseView onNavigate={() => {}} />);
+
+    expect(await screen.findByText("有封面影片")).toBeInTheDocument();
+    expect(
+      document.querySelector('img[alt="有封面影片 海报"]'),
+    ).toHaveAttribute("src", "https://img.example/a.jpg");
+  });
+
+  it("does not claim a page count before the current scope has been read", async () => {
+    // The reported confusion: "the pagination and the total are already there but the page never
+    // stops loading". The footer rendered `catalog?.pageCount ?? 1`, so it announced "第 1 / 1 页"
+    // — a definite answer about a result set nothing had read yet — under a skeleton. A number
+    // that is not known has to look like one that is not known.
+    searchVod.mockReturnValue(new Promise(() => {}));
+
+    render(<BrowseView onNavigate={() => {}} />);
+
+    expect(screen.getByText(/第 1 \/ … 页/)).toBeInTheDocument();
+    expect(screen.queryByText(/第 1 \/ 1 页/)).toBeNull();
+    // Nor may the total claim to be known.
+    expect(screen.getByText("读取中")).toBeInTheDocument();
   });
 });

@@ -159,6 +159,21 @@ export async function getVodDetail(
   };
 }
 
+/**
+ * The library is whatever the listing said it was.
+ *
+ * There is deliberately no cover enrichment here. A source whose listing carries no covers shows its
+ * own "暂无海报" state, because the only way to get covers for such a source is one detail request
+ * *per work* — and that is a behaviour the user rejected on principle: a page of 20 cards becomes 20
+ * requests against a single host, which invites rate limiting, and the result is nondeterministic in
+ * a way a library view must not be. Measured on the real `采集集合` deployment the covers really do
+ * exist behind `ac=detail` (0/20 in the listing, 20/20 there), and the fan-out was 3.9× faster than
+ * asking for the page in one request (6 762 ms against 26 207 ms) — but "this source published no
+ * covers with its listing" is a legitimate answer, and paying a request storm to overrule it is not
+ * worth it. The work's own page still fetches its detail record the moment it is opened, which is
+ * where a cover is actually needed.
+ */
+
 function getErrorMessage(error: unknown, fallback: string) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string" && error.trim()) return error;

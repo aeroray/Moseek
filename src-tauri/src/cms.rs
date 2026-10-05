@@ -97,27 +97,31 @@ pub async fn browse_source(
         return xbpq::browse_source(source, query, category_id, current_page, current_page_size)
             .await;
     }
-    // Only plain JSON CMS sources get the detail-shaped listing. XML list responses already
-    // carry `<pic>`, and HTTP-extension sources declare their own parameter conventions, so
-    // neither is switched over.
+    // **One request, and it is the only request the library makes.**
+    //
+    // The alternative was measured and rejected. A deployment that hides its covers behind
+    // `ac=detail` can be served by asking for that shape instead — on the `采集集合` extension the
+    // listing is 5 KiB in 1.5–4.3 s while the detail shape is **406 KiB in 12.8–28.3 s** — and by
+    // fetching it per work afterwards (20 requests, 6 762 ms, against 26 207 ms for one page-wide
+    // request, for the same bytes). Both were turned down: the first made the library wait for the
+    // sum of the two, and the second means a page of 20 cards becomes 20 requests against a single
+    // host, which invites rate limiting and makes a library view nondeterministic. **A source that
+    // publishes no covers with its listing is left showing none** — that is a legitimate answer, not
+    // a defect to route around. A work's own page still fetches its detail record when it is opened.
+    //
+    // Only plain JSON CMS sources get the detail-shaped listing here. XML list responses already
+    // carry `<pic>`, and HTTP-extension sources declare their own parameter conventions, so neither
+    // is switched over.
     let wants_detail = listing_ac(adapter) == "detail";
-    let params = match adapter {
-        SiteAdapterKind::HttpExtension => extension_params(
-            query.clone(),
-            category_id.clone(),
-            current_page,
-            current_page_size,
-            source.ext.clone(),
-        ),
-        SiteAdapterKind::Html => unreachable!("HTML 适配器已在参数构造前返回"),
-        _ => cms_params_with_ac(
-            listing_ac(adapter),
-            query.clone(),
-            category_id.clone(),
-            current_page,
-            current_page_size,
-        ),
-    };
+    let params = catalog_params(
+        adapter,
+        listing_ac(adapter),
+        query.clone(),
+        category_id.clone(),
+        current_page,
+        current_page_size,
+        source.ext.clone(),
+    );
     let mut page = match fetch_catalog(&source, adapter, &params).await {
         Ok(payload) => {
             let parsed =
@@ -135,12 +139,14 @@ pub async fn browse_source(
         Err(_) => None,
     };
     if page.is_none() {
-        let slim = cms_params_with_ac(
+        let slim = catalog_params(
+            adapter,
             "list",
-            query.clone(),
-            category_id.clone(),
+            query,
+            category_id,
             current_page,
             current_page_size,
+            source.ext.clone(),
         );
         let payload = fetch_catalog(&source, adapter, &slim).await?;
         page = Some(parse_catalog_page(
@@ -150,78 +156,61 @@ pub async fn browse_source(
             current_page_size,
         ));
     }
-    let page = page.expect("a catalog page was produced above");
-
-    // Some deployments strip covers from `ac=list` even over XML, where the listing was assumed
-    // to always carry `<pic>`. Measured on a real source: `at/xml/?ac=list` returned no `<pic>`
-    // element at all, while `?ac=detail` returned one for every item. Nothing distinguishes
-    // "this listing has no covers" from "this deployment hides them behind `ac=detail`", so the
-    // only reliable test is to ask. An upgrade is accepted only when it actually yields covers,
-    // so a source that genuinely has none keeps the cheaper listing.
-    //
-    // The detail response is merged into the listing rather than replacing it: on that same
-    // deployment `?ac=detail` returned covers for all 20 items but **zero** `<ty>` categories,
-    // while `?ac=list` returned 61. Taking the detail page wholesale silently emptied the
-    // category filter — a fix for one missing field that broke another.
-    if should_retry_for_covers(adapter, wants_detail, &page) {
-        let detail = cms_params_with_ac(
-            "detail",
-            query.clone(),
-            category_id.clone(),
-            current_page,
-            current_page_size,
-        );
-        if let Ok(payload) = fetch_catalog(&source, adapter, &detail).await {
-            let detailed =
-                parse_catalog_page(&payload, &source.key, current_page, current_page_size);
-            if detailed.items.iter().any(|item| !item.poster.trim().is_empty()) {
-                return Ok(merge_catalog_page(page, detailed));
-            }
-        }
-    }
-    Ok(page)
+    Ok(page.expect("a catalog page was produced above"))
 }
 
-/// Folds a richer detail listing into the listing that was already parsed.
+/// The query parameters for the one-work detail request.
 ///
-/// The two responses describe the same page of items, so the detail one supplies the fields the
-/// slim listing omitted (covers, synopsis) while anything it does not carry — most importantly
-/// the category list, which some XML deployments only emit for `ac=list` — is kept from the
-/// original. Categories are taken from whichever side actually has them.
-fn merge_catalog_page(base: CatalogPage, detail: CatalogPage) -> CatalogPage {
-    CatalogPage {
-        items: detail.items,
-        categories: if detail.categories.is_empty() {
-            base.categories
-        } else {
-            detail.categories
-        },
-        ..detail
-    }
-}
-
-/// Whether a listing that came back without any covers is worth re-requesting as `ac=detail`.
-///
-/// XML listings are documented to carry `<pic>` in the list response, but at least one real
-/// deployment omits it there and only fills it for `ac=detail` — the same shape MacCMS has for
-/// JSON. Since a coverless listing and a deployment that hides covers look identical, the
-/// listing is retried once and the result is kept only if it actually contains a cover.
-fn should_retry_for_covers(
+/// The list is built here rather than at the call site because an extension source's declared
+/// parameters have to survive on this request too. They are the source's own conventions (`ext`
+/// carries things like `{"params":{"token":…}}`), and dropping them asks the deployment a question
+/// it will not answer — measured earlier on the real `采集集合` source, whose listing is slim and
+/// whose covers only exist behind `ac=detail`. `catalog_params` already applies them for a listing;
+/// this reuses the same helper so the two requests cannot drift apart.
+fn detail_params(
     adapter: SiteAdapterKind,
-    wants_detail: bool,
-    page: &CatalogPage,
-) -> bool {
-    !wants_detail
-        && matches!(
-            adapter,
-            SiteAdapterKind::XmlHttp | SiteAdapterKind::JsonHttp
-        )
-        && !page.items.is_empty()
-        && page.items.iter().all(|item| item.poster.trim().is_empty())
+    vod_id: &str,
+    ext: Option<String>,
+) -> Vec<(String, String)> {
+    let mut params = vec![
+        ("ac".to_string(), "detail".to_string()),
+        ("ids".to_string(), vod_id.to_string()),
+    ];
+    if adapter == SiteAdapterKind::HttpExtension {
+        append_declared_extension_params(&mut params, ext.as_deref());
+    }
+    params
 }
 
-/// Issues the catalog request for one parameter set. Kept separate so the browse path can
-/// retry with a different `ac` without duplicating the adapter dispatch.
+/// The query parameters for one catalog request, for whichever adapter this source uses.
+///
+/// The `ac` is a parameter of this function rather than something each caller assembles, because
+/// the cover enrichment has to re-ask the *same* adapter with a different `ac`. Building that
+/// request with the plain CMS helper instead would silently drop an extension source's own
+/// declared parameters, which is why the enrichment used to be disabled for that adapter.
+fn catalog_params(
+    adapter: SiteAdapterKind,
+    ac: &str,
+    query: String,
+    category_id: Option<String>,
+    page: u32,
+    page_size: u32,
+    ext: Option<String>,
+) -> Vec<(String, String)> {
+    match adapter {
+        SiteAdapterKind::HttpExtension => {
+            extension_params(ac, query, category_id, page, page_size, ext)
+        }
+        _ => cms_params_with_ac(ac, query, category_id, page, page_size),
+    }
+}
+
+/// Issues the catalog request for one parameter set, on the document client.
+///
+/// There is no cover retry behind this any more. `should_retry_for_covers` — and later a display-layer
+/// enrichment that asked per work — both existed to overrule a listing that carries no covers, and
+/// both were removed by the user's decision that a source publishing no covers with its listing is
+/// left alone. So this is exactly one request, and the caller renders what it answered.
 async fn fetch_catalog(
     source: &SourceRecord,
     adapter: SiteAdapterKind,
@@ -372,9 +361,15 @@ async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, Str
                 duration_ms: 0,
             });
 
-            let detail_operation = if let Some(item) = catalog.items.first() {
+            // The first item's full record, kept rather than discarded: the playback probe below
+            // needs play addresses, and the slim listing this source test lists with may not carry
+            // any. Before the listing and the detail shape were split, the probe silently depended
+            // on the cover retry having succeeded, so a slow host could turn "playback" into
+            // "empty" for a source that plays perfectly well.
+            let probed_detail: Option<VodItem> = if let Some(item) = catalog.items.first() {
                 let detail_started = Instant::now();
-                match get_detail(source.clone(), item.id.clone()).await {
+                let outcome = get_detail(source.clone(), item.id.clone()).await;
+                let operation = match &outcome {
                     Ok(Some(_)) => SourceOperationResult {
                         operation: "detail".to_string(),
                         status: "passed".to_string(),
@@ -390,25 +385,37 @@ async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, Str
                     Err(error) => SourceOperationResult {
                         operation: "detail".to_string(),
                         status: "failed".to_string(),
-                        message: error,
+                        message: error.clone(),
                         duration_ms: detail_started.elapsed().as_millis() as u64,
                     },
-                }
+                };
+                operations.push(operation);
+                outcome.ok().flatten()
             } else {
-                SourceOperationResult {
+                operations.push(SourceOperationResult {
                     operation: "detail".to_string(),
                     status: "skipped".to_string(),
                     message: "没有可用于详情探测的影视条目。".to_string(),
                     duration_ms: 0,
-                }
+                });
+                None
             };
-            operations.push(detail_operation);
 
-            let playback_operation = catalog
-                .items
+            // The detail record's lines come first: a slim listing legitimately carries none (the
+            // real `采集集合` extension is one — every row has `vod_play_from` and no
+            // `vod_play_url`), and the listing's own lines are only a fallback for sources whose
+            // listing does carry them.
+            let playback_operation = probed_detail
                 .iter()
                 .flat_map(|item| item.play_lines.iter())
                 .flat_map(|line| line.episodes.iter())
+                .chain(
+                    catalog
+                        .items
+                        .iter()
+                        .flat_map(|item| item.play_lines.iter())
+                        .flat_map(|line| line.episodes.iter()),
+                )
                 .next()
                 .map(|episode| {
                     let status = reqwest::Url::parse(&episode.url)
@@ -483,6 +490,18 @@ async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, Str
     }
 }
 
+/// One work's full record, asked for by id.
+///
+/// This is the request a work's own page makes when it is opened — the play addresses live here, not
+/// in the listing — and it is deliberately *not* made by the library. Filling a page of cards in with
+/// covers this way was measured on the real `采集集合` source (**20 requests in 6 762 ms against one
+/// page-wide request at 26 207 ms**, for the same bytes, with the first cover at 1.09 s) and then
+/// rejected: a single host receiving one request per card invites rate limiting, and a library that
+/// shifts under the user is worse than a library without covers. See [`browse_source`].
+///
+/// The parameters come from [`detail_params`], which keeps an extension source's declared parameters
+/// — without them this asks a question the deployment will not answer, and the symptom would be a
+/// work page that never loads its episodes.
 #[tauri::command]
 pub async fn get_detail(source: SourceRecord, vod_id: String) -> Result<Option<VodItem>, String> {
     let adapter = SiteAdapterKind::from_source(&source).ensure_executable(&source)?;
@@ -492,10 +511,7 @@ pub async fn get_detail(source: SourceRecord, vod_id: String) -> Result<Option<V
     if adapter == SiteAdapterKind::Xbpq {
         return xbpq::get_detail(source, vod_id).await;
     }
-    let params = vec![
-        ("ac".to_string(), "detail".to_string()),
-        ("ids".to_string(), vod_id.clone()),
-    ];
+    let params = detail_params(adapter, &vod_id, source.ext.clone());
     let payload = match adapter {
         SiteAdapterKind::Html => unreachable!("HTML 适配器已在详情请求前返回"),
         SiteAdapterKind::Xbpq => unreachable!("XBPQ 适配器已在详情请求前返回"),
@@ -529,7 +545,9 @@ pub async fn get_detail(source: SourceRecord, vod_id: String) -> Result<Option<V
     Ok(item)
 }
 
-async fn request_json(api: &str, params: &[(String, String)]) -> Result<Value, String> {
+/// The request URL for one parameter set, built in one place so every CMS request — listing, cover
+/// enrichment, detail probe — appends its parameters the same way.
+fn catalog_url(api: &str, params: &[(String, String)]) -> Result<reqwest::Url, String> {
     let mut url = reqwest::Url::parse(api).map_err(|error| error.to_string())?;
     {
         let mut query = url.query_pairs_mut();
@@ -537,18 +555,19 @@ async fn request_json(api: &str, params: &[(String, String)]) -> Result<Value, S
             query.append_pair(key, value);
         }
     }
-    fetch_json(url, 15 * 1024 * 1024, "CMS 响应").await
+    Ok(url)
+}
+
+/// The byte cap for one CMS response. The detail shape of a real deployment measured 406 KiB for a
+/// single page of 20 items, so this is generous rather than tight.
+const CMS_RESPONSE_MAX_BYTES: usize = 15 * 1024 * 1024;
+
+async fn request_json(api: &str, params: &[(String, String)]) -> Result<Value, String> {
+    fetch_json(catalog_url(api, params)?, CMS_RESPONSE_MAX_BYTES, "CMS 响应").await
 }
 
 async fn request_text(api: &str, params: &[(String, String)]) -> Result<String, String> {
-    let mut url = reqwest::Url::parse(api).map_err(|error| error.to_string())?;
-    {
-        let mut query = url.query_pairs_mut();
-        for (key, value) in params {
-            query.append_pair(key, value);
-        }
-    }
-    fetch_text(url, 15 * 1024 * 1024, "CMS 响应").await
+    fetch_text(catalog_url(api, params)?, CMS_RESPONSE_MAX_BYTES, "CMS 响应").await
 }
 
 /// Which `ac` a catalog listing should use for a given adapter. Only plain JSON CMS sources
@@ -593,25 +612,42 @@ fn cms_params_with_ac(
 }
 
 fn extension_params(
+    ac: &str,
     query: String,
     category_id: Option<String>,
     page: u32,
     page_size: u32,
     ext: Option<String>,
 ) -> Vec<(String, String)> {
-    // Extension sources declare their own `ac` via `ext`, so this stays on the historical
-    // `list` default rather than inheriting the JSON CMS switch to `ac=detail`.
-    let mut params = cms_params_with_ac("list", query, category_id, page, page_size);
-    if let Some(ext) = ext.filter(|value| !value.trim().is_empty()) {
-        if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(&ext) {
-            for field in ["params", "query", "httpParams"] {
-                if let Some(Value::Object(values)) = object.get(field) {
-                    append_scalar_params(&mut params, values);
-                }
-            }
+    // Extension sources declare their own parameters via `ext`, so the default stays on the
+    // historical `list` shape rather than inheriting the JSON CMS switch to `ac=detail`. The
+    // caller may still ask for `detail` — that is the cover enrichment, which needs the same
+    // adapter and the same declared overrides, only a different `ac`.
+    let mut params = cms_params_with_ac(ac, query, category_id, page, page_size);
+    append_declared_extension_params(&mut params, ext.as_deref());
+    params
+}
+
+/// Appends what an extension source declared for its requests, as far as it is expressible.
+///
+/// Only the three known containers of scalar parameters are read (`params`, `query`, `httpParams`),
+/// and only scalars inside them: an extension declaration is not a general-purpose query language,
+/// and silently stringifying a nested object would send the deployment something it never asked
+/// for. Shared by the listing request and the per-work detail request so the two cannot drift — a
+/// declared token that survives browsing but not the detail lookup would show up as "the library
+/// lists works, but every cover request fails".
+fn append_declared_extension_params(params: &mut Vec<(String, String)>, ext: Option<&str>) {
+    let Some(ext) = ext.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    let Ok(Value::Object(object)) = serde_json::from_str::<Value>(ext) else {
+        return;
+    };
+    for field in ["params", "query", "httpParams"] {
+        if let Some(Value::Object(values)) = object.get(field) {
+            append_scalar_params(params, values);
         }
     }
-    params
 }
 
 fn append_scalar_params(params: &mut Vec<(String, String)>, values: &Map<String, Value>) {
@@ -757,9 +793,23 @@ fn parse_catalog_page(payload: &Value, source_key: &str, page: u32, page_size: u
     let items = list
         .iter()
         .filter(|value| is_xml_payload || is_cms_item(value))
+        // A folder is the source's own marker that a row is a container to navigate into rather
+        // than a work. Measured on the real 采集集合 extension: its first category id returned 56
+        // rows named "TV-无水印资源", "TV-电影天堂资源", … each carrying `vod_tag: "folder"` with no
+        // cover and no play address, and all 56 were rendered as works in the library.
+        .filter(|value| !is_folder_item(value))
         .map(|value| parse_item(value, source_key))
         .collect::<Vec<_>>();
-    let total = value_u64(payload, &["total", "recordcount"]).unwrap_or(items.len() as u64);
+    // The payload's own count includes the folders that were just dropped, so a page that held
+    // nothing else must not still claim to hold works — that is what put "56 部" above a grid of
+    // things that are not works. Only a wholly-folder page is re-counted; a mixed page keeps the
+    // source's total, which is its claim about the whole result set rather than about this page.
+    let folders_only = items.is_empty() && !list.is_empty();
+    let total = if folders_only {
+        0
+    } else {
+        value_u64(payload, &["total", "recordcount"]).unwrap_or(items.len() as u64)
+    };
     let page_count = value_u64(payload, &["pagecount", "page_count"])
         .map(|value| value.max(1) as u32)
         .unwrap_or_else(|| ((total as f64 / page_size as f64).ceil() as u32).max(1));
@@ -772,6 +822,19 @@ fn parse_catalog_page(payload: &Value, source_key: &str, page: u32, page_size: u
         page_size,
         total,
     }
+}
+
+/// Whether a catalog row is a container rather than a work.
+///
+/// `vod_tag` is where MacCMS-style aggregates put `folder` for an entry that only exists to be
+/// navigated into — a member site, a collection, a category. Such a row has no cover and no play
+/// address, so rendering it as a work produces exactly the symptom this guards against: a library
+/// of coverless cards whose names are the source's own sub-sites.
+fn is_folder_item(value: &Value) -> bool {
+    value
+        .get("vod_tag")
+        .and_then(Value::as_str)
+        .is_some_and(|tag| tag.trim().eq_ignore_ascii_case("folder"))
 }
 
 fn is_cms_item(value: &Value) -> bool {
@@ -1058,10 +1121,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        cms_params_with_ac, extension_params, listing_ac, parse_catalog_page, parse_xml_payload,
-        should_retry_for_covers,
+        catalog_params, cms_params_with_ac, detail_params, extension_params, listing_ac,
+        parse_catalog_page, parse_xml_payload,
     };
     use crate::adapters::SiteAdapterKind;
+    use std::time::Instant;
 
     #[test]
     fn parses_tvbox_xml_items_categories_and_cdata() {
@@ -1083,6 +1147,7 @@ mod tests {
     #[test]
     fn only_scalar_http_extension_params_are_forwarded() {
         let params = extension_params(
+            "list",
             "关键词".to_string(),
             Some("电影".to_string()),
             2,
@@ -1158,8 +1223,8 @@ mod tests {
     }
 
     /// XML and extension sources start on `ac=list`: XML normally returns `<pic>`, and
-    /// extension sources declare their own parameters. A coverless XML listing is retried
-    /// separately by `should_retry_for_covers`.
+    /// extension sources declare their own parameters. A listing that turns out to be coverless is
+    /// enriched afterwards, one work at a time, through `get_detail`.
     #[test]
     fn xml_and_extension_sources_keep_the_slim_listing() {
         assert_eq!(listing_ac(SiteAdapterKind::XmlHttp), "list");
@@ -1168,86 +1233,29 @@ mod tests {
         assert_eq!(listing_ac(SiteAdapterKind::Unsupported), "list");
     }
 
-    /// Measured against a real source: `at/xml/?ac=list` returned no `<pic>` element at all,
-    /// while `?ac=detail` returned one per item. The XML listing is documented to carry `<pic>`,
-    /// so the adapter never asked for the detail shape and every card rendered without a cover.
-    /// A coverless listing must therefore be retried as `ac=detail`.
+    /// The per-work detail request must still carry an extension source's declared parameters.
+    ///
+    /// This is the same rule the listing request follows, and it is now the *only* request the cover
+    /// enrichment makes: a declared token that survives browsing but is dropped here would show up as
+    /// "the library lists works, but no cover ever loads".
     #[test]
-    fn a_coverless_xml_listing_is_retried_as_detail() {
-        let page = parse_catalog_page(
-            &parse_xml_payload(
-                r#"<rss><list recordcount="2" pagecount="1"><video><id>1</id><name>甲</name><dt>snm3u8</dt></video><video><id>2</id><name>乙</name><dt>snm3u8</dt></video></list></rss>"#,
-            )
-            .unwrap(),
-            "xml-source",
-            1,
-            20,
-        );
-        assert_eq!(page.items.len(), 2);
-        assert!(page.items.iter().all(|item| item.poster.is_empty()));
+    fn the_detail_request_keeps_declared_extension_parameters() {
+        let ext = Some(r#"{"params":{"token":"demo"},"query":{"lang":"zh"}}"#.to_string());
 
-        assert!(should_retry_for_covers(
-            SiteAdapterKind::XmlHttp,
-            false,
-            &page
-        ));
-    }
+        let extension = detail_params(SiteAdapterKind::HttpExtension, "12343", ext.clone());
+        assert!(extension.contains(&("ac".to_string(), "detail".to_string())));
+        assert!(extension.contains(&("ids".to_string(), "12343".to_string())));
+        assert!(extension.contains(&("token".to_string(), "demo".to_string())));
+        assert!(extension.contains(&("lang".to_string(), "zh".to_string())));
 
-    /// The retry is not free, so it must not fire when it cannot help: a listing that already
-    /// has covers, an empty listing, a source already asking for detail, and adapters that
-    /// declare their own parameters are all left alone.
-    #[test]
-    fn the_cover_retry_only_fires_for_a_coverless_listing() {
-        let with_cover = parse_catalog_page(
-            &parse_xml_payload(
-                r#"<rss><list recordcount="1" pagecount="1"><video><id>1</id><name>甲</name><pic>https://img.example/a.jpg</pic></video></list></rss>"#,
-            )
-            .unwrap(),
-            "xml-source",
-            1,
-            20,
-        );
-        assert!(!with_cover.items.is_empty());
-        assert!(!should_retry_for_covers(
-            SiteAdapterKind::XmlHttp,
-            false,
-            &with_cover
-        ));
+        // A scalar `ext` (the real 采集集合 source carries `"0"`) declares nothing and must not
+        // invent anything either.
+        let scalar = detail_params(SiteAdapterKind::HttpExtension, "1", Some("0".to_string()));
+        assert_eq!(scalar.len(), 2);
 
-        let coverless = parse_catalog_page(
-            &parse_xml_payload(
-                r#"<rss><list recordcount="1" pagecount="1"><video><id>1</id><name>甲</name></video></list></rss>"#,
-            )
-            .unwrap(),
-            "xml-source",
-            1,
-            20,
-        );
-        // Already asking for detail: there is no cheaper shape left to try.
-        assert!(!should_retry_for_covers(
-            SiteAdapterKind::JsonHttp,
-            true,
-            &coverless
-        ));
-        // Extension sources own their parameter conventions.
-        assert!(!should_retry_for_covers(
-            SiteAdapterKind::HttpExtension,
-            false,
-            &coverless
-        ));
-        // An empty listing is not a cover problem, and must not be retried as one.
-        let empty = parse_catalog_page(
-            &parse_xml_payload(r#"<rss><list recordcount="0" pagecount="1"></list></rss>"#).unwrap(),
-            "xml-source",
-            1,
-            20,
-        );
-        assert!(empty.items.is_empty());
-        assert!(!should_retry_for_covers(
-            SiteAdapterKind::XmlHttp,
-            false,
-            &empty
-        ));
+        // Plain CMS adapters have no declared parameters to apply.
+        let cms = detail_params(SiteAdapterKind::JsonHttp, "1", ext);
+        assert_eq!(cms.len(), 2);
     }
 
     /// The fallback path must still be able to ask for the slim listing.
@@ -1261,13 +1269,393 @@ mod tests {
         assert!(params.contains(&("t".to_string(), "电影".to_string())));
     }
 
-    /// Extension sources declare their own `ac` through `ext`, so they must keep the `list`
-    /// default rather than silently inheriting the JSON CMS switch.
+    /// Extension sources list with `list`, but the enrichment may ask for `detail`.
+    ///
+    /// The default is `list` because an extension source declares its own conventions. That is not
+    /// the same as declaring an `ac`, though: the real `采集集合` source carries the scalar ext `"0"`
+    /// and says nothing about `ac`, so the default is all it gets — and its `list` listing has no
+    /// covers and no play addresses. The enrichment therefore has to be able to ask for `detail`.
     #[test]
-    fn extension_params_keep_the_list_default() {
-        let params = extension_params(String::new(), None, 1, 20, None);
+    fn extension_params_default_to_list_but_can_be_asked_for_detail() {
+        let listing = extension_params("list", String::new(), None, 1, 20, None);
+        assert!(listing.contains(&("ac".to_string(), "list".to_string())));
 
-        assert!(params.contains(&("ac".to_string(), "list".to_string())));
+        let detail = extension_params("detail", String::new(), None, 1, 20, None);
+        assert!(detail.contains(&("ac".to_string(), "detail".to_string())));
+    }
+
+    /// The enrichment must keep an extension source's declared parameters.
+    ///
+    /// Building that request with the plain CMS helper would drop them, which is the reason the
+    /// enrichment was originally disabled for this adapter — the fix is to route both requests
+    /// The listing request and the detail shape must both carry the declared parameters.
+    ///
+    /// Building either request with the plain CMS helper would drop them, which is the reason the
+    /// enrichment was originally disabled for this adapter — the fix is to route both through
+    /// `catalog_params`/`detail_params`, not to keep skipping the adapter.
+    #[test]
+    fn catalog_params_keep_extension_parameters_for_every_shape() {
+        let ext = Some(r#"{"params":{"token":"demo"}}"#.to_string());
+        let listing = catalog_params(
+            SiteAdapterKind::HttpExtension,
+            "list",
+            String::new(),
+            None,
+            1,
+            20,
+            ext.clone(),
+        );
+        let detail = catalog_params(
+            SiteAdapterKind::HttpExtension,
+            "detail",
+            String::new(),
+            None,
+            1,
+            20,
+            ext,
+        );
+
+        assert!(listing.contains(&("ac".to_string(), "list".to_string())));
+        assert!(detail.contains(&("ac".to_string(), "detail".to_string())));
+        for params in [&listing, &detail] {
+            assert!(
+                params.contains(&("token".to_string(), "demo".to_string())),
+                "the declared parameter must survive on both requests"
+            );
+        }
+    }
+
+    /// The real `采集集合` source: the library shows exactly what its listing said, covers and all.
+    ///
+    /// This deployment publishes no covers with its listing (0/20) while the per-work detail record
+    /// has them (20/20), so the library shows its own "暂无海报" state for these works instead of
+    /// going and fetching one detail record per card. That fan-out was measured — **6 762 ms for 20
+    /// requests against 26 207 ms for one page-wide request, for the same bytes** — and then
+    /// **rejected by the user**: twenty requests against a single host invites rate limiting, and a
+    /// library view must not be nondeterministic. Both halves of the fact are recorded here so that
+    /// the day the covers are wanted, the trade-off is already measured rather than rediscovered.
+    ///
+    /// Ignored by default because it needs the network.
+    #[test]
+    #[ignore = "requires network access"]
+    fn the_real_extension_source_publishes_no_covers_with_its_listing() {
+        let source = crate::SourceRecord {
+            key: "采集集合".to_string(),
+            name: "采集集合".to_string(),
+            source_type: "cms".to_string(),
+            script_archive_id: None,
+            source_dialect: None,
+            site_type: Some(4),
+            site_protocol: Some("http-extension".to_string()),
+            api: "http://zhangqun1818.serv00.net/cj/cjjh.php".to_string(),
+            logo: None,
+            description: None,
+            nsfw: false,
+            status: true,
+            ext: Some("0".to_string()),
+            extra: None,
+            jar: None,
+            epg: None,
+            searchable: true,
+            filterable: true,
+            capability: "supported".to_string(),
+            capability_note: "ok".to_string(),
+            test_status: None,
+            test_message: None,
+            tested_at: None,
+            test_item_count: None,
+            test_category_count: None,
+            test_duration_ms: None,
+            test_operations: Vec::new(),
+            enabled: true,
+            last_checked_at: "刚刚".to_string(),
+            request_count: 0,
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // The listing is the whole request the library makes: one call, fast, and — on this
+            // deployment — without covers.
+            let listed_at = Instant::now();
+            let page = super::browse_source(source.clone(), String::new(), None, 1, 20)
+                .await
+                .expect("the extension source browses");
+            println!(
+                "listing: items={} categories={} with_poster={} ms={}",
+                page.items.len(),
+                page.categories.len(),
+                page.items
+                    .iter()
+                    .filter(|item| !item.poster.trim().is_empty())
+                    .count(),
+                listed_at.elapsed().as_millis()
+            );
+            assert!(!page.items.is_empty(), "the listing must not be empty");
+            assert!(
+                !page.categories.is_empty(),
+                "the category list only exists in the listing, so it must arrive with it"
+            );
+            assert!(
+                page.items.iter().all(|item| item.poster.trim().is_empty()),
+                "this deployment's listing carries no covers — which is the whole point below"
+            );
+
+            // The covers are not missing from the source, they are behind a *per-work* request. That
+            // is the shape the library refuses to pay for, so this assertion is what keeps the fact
+            // honest: if it ever stops being true, the reason to look at covers at all has changed.
+            let first = page.items.first().expect("a first item");
+            let detail = super::get_detail(source, first.id.clone())
+                .await
+                .expect("a work's detail must not error")
+                .expect("a work must have a detail record");
+            println!(
+                "one work's detail: poster={} play_lines={}",
+                !detail.poster.trim().is_empty(),
+                detail.play_lines.len()
+            );
+            assert!(
+                !detail.poster.trim().is_empty(),
+                "the cover exists, but only behind the request the library does not make"
+            );
+        });
+    }
+
+    /// The real `采集集合` source: its category ids are NOT what its own `class` array claims.
+    ///
+    /// This is the user's screenshot. The source advertises `class` entries with `type_id` 1..32, but
+    /// asking for `t=1` returns **56 rows named "TV-无水印资源", "TV-电影天堂资源", …** — the
+    /// aggregate's own member sites, each carrying `vod_tag: "folder"`, no cover and no play address.
+    /// They were rendered as works, which is why the library showed a grid of coverless cards whose
+    /// names are sub-sites rather than films.
+    ///
+    /// The fix is to treat `vod_tag: folder` as what it says. Ignored by default (needs the network).
+    #[test]
+    #[ignore = "requires network access"]
+    fn the_real_extension_folder_rows_are_not_works() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // The default view: real works, with covers and play addresses.
+            let page = super::browse_source(diag_extension_source(), String::new(), None, 1, 20)
+                .await
+                .expect("the source browses");
+            println!(
+                "default: items={} total={} with_poster={}",
+                page.items.len(),
+                page.total,
+                page.items.iter().filter(|i| !i.poster.trim().is_empty()).count()
+            );
+            assert!(!page.items.is_empty());
+            assert!(
+                page.items.iter().all(|item| !item.name.starts_with("TV-")),
+                "a member site must never be rendered as a work"
+            );
+
+            // The category that returns the folder list: nothing must survive as a work.
+            let folders =
+                super::browse_source(diag_extension_source(), String::new(), Some("1".to_string()), 1, 20)
+                    .await
+                    .expect("the folder category answers");
+            println!("category 1: items={} total={}", folders.items.len(), folders.total);
+            assert!(
+                folders.items.is_empty(),
+                "the folder rows must be filtered out, got {}",
+                folders.items.len()
+            );
+            assert_eq!(
+                folders.total, 0,
+                "a page of nothing but folders must not still claim a work count"
+            );
+        });
+    }
+
+    /// The real `哆啦(XBPQ)` listing ships a lazy-load placeholder in `src`, not the cover.
+    ///
+    /// Measured: `<img class="b-lazy" src=".../img/load.gif" data-url="<the real cover>">`. The page
+    /// only swaps the attribute in with JavaScript, which a fetch never runs, so every one of its 146
+    /// cards rendered without a poster. Ignored by default (needs the network).
+    #[test]
+    #[ignore = "requires network access"]
+    fn the_real_xbpq_listing_now_carries_covers() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let page = super::browse_source(diag_xbpq_source(), String::new(), None, 1, 20)
+                .await
+                .expect("the source browses");
+            let with_poster = page
+                .items
+                .iter()
+                .filter(|item| !item.poster.trim().is_empty())
+                .count();
+            println!("items={} with_poster={}", page.items.len(), with_poster);
+            for item in page.items.iter().take(3) {
+                println!("   {} | {}", item.name, item.poster);
+            }
+            assert!(!page.items.is_empty());
+            assert_eq!(
+                with_poster,
+                page.items.len(),
+                "every card must carry a cover"
+            );
+            assert!(
+                page.items
+                    .iter()
+                    .all(|item| !item.poster.contains("load.gif")),
+                "the lazy-load placeholder must never be used as a cover"
+            );
+        });
+    }
+
+    fn diag_extension_source() -> crate::SourceRecord {
+        crate::SourceRecord {
+            key: "采集集合".to_string(),
+            name: "采集集合".to_string(),
+            source_type: "cms".to_string(),
+            script_archive_id: None,
+            source_dialect: None,
+            site_type: Some(4),
+            site_protocol: Some("http-extension".to_string()),
+            api: "http://zhangqun1818.serv00.net/cj/cjjh.php".to_string(),
+            logo: None,
+            description: None,
+            nsfw: false,
+            status: true,
+            ext: Some("0".to_string()),
+            extra: None,
+            jar: None,
+            epg: None,
+            searchable: true,
+            filterable: true,
+            capability: "supported".to_string(),
+            capability_note: "ok".to_string(),
+            test_status: None,
+            test_message: None,
+            tested_at: None,
+            test_item_count: None,
+            test_category_count: None,
+            test_duration_ms: None,
+            test_operations: Vec::new(),
+            enabled: true,
+            last_checked_at: "刚刚".to_string(),
+            request_count: 0,
+        }
+    }
+
+    fn diag_xbpq_source() -> crate::SourceRecord {
+        let ext = r#"{"请求头":"User-Agent$MOBILE_UA","编码":"UTF-8","主页url":"https://dora.xiaoxinbk.com/","数组":"class=\"card-img-bili\"&&</a>","标题":"alt=\"&&\"","图片":"https://p3.itc.cn/images01/20210326/93827cff964b4497a04f315ca47d530e.jpeg","链接":"href=\"&&\"","播放数组":"class=\"card-body button-list\"&&</div>","播放列表":"<a&&a>","播放链接":"href=\"&&\"","播放标题":".:雷蒙影视:.+>&&</","分类url":"https://www.dora-video.cn/search/sy/?niandai={year}&cat={class}&tag={cateId}&gaojijiansuo=1&zhuangtai={by}","分类":"全部$0#动画$20","剧情":"x","排序":"全部$0#完结$2"}"#;
+        crate::SourceRecord {
+            key: "csp_XBPQ_哆啦".to_string(),
+            name: "雷蒙影视 | 🍚哆啦(XBPQ)".to_string(),
+            source_type: "cms".to_string(),
+            script_archive_id: None,
+            source_dialect: None,
+            site_type: Some(3),
+            site_protocol: Some("xbpq".to_string()),
+            api: "csp_XBPQ".to_string(),
+            logo: None,
+            description: None,
+            nsfw: false,
+            status: true,
+            ext: Some(ext.to_string()),
+            extra: None,
+            jar: None,
+            epg: None,
+            searchable: true,
+            filterable: true,
+            capability: "supported".to_string(),
+            capability_note: "ok".to_string(),
+            test_status: None,
+            test_message: None,
+            tested_at: None,
+            test_item_count: None,
+            test_category_count: None,
+            test_duration_ms: None,
+            test_operations: Vec::new(),
+            enabled: true,
+            last_checked_at: "刚刚".to_string(),
+            request_count: 0,
+        }
+    }
+
+    /// A `vod_tag: folder` row is a container, not a work, and must not reach the library.
+    ///
+    /// This is the user's screenshot: the 采集集合 source's first category returned 56 rows named
+    /// "TV-无水印资源", "TV-电影天堂资源", … every one carrying `vod_tag: "folder"`, no cover and no
+    /// play address. They were listed as works.
+    #[test]
+    fn folder_rows_are_not_works() {
+        let page = parse_catalog_page(
+            &json!({
+                "total": 3,
+                "list": [
+                    { "vod_id": "0-0", "vod_name": "TV-无水印资源", "vod_tag": "folder" },
+                    { "vod_id": "0-1", "vod_name": "TV-电影天堂资源", "vod_tag": "folder" },
+                    { "vod_id": "0-2", "vod_name": "TV-量子资源", "vod_tag": "Folder" },
+                ],
+            }),
+            "采集集合",
+            1,
+            20,
+        );
+
+        assert!(
+            page.items.is_empty(),
+            "folder rows must be filtered out, got {:?}",
+            page.items.iter().map(|i| &i.name).collect::<Vec<_>>()
+        );
+        // The payload's count included them, so leaving it would put "56 部" above an empty grid.
+        assert_eq!(page.total, 0);
+    }
+
+    /// A normal work must survive the folder filter untouched.
+    ///
+    /// The guard keys on `vod_tag` alone, so a source that does not use the field at all — which is
+    /// almost all of them — must be unaffected, including one whose tag is some other value.
+    #[test]
+    fn ordinary_rows_are_unaffected_by_the_folder_filter() {
+        let page = parse_catalog_page(
+            &json!({
+                "total": 3,
+                "list": [
+                    { "vod_id": "1", "vod_name": "甲", "vod_pic": "https://img/a.jpg", "vod_play_url": "第1集$https://a.m3u8" },
+                    { "vod_id": "2", "vod_name": "乙", "vod_tag": "电影", "vod_play_url": "第1集$https://b.m3u8" },
+                    { "vod_id": "3", "vod_name": "丙", "vod_tag": "", "vod_play_url": "第1集$https://c.m3u8" },
+                ],
+            }),
+            "source",
+            1,
+            20,
+        );
+
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.total, 3, "a page with works keeps the source's own total");
+    }
+
+    /// A mixed page keeps the source's total: only a wholly-folder page is re-counted.
+    #[test]
+    fn a_mixed_page_keeps_the_sources_total() {
+        let page = parse_catalog_page(
+            &json!({
+                "total": 40,
+                "list": [
+                    { "vod_id": "0-0", "vod_name": "TV-某资源", "vod_tag": "folder" },
+                    { "vod_id": "1", "vod_name": "甲", "vod_play_url": "第1集$https://a.m3u8" },
+                ],
+            }),
+            "source",
+            1,
+            20,
+        );
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.total, 40);
     }
 
     /// `vod_content` is rich text; some sources return markup and the UI renders descriptions
@@ -1322,71 +1710,6 @@ mod tests {
         );
 
         assert_eq!(page.items[0].area, "");
-    }
-
-    /// The cover retry must not cost the category list. Measured on a real deployment:
-    /// `at/xml/?ac=detail` returned a cover for all 20 items but **zero** `<ty>` categories,
-    /// while `?ac=list` returned 61. Replacing the listing with the detail page silently emptied
-    /// the category filter, so the two are merged.
-    #[test]
-    fn the_cover_retry_keeps_categories_the_detail_response_omits() {
-        let base = super::CatalogPage {
-            source_key: "xml-source".to_string(),
-            items: vec![],
-            categories: vec![
-                super::VodCategory {
-                    id: "6".to_string(),
-                    name: "动作片".to_string(),
-                },
-                super::VodCategory {
-                    id: "13".to_string(),
-                    name: "国产剧".to_string(),
-                },
-            ],
-            page: 1,
-            page_count: 7229,
-            page_size: 20,
-            total: 144_580,
-        };
-        let detail = super::CatalogPage {
-            source_key: "xml-source".to_string(),
-            items: vec![],
-            categories: vec![],
-            page: 1,
-            page_count: 7229,
-            page_size: 20,
-            total: 144_580,
-        };
-
-        let merged = super::merge_catalog_page(base, detail);
-        assert_eq!(merged.categories.len(), 2);
-        assert_eq!(merged.categories[0].name, "动作片");
-    }
-
-    /// When the detail response does carry its own categories, those win — they describe the
-    /// same page and are the more complete record.
-    #[test]
-    fn detail_categories_win_when_both_sides_have_them() {
-        let category = |id: &str, name: &str| super::VodCategory {
-            id: id.to_string(),
-            name: name.to_string(),
-        };
-        let page = |categories: Vec<super::VodCategory>| super::CatalogPage {
-            source_key: "xml-source".to_string(),
-            items: vec![],
-            categories,
-            page: 1,
-            page_count: 1,
-            page_size: 20,
-            total: 0,
-        };
-
-        let merged = super::merge_catalog_page(
-            page(vec![category("1", "旧分类")]),
-            page(vec![category("2", "新分类")]),
-        );
-        assert_eq!(merged.categories.len(), 1);
-        assert_eq!(merged.categories[0].name, "新分类");
     }
 
     #[test]

@@ -5,15 +5,8 @@ import { ChannelLogo } from "@/components/channel-logo";
 import { ClearRecordsDialog } from "@/components/clear-records-dialog";
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "@/components/ui/empty";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
+import { CollectionEmpty } from "@/features/browse/collection-empty";
 import {
   Chip,
   ColumnEmpty,
@@ -112,24 +105,13 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
       >
         <div className="px-6 py-5">
           {isEmpty ? (
-            <div className="flex h-96 items-center justify-center">
-              <Empty className="max-w-md border-border/40 bg-card/20 py-8">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon">
-                    <Footprints className="size-4 text-primary" aria-hidden="true" />
-                  </EmptyMedia>
-                  <EmptyTitle className="text-sm">还没有足迹</EmptyTitle>
-                  <EmptyDescription className="text-xs">
-                    在影视库点开任意影片，或在电视直播里选择频道，这里就会按时间记下你到过的地方。
-                  </EmptyDescription>
-                </EmptyHeader>
-                <EmptyContent>
-                  <Button type="button" size="sm" onClick={() => onNavigate("browse")}>
-                    去影视库看看
-                  </Button>
-                </EmptyContent>
-              </Empty>
-            </div>
+            <CollectionEmpty
+              icon={<Footprints className="size-4 text-primary" aria-hidden="true" />}
+              title="还没有足迹"
+              description="在影视库点开任意影片，或在电视直播里选择频道，这里就会按时间记下你到过的地方。"
+              actionLabel="去影视库看看"
+              onAction={() => onNavigate("browse")}
+            />
           ) : (
             /* Two independent columns. Each keeps its own heading and its own empty state, so a
                column with nothing in it still explains itself instead of collapsing and leaving

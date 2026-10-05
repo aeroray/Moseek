@@ -1,8 +1,9 @@
-import { lazy, Suspense, useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 
 import { AppShell } from "@/components/app-shell";
 import { ToastHost } from "@/components/toast-host";
 import { ToastProvider } from "@/components/ui/toast";
+import { ViewPane } from "@/components/view-pane";
 import {
   isTauriRuntime,
   listConfigDocuments,
@@ -106,35 +107,80 @@ function App() {
     setActiveView(view);
   };
 
+  /**
+   * The views that have been opened at least once.
+   *
+   * The first visit mounts a view and loads normally — that is the expected behaviour, and eagerly
+   * mounting all six would fire every view's initial requests at launch. Once visited, a view stays
+   * mounted (hidden) so returning to it keeps its search, its page, its selection and its scroll
+   * position. This is the in-session rule only: closing the app discards all of it, which is what
+   * the user asked for.
+   *
+   * Seeded with the active view so the first render mounts something even if it is not "browse" —
+   * the store persists `activeView`, so a user who left the app in 电视直播 reopens there.
+   */
+  const [visitedViews, setVisitedViews] = useState<ViewKey[]>(() => [activeView]);
+  useEffect(() => {
+    setVisitedViews((current) =>
+      current.includes(activeView) ? current : [...current, activeView],
+    );
+  }, [activeView]);
+
   return (
     <ToastProvider>
       <ToastHost>
         <AppShell activeView={activeView} onNavigate={navigate}>
           <Suspense fallback={<ViewLoading />}>
-            {activeView === "config" && <ConfigCenter />}
-            {activeView === "settings" && (
-              <SettingsView
-                theme={theme}
-                onThemeChange={setTheme}
-                autoEpgEnabled={autoEpgEnabled}
-                onAutoEpgEnabledChange={setAutoEpgEnabled}
-                historyCounts={{
-                  vod: history.filter((record) => record.kind === "vod").length,
-                  live: history.filter((record) => record.kind === "live").length,
-                }}
-                favoriteCounts={{
-                  vod: favorites.length,
-                  live: liveFavorites.length,
-                }}
-                progressCount={Object.keys(playbackProgress).length}
-                onClearHistory={clearHistory}
-                onClearFavorites={clearFavorites}
-              />
-            )}
-            {activeView === "browse" && <BrowseView onNavigate={navigate} />}
-            {activeView === "live" && <LiveView />}
-            {activeView === "favorites" && <FavoritesView onNavigate={navigate} />}
-            {activeView === "history" && <HistoryView onNavigate={navigate} />}
+            {/* The workspace is `relative` so each pane can fill it without the panes stacking in
+                normal flow; `ViewPane` carries the reasoning for keeping them mounted at all. */}
+            <div className="relative h-full w-full">
+              {visitedViews.includes("browse") && (
+                <ViewPane active={activeView === "browse"}>
+                  <BrowseView onNavigate={navigate} />
+                </ViewPane>
+              )}
+              {visitedViews.includes("live") && (
+                <ViewPane active={activeView === "live"}>
+                  <LiveView />
+                </ViewPane>
+              )}
+              {visitedViews.includes("favorites") && (
+                <ViewPane active={activeView === "favorites"}>
+                  <FavoritesView onNavigate={navigate} />
+                </ViewPane>
+              )}
+              {visitedViews.includes("history") && (
+                <ViewPane active={activeView === "history"}>
+                  <HistoryView onNavigate={navigate} />
+                </ViewPane>
+              )}
+              {visitedViews.includes("config") && (
+                <ViewPane active={activeView === "config"}>
+                  <ConfigCenter />
+                </ViewPane>
+              )}
+              {visitedViews.includes("settings") && (
+                <ViewPane active={activeView === "settings"}>
+                  <SettingsView
+                    theme={theme}
+                    onThemeChange={setTheme}
+                    autoEpgEnabled={autoEpgEnabled}
+                    onAutoEpgEnabledChange={setAutoEpgEnabled}
+                    historyCounts={{
+                      vod: history.filter((record) => record.kind === "vod").length,
+                      live: history.filter((record) => record.kind === "live").length,
+                    }}
+                    favoriteCounts={{
+                      vod: favorites.length,
+                      live: liveFavorites.length,
+                    }}
+                    progressCount={Object.keys(playbackProgress).length}
+                    onClearHistory={clearHistory}
+                    onClearFavorites={clearFavorites}
+                  />
+                </ViewPane>
+              )}
+            </div>
           </Suspense>
         </AppShell>
       </ToastHost>
