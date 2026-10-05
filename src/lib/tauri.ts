@@ -268,10 +268,14 @@ export interface ExportedConfigFile {
  * Resolves to `null` when the user dismisses the dialog, which is not a failure. The previous
  * approach built a blob URL and clicked a detached anchor, which silently did nothing in this
  * webview — see the Rust side for the mechanism.
+ *
+ * `text` is the finished document. The caller supplies it because an export also carries the parts
+ * that are not configuration (favourites, theme), and those live in the webview's storage.
  */
-export async function exportConfigFile(documentId?: number) {
+export async function exportConfigFile(text: string, documentId?: number) {
   return invokeCommand<ExportedConfigFile | null>("export_config_file", {
     documentId: documentId ?? null,
+    text,
   });
 }
 

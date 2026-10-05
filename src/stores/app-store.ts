@@ -312,6 +312,21 @@ interface AppStore {
   toggleLiveFavorite: (channel: LiveChannel, sourceName?: string) => void;
   /** Replaces a favourite's snapshot after its episodes were refreshed from a live source. */
   refreshFavorite: (key: string, item: VodItem) => void;
+  /**
+   * Folds favourites carried by an imported configuration into the current lists.
+   *
+   * **Merges rather than replaces, and that is the whole design.** An import is a merge everywhere
+   * else in this app — sources are folded in, duplicates are skipped — and favourites are the one
+   * collection a user cannot reconstruct: replacing them would silently destroy what they had
+   * before they pasted a file. Entries already present (same key) are kept as they are, so the
+   * local progress on a favourite is not overwritten by the copy that travelled.
+   *
+   * Returns how many were added, so the caller can say so instead of claiming a silent success.
+   */
+  restoreFavorites: (incoming: {
+    favorites?: VodFavorite[];
+    liveFavorites?: LiveFavorite[];
+  }) => { vod: number; live: number };
 }
 
 export const useAppStore = create<AppStore>()(
@@ -683,6 +698,34 @@ export const useAppStore = create<AppStore>()(
             ],
           };
         }),
+      restoreFavorites: (incoming) => {
+        let addedVod = 0;
+        let addedLive = 0;
+        set((state) => {
+          // Existing keys win, so a favourite's local progress survives the import.
+          const vodKeys = new Set(state.favorites.map((favorite) => favorite.key));
+          const liveKeys = new Set(
+            state.liveFavorites.map((favorite) => favorite.key),
+          );
+          const incomingVod = (incoming.favorites ?? []).filter(
+            (favorite) => !vodKeys.has(favorite.key),
+          );
+          const incomingLive = (incoming.liveFavorites ?? []).filter(
+            (favorite) => !liveKeys.has(favorite.key),
+          );
+          addedVod = incomingVod.length;
+          addedLive = incomingLive.length;
+          if (addedVod === 0 && addedLive === 0) return {};
+          return {
+            // Appended rather than prepended: the list is ordered newest-first, and an imported
+            // favourite was not saved now. Claiming otherwise would reorder a user's collection to
+            // put a file's contents on top.
+            favorites: [...state.favorites, ...incomingVod],
+            liveFavorites: [...state.liveFavorites, ...incomingLive],
+          };
+        });
+        return { vod: addedVod, live: addedLive };
+      },
     }),
     {
       name: "moseek-app-state",

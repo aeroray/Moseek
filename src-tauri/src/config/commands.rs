@@ -375,18 +375,26 @@ pub struct ExportedConfig {
 pub async fn export_config_file(
     app: tauri::AppHandle,
     document_id: Option<i64>,
+    // The text to write, when the caller has already assembled it. The frontend uses this to fold in
+    // the parts of an export that are not configuration (favourites, theme) — it owns those, they
+    // live in the webview's storage, and passing the finished text keeps one write path here rather
+    // than a second "write these bytes" command with its own dialog.
+    text: Option<String>,
     state: State<'_, AppDatabase>,
 ) -> Result<Option<ExportedConfig>, String> {
     // Read the text and release the lock before awaiting the dialog: the guard is not held across
     // the await, so a slow decision by the user cannot block every other database command.
-    let text = {
-        let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
-        let document = match document_id {
-            Some(id) => storage::load_config_document(&connection, id)?,
-            None => storage::load_active_document(&connection)?,
+    let text = match text {
+        Some(text) => text,
+        None => {
+            let connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+            let document = match document_id {
+                Some(id) => storage::load_config_document(&connection, id)?,
+                None => storage::load_active_document(&connection)?,
+            }
+            .ok_or_else(|| "没有可导出的配置".to_string())?;
+            document.normalized_config
         }
-        .ok_or_else(|| "没有可导出的配置".to_string())?;
-        document.normalized_config
     };
 
     let (sender, receiver) = tokio::sync::oneshot::channel();

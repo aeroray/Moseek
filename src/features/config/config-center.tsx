@@ -105,6 +105,10 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  attachExportExtras,
+  readExportExtras,
+} from "@/features/config/config-extras";
+import {
   absolutizeRelativeSites,
   mergeRawConfigs,
   mergeSourceLists,
@@ -312,6 +316,13 @@ export function ConfigCenter() {
   const setSourceFilter = useAppStore((state) => state.setSourceFilter);
   const isFilterOpen = useAppStore((state) => state.isSourceFilterOpen);
   const setIsFilterOpen = useAppStore((state) => state.setSourceFilterOpen);
+  // Favourites and the theme travel in an export under a namespaced key. The store owns them; this
+  // page is where an export is assembled and where an import is read back.
+  const theme = useAppStore((state) => state.theme);
+  const favorites = useAppStore((state) => state.favorites);
+  const liveFavorites = useAppStore((state) => state.liveFavorites);
+  const setTheme = useAppStore((state) => state.setTheme);
+  const restoreFavorites = useAppStore((state) => state.restoreFavorites);
   const [adapterFilter, setAdapterFilter] = useState<AdapterFilter>("all");
   const [adapterQuery, setAdapterQuery] = useState("");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
@@ -1966,6 +1977,38 @@ export function ConfigCenter() {
           : `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`),
     });
     setImportOpen(false);
+    // Favourites and the theme, if this file carries them. Read after the configuration has been
+    // committed, so a malformed extras block cannot stop the import itself from happening — the
+    // sources are the reason the user pasted the file.
+    applyImportedExtras(mergedRawText);
+  };
+
+  /**
+   * Folds the non-configuration part of an imported file into the store.
+   *
+   * Only the fields the file actually carries are touched: a configuration written by someone else
+   * has no `moseek` key at all, and one that mentions favourites but not a theme must not reset the
+   * theme to a default nobody chose.
+   */
+  const applyImportedExtras = (text: string) => {
+    const extras = readExportExtras(text);
+    if (!extras) return;
+    if (extras.theme) setTheme(extras.theme);
+    const added = restoreFavorites({
+      favorites: extras.favorites,
+      liveFavorites: extras.liveFavorites,
+    });
+    if (added.vod > 0 || added.live > 0) {
+      const parts = [
+        added.vod > 0 ? `影视收藏 ${added.vod} 项` : null,
+        added.live > 0 ? `直播收藏 ${added.live} 项` : null,
+      ].filter(Boolean);
+      toast({
+        variant: "success",
+        title: "已恢复收藏",
+        description: `从这份配置里恢复了${parts.join("、")}；已有的收藏保持不变。`,
+      });
+    }
   };
 
   const handleParse = async () => {
@@ -2008,14 +2051,29 @@ export function ConfigCenter() {
     // see `export_config_file` for the mechanism. Every outcome is now stated, including the one
     // where the user changes their mind.
     try {
-      const saved = await exportConfigFile(activeConfigId ?? undefined);
+      // Favourites and the theme are not configuration — TVBox has no notion of either — so they
+      // travel under a namespaced key that other clients ignore and that this app reads back on
+      // import. 足迹 is deliberately not included: it records where this machine has been.
+      const text = attachExportExtras(
+        normalizedConfig || JSON.stringify({ sites: sources, lives: [] }, null, 2),
+        { schemaVersion: 1, theme, favorites, liveFavorites },
+      );
+      const saved = await exportConfigFile(text, activeConfigId ?? undefined);
       if (!saved) {
         // A dismissed dialog is an ordinary outcome, not a failure, so nothing is reported.
         return;
       }
+      const extras = [
+        favorites.length > 0 || liveFavorites.length > 0
+          ? `收藏 ${favorites.length + liveFavorites.length} 项`
+          : null,
+        theme ? "主题偏好" : null,
+      ].filter(Boolean);
       setParseState({
         type: "success",
-        message: `已导出到 ${saved.path}（${Math.round(saved.bytes / 1024)} KB）`,
+        message:
+          `已导出到 ${saved.path}（${Math.round(saved.bytes / 1024)} KB）` +
+          (extras.length > 0 ? `，含${extras.join("、")}` : ""),
       });
     } catch (error) {
       setParseState({

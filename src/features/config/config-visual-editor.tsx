@@ -289,6 +289,13 @@ function SectionBlock({
           <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
         )}
         <span className="text-sm font-medium text-foreground">{section.title}</span>
+        <Badge
+          variant="destructive"
+          className="px-1 py-0 text-[10px] font-normal leading-4"
+          title="必需：Moseek 的影视库、电视直播和播放兜底都从这三段里读取内容，缺少哪一段，对应的功能就没有数据。"
+        >
+          必需
+        </Badge>
         <Badge variant="secondary" className="tabular-nums">
           {section.entries.length}
         </Badge>
@@ -583,6 +590,33 @@ function EntryRow({
   );
 }
 
+/**
+ * Says whether a field is required or optional, in words.
+ *
+ * It used to be a bare red `*`, which answers "is this required?" only for someone who already knows
+ * the convention — and it says nothing at all about the other fields. The user asked to be able to
+ * tell at a glance which fields the app cannot run without, so both states are now labelled, and the
+ * required one carries the reason in its title rather than just the fact.
+ *
+ * "必需" rather than "必填" for the required case: what makes a field required here is that the entry
+ * cannot work without it, not that a form will refuse to submit.
+ */
+function FieldRequirementBadge({ required }: { required: boolean }) {
+  return (
+    <Badge
+      variant={required ? "destructive" : "secondary"}
+      className="px-1 py-0 text-[10px] font-normal leading-4"
+      title={
+        required
+          ? "必需字段：缺少它这个条目无法工作，删除后会被标记为无效。"
+          : "可选字段：留空或不填都不影响这个条目运行。"
+      }
+    >
+      {required ? "必需" : "可选"}
+    </Badge>
+  );
+}
+
 /** One editable field. */
 function FieldRow({
   field,
@@ -609,7 +643,7 @@ function FieldRow({
       <label className="flex items-center justify-between gap-2 rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5">
         <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <span className="font-mono">{field.name}</span>
-          {field.required && <span className="text-destructive">*</span>}
+          <FieldRequirementBadge required={field.required} />
         </span>
         <Switch
           size="sm"
@@ -625,11 +659,7 @@ function FieldRow({
     <label className="flex flex-col gap-1">
       <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <span className="font-mono">{field.name}</span>
-        {field.required && (
-          <span className="text-destructive" title="必填">
-            *
-          </span>
-        )}
+        <FieldRequirementBadge required={field.required} />
       </span>
       {field.kind === "json" ? (
         <textarea
@@ -698,7 +728,16 @@ function SettingsBlock({
     <section className="rounded-lg border border-border/70 bg-card/40 p-3">
       <div className="mb-2 flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <h3 className="text-sm font-medium text-foreground">其他设置</h3>
+          <h3 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+            其他设置
+            <Badge
+              variant="secondary"
+              className="px-1 py-0 text-[10px] font-normal leading-4"
+              title="这些设置只对 TVBox 客户端有意义，Moseek 不读取，导出时也不会带上。"
+            >
+              非必需
+            </Badge>
+          </h3>
           <p className="mt-0.5 text-xs leading-5 text-muted-foreground">
             TVBox 客户端的设置：解码器、广告过滤、壁纸等。Moseek 不读取它们，导出时也不会带上。
           </p>

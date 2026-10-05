@@ -55,8 +55,13 @@ describe("reading a configuration into the visual model", () => {
       "searchable",
       "filterable",
     ]);
-    // A source without key/name/api cannot be built into a request, so they are required.
-    expect(sites.entries[0].fields.find((f) => f.name === "key")?.required).toBe(true);
+    // Only the address is required: the parser falls back to `id` and then numbers a keyless entry
+    // (`invalid-N`), and names a nameless one `未命名源 N`, so those entries still load and still
+    // play. Marking them 必需 would tell the user to keep a field that changes nothing — which is
+    // what the editor did before this was settled against the parser.
+    expect(sites.entries[0].fields.find((f) => f.name === "api")?.required).toBe(true);
+    expect(sites.entries[0].fields.find((f) => f.name === "key")?.required).toBe(false);
+    expect(sites.entries[0].fields.find((f) => f.name === "name")?.required).toBe(false);
     expect(sites.entries[0].fields.find((f) => f.name === "jar")?.required).toBe(false);
   });
 

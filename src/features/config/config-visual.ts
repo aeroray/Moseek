@@ -17,11 +17,18 @@ import { rawFlagFields } from "@/features/config/config-schema";
  * unreadable, while the same 340 as a list of named rows are not.
  */
 
-/** The arrays whose entries are things a user manages individually. */
+/**
+ * The arrays whose entries are things a user manages individually.
+ *
+ * All three are 必需: the library reads `sites`, the live workspace reads `lives`, and the playback
+ * fallback reads `parses`. A configuration missing one of them still imports — the others keep
+ * working — but the feature that reads it has nothing to show, which is why the editor labels them
+ * rather than leaving the user to discover it.
+ */
 export const visualSections = [
-  { key: "sites", title: "影视源", hint: "点播接口，提供搜索、分类与播放地址。" },
-  { key: "lives", title: "直播源", hint: "频道列表，提供直播与节目单。" },
-  { key: "parses", title: "解析服务", hint: "把播放页地址解析成可直接播放的地址。" },
+  { key: "sites", title: "影视源", hint: "必需。点播接口，提供搜索、分类与播放地址。" },
+  { key: "lives", title: "直播源", hint: "必需。频道列表，提供直播与节目单。" },
+  { key: "parses", title: "解析服务", hint: "必需。把播放页地址解析成可直接播放的地址。" },
 ] as const;
 
 export type VisualSectionKey = (typeof visualSections)[number]["key"];
@@ -94,11 +101,28 @@ export interface VisualConfigError {
 
 export type VisualConfigResult = VisualConfig | VisualConfigError;
 
-/** The fields offered per section, and which of them an entry needs. */
+/**
+ * The fields offered per section, and which of them an entry needs.
+ *
+ * **"Required" here means one thing only: without it the entry cannot work.** It is not "the parser
+ * will complain" and not "the app prefers it" — both were true of fields marked required before, and
+ * marking those as 必需 would tell the user to keep a field that changes nothing. Each entry below is
+ * settled against the parser rather than by intuition:
+ *
+ *  - `sites.key` / `sites.name` are **optional**: the parser falls back to `id`, then numbers the
+ *    entry (`invalid-N`), and names it `未命名源 N`. The source still loads and still plays; it is
+ *    just harder to recognise. (`key` being absent does mean the source reads as `invalid` to
+ *    `classifySource`, which is why leaving it out is worth warning about — but it is a quality
+ *    problem, not a broken entry, and the two must not be labelled the same.)
+ *  - `sites.api` is required: it is the address everything else is fetched from.
+ *  - `lives.url` is required for the same reason; `lives.name` is not — the parser names it
+ *    `直播源 N`.
+ *  - `parses.url` is required; `parses.type` is not, because the resolver reads the address.
+ */
 const sectionFields: Record<VisualSectionKey, { name: string; required: boolean }[]> = {
   sites: [
-    { name: "key", required: true },
-    { name: "name", required: true },
+    { name: "key", required: false },
+    { name: "name", required: false },
     { name: "api", required: true },
     { name: "type", required: false },
     { name: "ext", required: false },
@@ -107,7 +131,7 @@ const sectionFields: Record<VisualSectionKey, { name: string; required: boolean 
     { name: "filterable", required: false },
   ],
   lives: [
-    { name: "name", required: true },
+    { name: "name", required: false },
     { name: "url", required: true },
     { name: "key", required: false },
     { name: "type", required: false },
@@ -116,8 +140,8 @@ const sectionFields: Record<VisualSectionKey, { name: string; required: boolean 
     { name: "group", required: false },
   ],
   parses: [
-    { name: "name", required: true },
-    { name: "type", required: true },
+    { name: "name", required: false },
+    { name: "type", required: false },
     { name: "url", required: true },
     { name: "ext", required: false },
   ],
@@ -374,7 +398,15 @@ export function updateVisualEntryField(
   return { text, error: null };
 }
 
-/** Adds a new entry to a section, with the minimum the section needs. */
+/**
+ * Adds a new entry to a section.
+ *
+ * Writes the required fields **and** the identifying ones, all empty. Only the required field is
+ * strictly needed for the entry to work, but a new row that carries just an address renders as
+ * `invalid-N` named `未命名源 N` the moment it is created — which reads as a broken entry rather than
+ * an unfinished one, and gives the user nothing to click on to fix it. Pre-filling `key` and `name`
+ * keeps the row visibly unfinished and self-explanatory, which is the state a user is about to edit.
+ */
 export function addVisualEntry(
   rawText: string,
   section: VisualSectionKey,
@@ -383,7 +415,7 @@ export function addVisualEntry(
   const list = Array.isArray(parsed[section]) ? (parsed[section] as unknown[]) : [];
   const entry: Record<string, unknown> = {};
   for (const field of sectionFields[section]) {
-    if (!field.required) continue;
+    if (!field.required && !IDENTIFYING_FIELDS.has(field.name)) continue;
     // A placeholder rather than an empty string: the entry is visibly unfinished in the list, and
     // the required-field rule means it cannot be saved blank either.
     entry[field.name] = "";
@@ -392,6 +424,14 @@ export function addVisualEntry(
   parsed[section] = list;
   return serialize(parsed);
 }
+
+/**
+ * The fields that name an entry, so a freshly added row is identifiable while it is being filled in.
+ *
+ * Not "required" — the parser supplies fallbacks for both — but leaving them out is what made a new
+ * row look broken instead of blank.
+ */
+const IDENTIFYING_FIELDS = new Set(["key", "name"]);
 
 /** Sets one top-level setting. */
 export function updateVisualSetting(
