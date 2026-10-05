@@ -1,0 +1,90 @@
+name: Release
+
+# Pushing a SemVer tag (for example v0.2.0) builds the Windows installer, signs it, publishes a
+# GitHub Release, and uploads `latest.json` for in-app updates.
+#
+# The same job can be run by hand against an existing tag. `workflow_dispatch` exists because a build
+# can fail for a reason unrelated to the code (a runner image change, a transient network fault), and
+# re-running it must not require deleting and re-pushing the tag.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已有的 SemVer 标签，例如 v0.2.0"
+        required: true
+        type: string
+
+permissions:
+  # Required to create the Release and upload its assets.
+  contents: write
+
+jobs:
+  release:
+    # Windows only: the app ships an NSIS installer, and a second platform would double the build
+    # time to produce an artifact nothing consumes.
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache the Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Every place the version lives must agree before anything is built. If they drift, the app
+      # reports one version, the installer carries another, and the updater compares against a third
+      # — which shows up as "已是最新版本" on a build that is not, or as an update that reinstalls
+      # itself forever. Failing here is much cheaper than shipping that.
+      - name: Verify the version matches the tag
+        run: |
+          node scripts/sync-version.mjs
+          node scripts/verify-release-version.mjs "${{ inputs.tag || github.ref_name }}"
+
+      - name: Load release notes
+        id: notes
+        run: node scripts/load-release-notes.mjs "${{ inputs.tag || github.ref_name }}"
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The private half of the minisign keypair whose public half is in tauri.conf.json. The
+          # installer is signed with it, and the app refuses to install anything that does not verify.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "Moseek · 拾影 ${{ inputs.tag || github.ref_name }}"
+          releaseBody: ${{ steps.notes.outputs.body }}
+          # Off because the notes are authored in docs/releases/<tag>.md. Leaving it on risks GitHub
+          # prepending an auto-generated commit list to them.
+          generateReleaseNotes: false
+          releaseDraft: false
+          prerelease: false
+          # Writes latest.json, the manifest the in-app updater reads.
+          uploadUpdaterJson: true
+          args: --bundles nsis

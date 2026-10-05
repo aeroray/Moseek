@@ -56,3 +56,10 @@ tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
+# In-app updates from GitHub Releases. The plugin verifies a minisign signature over the downloaded
+# installer against the public key in `tauri.conf.json`, so a tampered or substituted asset fails
+# verification instead of being installed.
+tauri-plugin-updater = "2"
+# Restarts the app after an update is installed, so the user is not left being told to restart by
+# hand after the installer has already replaced the files.
+tauri-plugin-process = "2"

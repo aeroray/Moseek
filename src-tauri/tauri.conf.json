@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -37,5 +38,16 @@
       "icons/icon.ico"
     ],
     "externalBin": ["binaries/moseek-script-runtime"]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1NEM0NEM3NjA4RDI3NzUKUldSMUo0MWd4MFJNNWRKVXBSWUJ2L2JtRUQ4akpYb2RMVkVjaGZxaWhZcVVsVkVGV2p5S3RCeHAK",
+      "endpoints": [
+        "https://github.com/aeroray/Moseek/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "quiet"
+      }
+    }
   }
 }

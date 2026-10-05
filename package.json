@@ -12,16 +12,21 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "typecheck": "tsc -b --pretty false",
-    "test": "vitest run"
+    "test": "vitest run",
+    "version:sync": "node scripts/sync-version.mjs",
+    "version:check": "node scripts/sync-version.mjs",
+    "release:check": "node scripts/verify-release-version.mjs"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
     "@codemirror/state": "^6.7.4",
     "@tanstack/react-query": "^5.90.2",
     "@tanstack/react-virtual": "^3.14.13",
-    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/api": "^2.12.1",
     "@tauri-apps/plugin-opener": "^2.5.5",
+    "@tauri-apps/plugin-process": "^2.4.0",
     "@tauri-apps/plugin-shell": "^2.3.6",
+    "@tauri-apps/plugin-updater": "^2.13.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

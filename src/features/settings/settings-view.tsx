@@ -4,6 +4,7 @@ import {
   ChevronDown,
   FileUp,
   HardDrive,
+  Info,
   MonitorCog,
   Moon,
   Palette,
@@ -53,11 +54,21 @@ import {
 } from "@/lib/tauri";
 import type { ScriptExecutionLog } from "@/lib/tauri";
 import { cn, errorMessage } from "@/lib/utils";
+import { AppUpdatePanel } from "@/features/update/app-update-panel";
 import type {
   FootprintKind,
   ScriptArchiveSummary,
   ThemeMode,
 } from "@/types/moseek";
+
+/**
+ * The running version, injected at build time from `package.json`.
+ *
+ * Read from the bundle rather than hard-coded so it cannot drift from the version the installer and
+ * the update manifest agree on — a panel that displayed a version differing from the one the updater
+ * compares would make "已是最新版本" untrustworthy.
+ */
+const APP_VERSION = __APP_VERSION__;
 
 interface SettingsViewProps {
   theme: ThemeMode;
@@ -329,6 +340,10 @@ export function SettingsView({
             <TabsTrigger value="storage" className="gap-1.5">
               <HardDrive className="size-3.5" data-icon="inline-start" aria-hidden="true" />
               存储
+            </TabsTrigger>
+            <TabsTrigger value="about" className="gap-1.5">
+              <Info className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+              关于
             </TabsTrigger>
           </TabsList>
 
@@ -789,6 +804,15 @@ export function SettingsView({
                 </CardContent>
               </Card>
             </SettingsScrollBody>
+          </TabsContent>
+
+          <TabsContent value="about" className="flex min-h-0 flex-1 flex-col">
+            <SettingsCard
+              title="关于与更新"
+              description="从 GitHub Releases 检查新版本。下载的安装包会先校验签名，校验不通过不会被安装。"
+            >
+              <AppUpdatePanel currentVersion={APP_VERSION} />
+            </SettingsCard>
           </TabsContent>
         </Tabs>
       </div>

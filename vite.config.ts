@@ -1,4 +1,5 @@
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -6,9 +7,23 @@ import { defineConfig } from "vite";
 
 const rootDirectory = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * The app version, read from `package.json` and injected as a literal.
+ *
+ * The settings page displays it, and the updater compares the running version against the manifest
+ * to decide whether an update exists. Reading one source means the number on screen cannot disagree
+ * with the number the comparison used — a hard-coded copy would eventually do exactly that.
+ */
+const packageJson = JSON.parse(
+  readFileSync(path.resolve(rootDirectory, "./package.json"), "utf8"),
+) as { version: string };
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
+  define: {
+    __APP_VERSION__: JSON.stringify(packageJson.version),
+  },
   resolve: {
     alias: {
       "@": path.resolve(rootDirectory, "./src"),
