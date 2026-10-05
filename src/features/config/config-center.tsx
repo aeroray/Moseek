@@ -48,6 +48,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
+import { SearchInput } from "@/components/search-input";
 import {
   Card,
   CardContent,
@@ -2372,20 +2373,12 @@ export function ConfigCenter() {
                     instead of squeezing the search box. */}
                 <div className="mt-4 flex flex-col gap-2">
                   <div className="flex items-center gap-2">
-                    <div className="relative min-w-0 flex-1">
-                      <Search
-                        className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
-                        data-icon="inline-start"
-                        aria-hidden="true"
-                      />
-                      <Input
-                        size="sm"
-                        value={query}
-                        onChange={(event) => setQuery(event.target.value)}
-                        placeholder="搜索源名称或 API"
-                        className="pl-8"
-                      />
-                    </div>
+                    <SearchInput
+                      value={query}
+                      onValueChange={setQuery}
+                      placeholder="搜索源名称或 API"
+                      aria-label="搜索源名称或 API"
+                    />
                     <SourceFilterTrigger
                       activeGroupCount={activeFilterGroupCount(sourceFilter)}
                       open={isFilterOpen}
@@ -2481,20 +2474,12 @@ export function ConfigCenter() {
                     filter already did; they now ride inside the filter options, where the number
                     answers "how many rows will this give me" at the moment of choosing. */}
                 <div className="mt-4 flex items-center gap-2">
-                  <div className="relative min-w-0 flex-1">
-                    <Search
-                      className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground/60"
-                      data-icon="inline-start"
-                      aria-hidden="true"
-                    />
-                    <Input
-                      size="sm"
-                      value={adapterQuery}
-                      onChange={(event) => setAdapterQuery(event.target.value)}
-                      placeholder="搜索适配器名称或说明"
-                      className="pl-8"
-                    />
-                  </div>
+                  <SearchInput
+                    value={adapterQuery}
+                    onValueChange={setAdapterQuery}
+                    placeholder="搜索适配器名称或说明"
+                    aria-label="搜索适配器名称或说明"
+                  />
                   <Select
                     value={adapterFilter}
                     onValueChange={(value) =>

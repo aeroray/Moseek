@@ -8,7 +8,6 @@ import {
   CopyMinus,
   Info,
   Plus,
-  Search,
   Trash2,
 } from "lucide-react";
 
@@ -16,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { SearchInput } from "@/components/search-input";
 import { Switch } from "@/components/ui/switch";
 import {
   addVisualEntry,
@@ -138,17 +138,11 @@ export function ConfigVisualEditor({
         </div>
       )}
 
-      <div className="relative px-4">
-        <Search
-          className="absolute left-6 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground/60"
-          aria-hidden="true"
-        />
-        <Input
-          size="sm"
+      <div className="px-4">
+        <SearchInput
           value={query}
-          onChange={(event) => setQuery(event.target.value)}
+          onValueChange={setQuery}
           placeholder="搜索名称、标识或地址"
-          className="pl-8"
           aria-label="搜索配置项"
         />
       </div>

@@ -5,7 +5,6 @@ import { ChannelLogo } from "@/components/channel-logo";
 import { ClearRecordsDialog } from "@/components/clear-records-dialog";
 import { MediaPoster } from "@/components/media-poster";
 import { Button } from "@/components/ui/button";
-import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import { CollectionEmpty } from "@/features/browse/collection-empty";
 import {
   Chip,
@@ -96,50 +95,49 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
         }}
       />
 
-      <ScrollArea
-        className="min-h-0 flex-1"
-        // Radix wraps the viewport's children in an inline `display: table; min-width: 100%`
-        // element, which sizes to its content. That wrapper is why a centred column never
-        // centres: the table grows to the widest row and pins everything to the left.
-        viewportClassName="[&>div]:!block"
-      >
-        <div className="px-6 py-5">
-          {isEmpty ? (
-            <CollectionEmpty
-              icon={<Footprints className="size-4 text-primary" aria-hidden="true" />}
-              title="还没有足迹"
-              description="在影视库点开任意影片，或在电视直播里选择频道，这里就会按时间记下你到过的地方。"
-              actionLabel="去影视库看看"
-              onAction={() => onNavigate("browse")}
+      {/* **Each column scrolls on its own, from `lg` up.** The two lists are independent — films and
+          channels — so one shared scrollbar dragged the whole page to reach the bottom of either, and
+          scrolling one column carried the other's heading off screen. Below `lg` the columns stack
+          into a single axis and the page keeps the scrollbar: a nested scroll region there would trap
+          the wheel in whichever column the pointer happened to be over. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-5 lg:overflow-hidden">
+        {isEmpty ? (
+          <CollectionEmpty
+            icon={<Footprints className="size-4 text-primary" aria-hidden="true" />}
+            title="还没有足迹"
+            description="在影视库点开任意影片，或在电视直播里选择频道，这里就会按时间记下你到过的地方。"
+            actionLabel="去影视库看看"
+            onAction={() => onNavigate("browse")}
+          />
+        ) : (
+          /* Two independent columns. Each keeps its own heading and its own empty state, so a
+             column with nothing in it still explains itself instead of collapsing and leaving
+             the page looking half-built.
+             `lg:items-stretch` gives each column a definite height, which its own scroll region needs:
+             a percentage height inside an auto-height row resolves to `auto` and would simply render
+             the full list. `lg:min-h-0` stops that height being pushed past the page by its contents. */
+          <div className="mx-auto grid w-full max-w-7xl items-start gap-x-10 gap-y-8 lg:min-h-0 lg:flex-1 lg:grid-cols-2 lg:items-stretch">
+            <TimelineColumn
+              kind="vod"
+              title="影视"
+              icon={<Clapperboard className="size-3.5" aria-hidden="true" />}
+              records={vodRecords}
+              emptyHint="在影视库点开任意影片，这里就会记下你看到哪一集、用的是哪条线路。"
+              onNavigate={onNavigate}
             />
-          ) : (
-            /* Two independent columns. Each keeps its own heading and its own empty state, so a
-               column with nothing in it still explains itself instead of collapsing and leaving
-               the page looking half-built. */
-            <div className="mx-auto grid max-w-7xl items-start gap-x-10 gap-y-8 lg:grid-cols-2">
-              <TimelineColumn
-                kind="vod"
-                title="影视"
-                icon={<Clapperboard className="size-3.5" aria-hidden="true" />}
-                records={vodRecords}
-                emptyHint="在影视库点开任意影片，这里就会记下你看到哪一集、用的是哪条线路。"
-                onNavigate={onNavigate}
-              />
-              <TimelineColumn
-                kind="live"
-                // "电视直播", matching the navigation entry and the favourites tab. "电视" alone
-                // left the same thing with two names in one product.
-                title="电视直播"
-                icon={<Radio className="size-3.5" aria-hidden="true" />}
-                records={liveRecords}
-                emptyHint="在电视直播里选择频道，这里就会记下你看过哪些台。"
-                onNavigate={onNavigate}
-              />
-            </div>
-          )}
-        </div>
-        <ScrollBar />
-      </ScrollArea>
+            <TimelineColumn
+              kind="live"
+              // "电视直播", matching the navigation entry and the favourites tab. "电视" alone
+              // left the same thing with two names in one product.
+              title="电视直播"
+              icon={<Radio className="size-3.5" aria-hidden="true" />}
+              records={liveRecords}
+              emptyHint="在电视直播里选择频道，这里就会记下你看过哪些台。"
+              onNavigate={onNavigate}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -171,7 +169,7 @@ function TimelineColumn({
     <section
       role="region"
       aria-label={`${title}足迹`}
-      className="flex min-w-0 flex-col"
+      className="flex min-w-0 flex-col lg:min-h-0"
     >
       <ColumnHeader
         tone={kind}
@@ -190,28 +188,32 @@ function TimelineColumn({
           onAction={() => onNavigate(isVod ? "browse" : "live")}
         />
       ) : (
-        <div className="flex flex-col gap-4">
-          {groups.map((group, groupIndex) => (
-            <div key={group.key} className="flex flex-col">
-              <DayHeading label={group.label} />
-              <ol className="flex flex-col">
-                {group.records.map((record, index) => (
-                  <TimelineEntry
-                    key={record.id}
-                    record={record}
-                    // "Last" means last in the column, not last in this day. Passing the group's
-                    // own last index ended the rail at every day boundary, so a column with one
-                    // record per day — which is exactly what the 电视直播 column holds — drew no
-                    // line at all, and the two columns stopped looking like one component.
-                    isLast={
-                      groupIndex === groups.length - 1 &&
-                      index === group.records.length - 1
-                    }
-                  />
-                ))}
-              </ol>
-            </div>
-          ))}
+        /* The heading above stays put; only the entries scroll. The negative right margin gives the
+           scrollbar its own gutter so it does not sit over the timeline rail's end. */
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:-mr-2 lg:pr-2">
+          <div className="flex flex-col gap-4">
+            {groups.map((group, groupIndex) => (
+              <div key={group.key} className="flex flex-col">
+                <DayHeading label={group.label} />
+                <ol className="flex flex-col">
+                  {group.records.map((record, index) => (
+                    <TimelineEntry
+                      key={record.id}
+                      record={record}
+                      // "Last" means last in the column, not last in this day. Passing the group's
+                      // own last index ended the rail at every day boundary, so a column with one
+                      // record per day — which is exactly what the 电视直播 column holds — drew no
+                      // line at all, and the two columns stopped looking like one component.
+                      isLast={
+                        groupIndex === groups.length - 1 &&
+                        index === group.records.length - 1
+                      }
+                    />
+                  ))}
+                </ol>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </section>

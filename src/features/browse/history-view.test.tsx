@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { HistoryView } from "@/features/browse/history-view";
@@ -116,6 +116,45 @@ describe("HistoryView", () => {
     expect(
       screen.getByRole("region", { name: "电视直播足迹" }),
     ).toHaveTextContent("1 条");
+  });
+
+  it("gives each column its own scroll region, so one bar does not move the other", () => {
+    // The reported defect: "影视和电视直播各自需要有一个滚动条，而不是把整个页面当做滚动条". One shared
+    // scrollbar made reaching the bottom of either timeline drag the whole page, and scrolling one
+    // column carried the other's heading off screen.
+    useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const vodColumn = screen.getByRole("region", { name: "影视足迹" });
+    const liveColumn = screen.getByRole("region", { name: "电视直播足迹" });
+
+    // A scroll region per column, and crucially *not* the same one: a single shared region would let
+    // this pass while still scrolling both together.
+    const vodScroller = vodColumn.querySelector(".lg\\:overflow-y-auto");
+    const liveScroller = liveColumn.querySelector(".lg\\:overflow-y-auto");
+    expect(vodScroller).toBeTruthy();
+    expect(liveScroller).toBeTruthy();
+    expect(vodScroller).not.toBe(liveScroller);
+    expect(vodColumn.contains(liveScroller)).toBe(false);
+    expect(liveColumn.contains(vodScroller)).toBe(false);
+  });
+
+  it("keeps the column heading outside the scrolling area", () => {
+    // The heading carries the name and the count; scrolling it away is what made the two lists hard
+    // to tell apart at the bottom of a long timeline.
+    //
+    // The heading is located as an element rather than by searching the scroller's text for the word:
+    // record rows legitimately contain it (`主用影视源` is a source name), so a text search passes or
+    // fails for a reason unrelated to where the heading is.
+    useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
+    render(<HistoryView onNavigate={() => {}} />);
+
+    const vodColumn = screen.getByRole("region", { name: "影视足迹" });
+    const scroller = vodColumn.querySelector(".lg\\:overflow-y-auto");
+    const heading = within(vodColumn).getByRole("heading", { name: /影视/ });
+
+    expect(scroller).not.toBeNull();
+    expect(scroller?.contains(heading)).toBe(false);
   });
 
   it("is read-only — no row navigates anywhere", () => {

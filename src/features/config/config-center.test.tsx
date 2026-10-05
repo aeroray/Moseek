@@ -1150,8 +1150,18 @@ describe("config center", () => {
     // The search box and the scroll area's content each carry the 16px, because the scroll area
     // itself must span the full card width — that is what keeps the overlay scrollbar from moving
     // the list. See the note on `makes the raw search box and the list below it the same width`.
-    const searchWrap = rawCard?.querySelector("[data-slot='card-content'] > div > div.relative");
-    expect(searchWrap?.className).toContain("px-4");
+    //
+    // Asserted from the search field upwards rather than by a fixed descendant path: the field is now
+    // the shared `SearchInput`, whose own root carries no padding, and the inset sits on the wrapper
+    // around it. Selecting `> div > div.relative` happened to catch the editor's outer column instead
+    // once that extra level appeared, which is the fragility this form avoids.
+    const searchField = rawCard?.querySelector("input[aria-label='搜索配置项']");
+    expect(searchField).toBeTruthy();
+    let insetWrapper: Element | null = searchField?.parentElement ?? null;
+    while (insetWrapper && !insetWrapper.className.includes("px-4")) {
+      insetWrapper = insetWrapper.parentElement;
+    }
+    expect(insetWrapper?.className).toContain("px-4");
     const scrollContent = rawCard?.querySelector(
       "[data-slot='scroll-area-viewport'] > div > div",
     );

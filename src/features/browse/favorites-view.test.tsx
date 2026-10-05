@@ -203,6 +203,76 @@ describe("FavoritesView", () => {
     expect(liveColumn).toHaveTextContent("还没有收藏频道");
   });
 
+  it("gives each column its own scroll region, so one bar does not move the other", () => {
+    // The reported defect: "影视和电视直播各自需要有一个滚动条，而不是把整个页面当做滚动条". One shared
+    // scrollbar made reaching the bottom of either list drag the whole page, and scrolling one column
+    // carried the other's heading off screen.
+    //
+    // Both columns are populated, because the scroll region only exists when there is something to
+    // scroll — an empty column renders its explanation instead.
+    useAppStore.setState({
+      favorites: [favorite()],
+      liveFavorites: [liveFavorite()],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    const vodColumn = screen.getByRole("region", { name: "影视收藏" });
+    const liveColumn = screen.getByRole("region", { name: "电视直播收藏" });
+
+    // A scroll region per column, and crucially *not* the same one: a single shared region would let
+    // this pass while still scrolling both together.
+    const vodScroller = vodColumn.querySelector(".lg\\:overflow-y-auto");
+    const liveScroller = liveColumn.querySelector(".lg\\:overflow-y-auto");
+    expect(vodScroller).toBeTruthy();
+    expect(liveScroller).toBeTruthy();
+    expect(vodScroller).not.toBe(liveScroller);
+    // Each is a descendant of its own column, so neither can be containing the other.
+    expect(vodColumn.contains(liveScroller)).toBe(false);
+    expect(liveColumn.contains(vodScroller)).toBe(false);
+  });
+
+  it("keeps the column heading outside the scrolling area", () => {
+    // The heading is the column's identity; scrolling it away is what made the two lists hard to tell
+    // apart at the bottom of a long list.
+    useAppStore.setState({
+      favorites: [favorite()],
+      liveFavorites: [liveFavorite()],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    const vodColumn = screen.getByRole("region", { name: "影视收藏" });
+    const scroller = vodColumn.querySelector(".lg\\:overflow-y-auto");
+
+    expect(scroller?.textContent).not.toContain("影视");
+    expect(vodColumn.textContent).toContain("影视");
+  });
+
+  it("gives every 返回收藏 button the same chevron as the watch page", () => {
+    // The reported defect: "左上角那个「返回收藏」的按钮目前缺少一个图标，应该和其他地方进行统一". The two
+    // detail headers on this page and the watch page all say 返回收藏 / 返回列表, and one of the three
+    // had the word without the chevron — so the header reached from the live half of the collection
+    // was the only one that looked different.
+    //
+    // Asserted through the rendered button rather than by reading the source: the point is what a user
+    // sees, and the icon is decorative (`aria-hidden`), so it is found as a child element.
+    useAppStore.setState({
+      favorites: [favorite()],
+      liveFavorites: [liveFavorite()],
+    });
+    render(<FavoritesView onNavigate={() => {}} />);
+
+    // The video detail, opened from the 影视 column.
+    fireEvent.click(screen.getByText("示例剧"));
+    const vodBack = screen.getByRole("button", { name: "返回收藏" });
+    expect(vodBack.querySelector("svg")).not.toBeNull();
+    fireEvent.click(vodBack);
+
+    // The live detail, opened from the 电视直播 column.
+    fireEvent.click(screen.getByText("City News"));
+    const liveBack = screen.getByRole("button", { name: "返回收藏" });
+    expect(liveBack.querySelector("svg")).not.toBeNull();
+  });
+
   it("keeps an empty column visible and offers the way in", () => {
     // Collapsing it would leave the page looking half-built, and the reader could not tell
     // whether the app had lost their collection or simply had none.

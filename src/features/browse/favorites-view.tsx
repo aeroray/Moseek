@@ -162,38 +162,41 @@ export function FavoritesView({ onNavigate }: FavoritesViewProps) {
         }}
       />
 
-      <ScrollArea
-        className="min-h-0 flex-1"
-        // The same Radix `display: table` wrapper as 足迹: without this the centred column
-        // never centres, because the table grows to the widest row.
-        viewportClassName="[&>div]:!block"
-      >
-        <div className="px-6 py-5">
-          {isEmpty ? (
-            <CollectionEmpty
-              icon={<Bookmark className="size-4 text-primary" />}
-              title="还没有收藏"
-              description="在影视库或电视直播里点击心形图标，收藏的内容就会汇聚在这里，点开即可接着看。"
-              actionLabel="浏览影视库"
-              onAction={() => onNavigate("browse")}
+      {/* **Each column scrolls on its own, from `lg` up.** The two lists are independent answers to
+          independent questions — films and channels — so one shared scrollbar made the reader drag
+          the whole page to reach the bottom of either, and scrolling one column carried the other's
+          heading off screen. Below `lg` the columns stack into a single axis, so the page keeps the
+          scrollbar: a nested scroll region there would trap the wheel in whichever column the pointer
+          happened to be over. */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-5 lg:overflow-hidden">
+        {isEmpty ? (
+          <CollectionEmpty
+            icon={<Bookmark className="size-4 text-primary" />}
+            title="还没有收藏"
+            description="在影视库或电视直播里点击心形图标，收藏的内容就会汇聚在这里，点开即可接着看。"
+            actionLabel="浏览影视库"
+            onAction={() => onNavigate("browse")}
+          />
+        ) : (
+          /* `lg:items-stretch` is what makes the columns scrollable at all: a percentage height inside
+             an auto-height row resolves to `auto`, so a `flex-1` scroll area would get no bound and
+             would simply render its whole content. Stretching the row gives each column the row's
+             definite height, which its own scroll region needs. `lg:min-h-0` on the grid keeps that
+             height from being pushed past the page by the content inside it. */
+          <div className="mx-auto grid w-full max-w-7xl items-start gap-x-10 gap-y-8 lg:min-h-0 lg:flex-1 lg:grid-cols-2 lg:items-stretch">
+            <VodFavoritesColumn
+              favorites={favorites}
+              onOpen={openVod}
+              onNavigate={onNavigate}
             />
-          ) : (
-            <div className="mx-auto grid max-w-7xl items-start gap-x-10 gap-y-8 lg:grid-cols-2">
-              <VodFavoritesColumn
-                favorites={favorites}
-                onOpen={openVod}
-                onNavigate={onNavigate}
-              />
-              <LiveFavoritesColumn
-                favorites={liveFavorites}
-                onOpen={openLive}
-                onNavigate={onNavigate}
-              />
-            </div>
-          )}
-        </div>
-        <ScrollBar />
-      </ScrollArea>
+            <LiveFavoritesColumn
+              favorites={liveFavorites}
+              onOpen={openLive}
+              onNavigate={onNavigate}
+            />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -232,7 +235,7 @@ function VodFavoritesColumn({
     <section
       role="region"
       aria-label="影视收藏"
-      className="@container flex min-w-0 flex-col"
+      className="@container flex min-w-0 flex-col lg:min-h-0"
     >
       <ColumnHeader
         tone="vod"
@@ -251,15 +254,19 @@ function VodFavoritesColumn({
           onAction={() => onNavigate("browse")}
         />
       ) : (
-        <div className={columnGridClassName}>
-          {favorites.map((favorite) => (
-            <FavoriteVodCard
-              key={favorite.key}
-              favorite={favorite}
-              onOpen={() => onOpen(favorite.key)}
-              onRemove={() => toggleFavorite(favorite.item)}
-            />
-          ))}
+        /* The heading above stays put; only the covers scroll. `lg:-mr-2 lg:pr-2` gives the scrollbar
+           its own gutter so it does not sit on top of the rightmost card's edge. */
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:-mr-2 lg:pr-2">
+          <div className={columnGridClassName}>
+            {favorites.map((favorite) => (
+              <FavoriteVodCard
+                key={favorite.key}
+                favorite={favorite}
+                onOpen={() => onOpen(favorite.key)}
+                onRemove={() => toggleFavorite(favorite.item)}
+              />
+            ))}
+          </div>
         </div>
       )}
     </section>
@@ -378,7 +385,7 @@ function LiveFavoritesColumn({
     <section
       role="region"
       aria-label="电视直播收藏"
-      className="@container flex min-w-0 flex-col"
+      className="@container flex min-w-0 flex-col lg:min-h-0"
     >
       <ColumnHeader
         tone="live"
@@ -397,17 +404,19 @@ function LiveFavoritesColumn({
           onAction={() => onNavigate("live")}
         />
       ) : (
-        <div className={columnGridClassName}>
-          {favorites.map((favorite) => (
-            <FavoriteLiveCard
-              key={favorite.key}
-              favorite={favorite}
-              onOpen={() => onOpen(favorite.key)}
-              onRemove={() =>
-                toggleLiveFavorite(favorite.channel, favorite.sourceName)
-              }
-            />
-          ))}
+        <div className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:-mr-2 lg:pr-2">
+          <div className={columnGridClassName}>
+            {favorites.map((favorite) => (
+              <FavoriteLiveCard
+                key={favorite.key}
+                favorite={favorite}
+                onOpen={() => onOpen(favorite.key)}
+                onRemove={() =>
+                  toggleLiveFavorite(favorite.channel, favorite.sourceName)
+                }
+              />
+            ))}
+          </div>
         </div>
       )}
     </section>
@@ -1037,7 +1046,17 @@ function FavoriteLiveView({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex shrink-0 items-center gap-3 border-b border-border/70 px-4 py-2">
-        <Button type="button" variant="ghost" size="sm" onClick={onBack}>
+        {/* The same back control as the two other detail headers on this page and the watch page: a
+            chevron plus the word. This one had the word alone, which made the one header reached from
+            the live half of the collection the odd one out — noticed by the user as "缺少一个图标". */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="gap-1.5 text-muted-foreground hover:text-foreground"
+          onClick={onBack}
+        >
+          <ChevronLeft className="size-4" data-icon="inline-start" aria-hidden="true" />
           返回收藏
         </Button>
         <h2 className="truncate text-sm font-semibold text-foreground">
