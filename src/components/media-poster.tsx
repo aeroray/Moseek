@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { AppLogo } from "@/components/app-logo";
+import { PolicyImage } from "@/components/policy-image";
 import { cn } from "@/lib/utils";
 
 type MediaPosterProps = {
@@ -25,7 +26,7 @@ export function MediaPoster({
   return (
     <div className={cn("relative w-full overflow-hidden bg-muted/60 transition-colors", className)}>
       {!imageFailed ? (
-        <img
+        <PolicyImage
           src={src}
           alt={alt}
           loading="lazy"

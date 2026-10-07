@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Radio } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { PolicyImage } from "@/components/policy-image";
 
 type ChannelLogoProps = {
   src?: string;
@@ -50,7 +51,7 @@ export function ChannelLogo({
       )}
     >
       {!failed ? (
-        <img
+        <PolicyImage
           src={src}
           alt={`${name} 台标`}
           loading="lazy"

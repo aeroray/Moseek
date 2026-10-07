@@ -85,6 +85,8 @@ describe("MediaPlayer inside a hidden view", () => {
   let spies: { play: ReturnType<typeof vi.fn>; pause: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
+    vi.stubGlobal("TextTrack", class {});
+    vi.stubGlobal("TextTrackList", class extends Array {});
     spies = stubMediaPlayback();
     hlsInstances.length = 0;
   });
@@ -92,6 +94,7 @@ describe("MediaPlayer inside a hidden view", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("pauses when its view is put away and resumes when it returns", async () => {

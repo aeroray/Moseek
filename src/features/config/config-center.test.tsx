@@ -308,6 +308,7 @@ describe("config center", () => {
     vi.mocked(replaceAllConfigDocuments).mockClear();
     vi.mocked(activateConfigDocument).mockReset();
     vi.mocked(activateConfigDocument).mockResolvedValue(null);
+    vi.mocked(updateSourceTestCommand).mockReset();
     // The cancellation mocks are asserted by call count in more than one test, so a call from an
     // earlier test would satisfy a later assertion that never actually happened.
     vi.mocked(cancelSourceTestCommand).mockClear();
@@ -1536,6 +1537,30 @@ describe("config center", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps edits made during a pending save and writes them next", async () => {
+    vi.useFakeTimers();
+    try {
+      let release: (() => void) | undefined;
+      vi.mocked(replaceAllConfigDocuments).mockImplementationOnce((input) => new Promise((resolve) => {
+        release = () => resolve({ ...input, id: 2, sourceCount: input.sources.length, importedAt: "刚刚" });
+      }));
+      renderCenter();
+      openRawTab();
+      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
+      fireEvent.change(screen.getByLabelText("name"), { target: { value: "第一份编辑" } });
+      fireEvent.blur(screen.getByLabelText("name"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(700); });
+      expect(release).toBeTypeOf("function");
+      fireEvent.change(screen.getByLabelText("name"), { target: { value: "写入期间的新编辑" } });
+      fireEvent.blur(screen.getByLabelText("name"));
+      await act(async () => { release!(); });
+      expect(screen.getByLabelText("name")).toHaveValue("写入期间的新编辑");
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0].rawConfig).toContain("写入期间的新编辑");
+      expect(useAppStore.getState().configDocuments).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
   });
 
   it("writes exactly once for one edit, and settles", async () => {
@@ -2804,6 +2829,58 @@ describe("config center", () => {
     await waitFor(() => {
       expect(useAppStore.getState().sources[0].testStatus).toBe("untested");
     });
+  });
+
+  it("ignores an old single test after cancellation and immediate restart", async () => {
+    const pending: ((result: SourceTestResult) => void)[] = [];
+    vi.mocked(testSourceCommand).mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+    renderCenter();
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+    fireEvent.click(await screen.findByRole("button", { name: "取消测试 可用的源" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试 可用的源" }));
+    expect(pending).toHaveLength(2);
+    const before = vi.mocked(updateSourceTestCommand).mock.calls.length;
+    await act(async () => pending[0](testResult({ status: "failed" })));
+    expect(updateSourceTestCommand).toHaveBeenCalledTimes(before);
+    expect(screen.getByRole("button", { name: "取消测试 可用的源" })).toBeInTheDocument();
+    await act(async () => pending[1](testResult()));
+    expect(updateSourceTestCommand).toHaveBeenCalledTimes(before + 1);
+  });
+
+  it("does not persist an old batch result after a second batch starts", async () => {
+    const pending: ((result: SourceTestResult) => void)[] = [];
+    vi.mocked(testSourceCommand).mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
+    renderCenter();
+    startBatchTest();
+    fireEvent.click(await screen.findByRole("button", { name: /取消测速/ }));
+    await screen.findByRole("button", { name: /全部测速/ });
+    startBatchTest();
+    expect(pending).toHaveLength(2);
+    const before = vi.mocked(updateSourceTestCommand).mock.calls.length;
+    await act(async () => pending[0](testResult({ status: "failed" })));
+    expect(updateSourceTestCommand).toHaveBeenCalledTimes(before);
+    expect(screen.getByRole("button", { name: "取消测试 可用的源" })).toBeInTheDocument();
+    await act(async () => pending[1](testResult()));
+    expect(updateSourceTestCommand).toHaveBeenCalledTimes(before + 1);
+  });
+
+  it("merges concurrent test replies without restoring an older full snapshot", async () => {
+    renderCenter();
+    const second = source({ key: "second", name: "第二个源", api: "https://second.example/api" });
+    act(() => useAppStore.setState({ sources: [supported, second], normalizedConfig: JSON.stringify({ sites: [supported, second] }) }));
+    vi.mocked(testSourceCommand).mockImplementation(async (target) => testResult({ sourceKey: target.key, status: target.key === "second" ? "failed" : "passed" }));
+    const replies = new Map<string, () => void>();
+    vi.mocked(updateSourceTestCommand).mockImplementation((id, key) => new Promise((resolve) => {
+      replies.set(key, () => resolve({ id, name: "主配置", rawConfig: "{}", normalizedConfig: "{}", sourceCount: 2, liveCount: 0, importedAt: "刚刚",
+        sources: [{ ...supported, testStatus: "passed" }, { ...second, testStatus: key === "second" ? "failed" : "untested", enabled: key !== "second" }] }));
+    }));
+    startBatchTest();
+    await waitFor(() => expect(replies.size).toBe(2));
+    await act(async () => replies.get("second")!());
+    await act(async () => replies.get("ok")!());
+    expect(useAppStore.getState().sources.map((entry) => entry.testStatus)).toEqual(["passed", "failed"]);
+    expect(useAppStore.getState().sources[1].enabled).toBe(false);
+    expect(JSON.parse(useAppStore.getState().normalizedConfig).sites[1].enabled).toBe(false);
   });
 
   it("switches off a source the test found unusable", async () => {

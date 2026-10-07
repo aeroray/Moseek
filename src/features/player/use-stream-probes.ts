@@ -74,7 +74,7 @@ export function useStreamProbes(
       .then((results) => {
         if (cancelled) return;
         setProbes(results);
-        if (!results) return;
+        if (!results || pinnedRef.current) return;
         // Pick the quickest reachable line here rather than trusting the backend's ordering, so
         // the choice stays correct even if the list arrives unsorted.
         const fastest = results

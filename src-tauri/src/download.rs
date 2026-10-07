@@ -83,11 +83,7 @@ pub async fn download_image(
 /// the one the filesystem rejects. Everything outside a conservative set is replaced rather than
 /// stripped, so two different titles cannot collapse onto the same name and silently overwrite
 /// one another.
-pub(crate) fn suggested_file_name(
-    title: &str,
-    content_type: Option<&str>,
-    url: &str,
-) -> String {
+pub(crate) fn suggested_file_name(title: &str, content_type: Option<&str>, url: &str) -> String {
     let mut cleaned = String::with_capacity(title.len());
     for character in title.chars() {
         let forbidden = matches!(
@@ -95,7 +91,10 @@ pub(crate) fn suggested_file_name(
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*'
         ) || character.is_control();
         // Full-width and CJK punctuation that Windows rejects or that reads as a path separator.
-        let lookalike = matches!(character, '：' | '？' | '＊' | '｜' | '／' | '＼' | '＜' | '＞');
+        let lookalike = matches!(
+            character,
+            '：' | '？' | '＊' | '｜' | '／' | '＼' | '＜' | '＞'
+        );
         if forbidden || lookalike {
             cleaned.push('_');
         } else {
@@ -103,7 +102,11 @@ pub(crate) fn suggested_file_name(
         }
     }
     let cleaned = cleaned.trim().trim_end_matches('.').trim();
-    let stem = if cleaned.is_empty() { "poster" } else { cleaned };
+    let stem = if cleaned.is_empty() {
+        "poster"
+    } else {
+        cleaned
+    };
     // Windows caps a path segment at 255 characters, and the extension has to fit inside it.
     let stem: String = stem.chars().take(120).collect();
 
@@ -186,7 +189,10 @@ mod tests {
     #[test]
     fn an_empty_title_still_produces_a_file() {
         // A blank title must not produce a bare extension, which the dialog would reject.
-        assert_eq!(suggested_file_name("   ", None, "https://x/a"), "poster.jpg");
+        assert_eq!(
+            suggested_file_name("   ", None, "https://x/a"),
+            "poster.jpg"
+        );
         assert_eq!(suggested_file_name("", None, "https://x/a"), "poster.jpg");
     }
 
@@ -211,7 +217,11 @@ mod tests {
     fn a_long_title_is_trimmed_to_fit_a_path_segment() {
         // Windows caps a single path segment; an untrimmed title would fail at write time.
         let name = suggested_file_name(&"长".repeat(400), None, "https://x/a");
-        assert!(name.chars().count() <= 124, "{} chars", name.chars().count());
+        assert!(
+            name.chars().count() <= 124,
+            "{} chars",
+            name.chars().count()
+        );
         assert!(name.ends_with(".jpg"));
     }
 

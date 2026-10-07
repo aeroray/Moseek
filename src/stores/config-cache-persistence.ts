@@ -67,11 +67,17 @@ export function rehydrateCache(
   },
 ): Record<number, StoredConfigDocument> {
   const cache: Record<number, StoredConfigDocument> = {};
-  for (const [id, entry] of Object.entries(stripped ?? {})) {
+  for (const [id, entry] of Object.entries(stripped && typeof stripped === "object" && !Array.isArray(stripped) ? stripped : {})) {
     const numericId = Number(id);
+    if (!Number.isSafeInteger(numericId) || !entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const isActive = numericId === active.activeConfigId;
     cache[numericId] = {
-      ...entry,
+      id: numericId,
+      name: typeof entry.name === "string" ? entry.name : "中心配置",
+      sourceCount: typeof entry.sourceCount === "number" ? entry.sourceCount : active.sources.length,
+      liveCount: typeof entry.liveCount === "number" ? entry.liveCount : 0,
+      importedAt: typeof entry.importedAt === "string" ? entry.importedAt : new Date(0).toISOString(),
+      sourceBaseUrl: typeof entry.sourceBaseUrl === "string" ? entry.sourceBaseUrl : null,
       rawConfig: isActive ? active.rawConfig : "",
       normalizedConfig: isActive ? active.normalizedConfig : "",
       sources: isActive ? active.sources : [],

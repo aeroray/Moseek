@@ -523,4 +523,3 @@ pub fn replace_all_config_documents(
     storage::load_config_document(&connection, document_id)?
         .ok_or_else(|| "中心配置保存后无法读取".to_string())
 }
-

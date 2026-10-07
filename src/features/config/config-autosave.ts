@@ -50,7 +50,7 @@ export function resolveSavePayload({
   // cleared the file — and it means "no sources" rather than "keep the old ones", so it takes the
   // derived path with an empty result instead of the keep-the-previous path.
   if (parsed?.ok) {
-    const merged = mergeSourceLists(previousSources, parsed.sources).sources;
+    const merged = mergeSourceLists(previousSources, parsed.sources, true).sources;
     return {
       rawConfig: text,
       normalizedConfig: parsed.normalizedConfig,

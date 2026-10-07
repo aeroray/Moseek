@@ -38,7 +38,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAppStore } from "@/stores/app-store";
 import { inferMediaKind } from "@/lib/media-kind";
-import { isFavoriteItem } from "@/lib/favorite-key";
+import { favoriteKey, isFavoriteItem, vodHistoryKey } from "@/lib/favorite-key";
 import {
   isTauriRuntime,
   type PlaybackResolution,
@@ -78,6 +78,7 @@ export function PlayerView({
   const favorites = useAppStore((state) => state.favorites);
   const toggleFavorite = useAppStore((state) => state.toggleFavorite);
   const playbackProgress = useAppStore((state) => state.playbackProgress);
+  const history = useAppStore((state) => state.history);
   const normalizedConfig = useAppStore((state) => state.normalizedConfig);
   const setPlaybackProgress = useAppStore((state) => state.setPlaybackProgress);
   const setFavoriteProgress = useAppStore((state) => state.setFavoriteProgress);
@@ -156,8 +157,11 @@ export function PlayerView({
   const activeIndex = activeLine && activeEpisode
     ? activeLine.episodes.findIndex((episode) => episode.id === activeEpisode.id)
     : -1;
-  const historyId = activeEpisode ? `${detail.id}:${activeEpisode.id}` : "";
-  const resumeAt = historyId ? (playbackProgress[historyId] ?? 0) : 0;
+  const historyId = activeEpisode ? vodHistoryKey(detail, activeEpisode.id) : "";
+  const previousFootprint = history.find((record) => record.kind === "vod" &&
+    record.item.sourceKey === detail.sourceKey && record.item.id === detail.id && record.episodeId === activeEpisode?.id);
+  const resumeAt = historyId ? (playbackProgress[historyId] ??
+    (previousFootprint ? playbackProgress[previousFootprint.id] : undefined) ?? 0) : 0;
   const mediaKind = activeEpisode
     ? inferMediaKind(activeEpisode.url)
     : ("unknown" as MediaKind);
@@ -240,7 +244,7 @@ export function PlayerView({
   useEffect(() => {
     if (status !== "playing") return;
     if (!activeEpisode || !activeLine) return;
-    const key = `${detail.id}:${activeEpisode.id}`;
+    const key = vodHistoryKey(detail, activeEpisode.id);
     if (recordedRef.current === key) return;
     recordedRef.current = key;
     addVodFootprint({
@@ -421,7 +425,7 @@ export function PlayerView({
                     // out would make a favourite resume from wherever it was last opened *from
                     // the favourites page* — which is not what "where I left off" means.
                     if (isFavorite) {
-                      setFavoriteProgress(detail.id, {
+                      setFavoriteProgress(favoriteKey(detail), {
                         lineId: activeLine?.id ?? "",
                         episodeId: activeEpisode.id,
                         episodeName: activeEpisode.name,

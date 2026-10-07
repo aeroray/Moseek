@@ -26,6 +26,8 @@ jobs:
     # Windows only: the app ships an NSIS installer, and a second platform would double the build
     # time to produce an artifact nothing consumes.
     runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
       - name: Checkout the release tag
@@ -62,11 +64,11 @@ jobs:
       - name: Verify the version matches the tag
         run: |
           node scripts/sync-version.mjs
-          node scripts/verify-release-version.mjs "${{ inputs.tag || github.ref_name }}"
+          node scripts/verify-release-version.mjs
 
       - name: Load release notes
         id: notes
-        run: node scripts/load-release-notes.mjs "${{ inputs.tag || github.ref_name }}"
+        run: node scripts/load-release-notes.mjs
 
       - name: Build and publish
         uses: tauri-apps/tauri-action@v0

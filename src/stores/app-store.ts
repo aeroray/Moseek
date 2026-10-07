@@ -8,7 +8,8 @@ import {
   type StoredConfigDocument,
 } from "@/lib/tauri";
 import { adapterRegistry } from "@/lib/adapters";
-import { favoriteKey } from "@/lib/favorite-key";
+import { favoriteKey, vodHistoryKey } from "@/lib/favorite-key";
+import { normalizeLiveChannel, normalizeLiveFavorite, normalizeVodFavorite, normalizeVodItem } from "@/lib/user-content";
 import {
   defaultSourceFilter,
   type SourceFilterState,
@@ -70,10 +71,12 @@ function normalizeCapability(value: unknown): CapabilityStatus {
  */
 export function migrateSources(sources: SourceRecord[] | undefined): SourceRecord[] {
   if (!Array.isArray(sources)) return [];
-  return sources.map((source) => {
-    const capability = normalizeCapability(source.capability);
-    return capability === source.capability ? source : { ...source, capability };
-  });
+  return sources.filter((source) => source && typeof source === "object" &&
+    typeof source.key === "string" && typeof source.name === "string" && typeof source.api === "string")
+    .map((source) => {
+      const capability = normalizeCapability(source.capability);
+      return capability === source.capability ? source : { ...source, capability };
+    });
 }
 
 /**
@@ -172,11 +175,13 @@ export function migrateFavorites(persisted: unknown): VodFavorite[] {
     if (!entry || typeof entry !== "object") continue;
     const candidate = entry as Partial<VodFavorite> & Partial<VodItem>;
     if (typeof candidate.key === "string" && candidate.item) {
-      favorites.push(candidate as VodFavorite);
+      const favorite = normalizeVodFavorite(candidate);
+      if (favorite) favorites.push(favorite);
       continue;
     }
     if (typeof candidate.id === "string" && typeof candidate.name === "string") {
-      const item = candidate as VodItem;
+      const item = normalizeVodItem(candidate);
+      if (!item) continue;
       favorites.push({
         key: `${item.sourceKey}:${item.id}`,
         item,
@@ -203,13 +208,24 @@ export function migrateHistory(persisted: unknown): FootprintRecord[] {
   const records: FootprintRecord[] = [];
   for (const entry of persisted) {
     if (!entry || typeof entry !== "object") continue;
-    const candidate = entry as Partial<VodFootprint> & { item?: VodItem };
-    if (candidate.kind === "vod" || candidate.kind === "live") {
-      records.push(candidate as FootprintRecord);
+    const candidate = entry as Partial<Omit<VodFootprint, "kind">> & { kind?: string; item?: VodItem };
+    if (candidate.kind === "live") {
+      const live = entry as Partial<LiveFootprint>;
+      const channel = normalizeLiveChannel(live.channel);
+      if (channel && typeof live.id === "string") records.push({
+        kind: "live", id: live.id, channel, sourceName: live.sourceName ?? "", updatedAt: live.updatedAt ?? "",
+      });
       continue;
     }
-    if (candidate.item) {
-      records.push({ ...(candidate as VodFootprint), kind: "vod" });
+    const item = normalizeVodItem(candidate.item);
+    if (item && typeof candidate.id === "string") {
+      records.push({
+        kind: "vod", id: candidate.id, item, lineId: typeof candidate.lineId === "string" ? candidate.lineId : "",
+        episodeId: typeof candidate.episodeId === "string" ? candidate.episodeId : "",
+        episodeName: typeof candidate.episodeName === "string" ? candidate.episodeName : "",
+        progress: typeof candidate.progress === "number" && Number.isFinite(candidate.progress) ? Math.max(0, candidate.progress) : 0,
+        updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt : "",
+      });
     }
   }
   return records;
@@ -224,13 +240,7 @@ export function migrateHistory(persisted: unknown): FootprintRecord[] {
  */
 export function migrateLiveFavorites(persisted: unknown): LiveFavorite[] {
   if (!Array.isArray(persisted)) return [];
-  return persisted.filter(
-    (entry): entry is LiveFavorite =>
-      Boolean(entry) &&
-      typeof entry === "object" &&
-      typeof (entry as LiveFavorite).key === "string" &&
-      Boolean((entry as LiveFavorite).channel),
-  );
+  return persisted.map(normalizeLiveFavorite).filter((entry) => entry !== null);
 }
 
 /**
@@ -352,7 +362,7 @@ interface AppStore {
   toggleSource: (key: string) => Promise<void>;
   setSourceTestResult: (key: string, result: SourceTestResult) => void;
   setConfigDocuments: (documents: ConfigDocumentSummary[]) => void;
-  setConfigDocument: (document: StoredConfigDocument) => void;
+  setConfigDocument: (document: StoredConfigDocument, replaceAll?: boolean) => void;
   removeConfigDocument: (documentId: number) => void;
   clearConfigDocument: () => void;
   replaceSources: (sources: SourceRecord[]) => void;
@@ -386,7 +396,7 @@ interface AppStore {
   toggleFavorite: (item: VodItem) => void;
   setPlaybackProgress: (historyId: string, seconds: number) => void;
   /** Records where the user left off in a favourite, so the page can resume it later. */
-  setFavoriteProgress: (itemId: string, progress: FavoriteProgress) => void;
+  setFavoriteProgress: (key: string, progress: FavoriteProgress) => void;
   toggleLiveFavorite: (channel: LiveChannel, sourceName?: string) => void;
   /** Replaces a favourite's snapshot after its episodes were refreshed from a live source. */
   refreshFavorite: (key: string, item: VodItem) => void;
@@ -442,6 +452,7 @@ export const useAppStore = create<AppStore>()(
         const removing = new Set(keys);
         const document = await removeSourcesInConfig(state.activeConfigId, keys);
         if (!document) throw new Error("浏览器预览不会删除源。");
+        if (get().activeConfigId !== state.activeConfigId) return;
         set((current) => ({
           sources: current.sources.filter(
             (source) => !removing.has(source.key),
@@ -478,7 +489,7 @@ export const useAppStore = create<AppStore>()(
             const currentSource = currentState.sources.find(
               (source) => source.key === key,
             );
-            if (activeConfigId === null || !currentSource) return;
+            if (activeConfigId === null || activeConfigId !== initialState.activeConfigId || !currentSource) return;
             const previousEnabled = currentSource.enabled;
             const nextEnabled = !previousEnabled;
             set((state) => ({
@@ -530,8 +541,8 @@ export const useAppStore = create<AppStore>()(
         }
       },
       setSourceTestResult: (key, result) =>
-        set((state) => ({
-          sources: state.sources.map((source) =>
+        set((state) => {
+          const sources = state.sources.map((source) =>
             source.key === key
               ? {
                   ...source,
@@ -543,25 +554,28 @@ export const useAppStore = create<AppStore>()(
                   testDurationMs: result.durationMs,
                   testOperations: result.operations,
                   lastCheckedAt: result.testedAt,
-                  // Matches what the backend persists. Only an answer the server actually gave can
-                  // switch a source off: a transport failure reports the network, not the source,
-                  // and disabling on one of those discards a source for a reason that may not exist
-                  // a minute later. A pass switches it back on, so the rule is not a one-way door.
+                  // Every failed or empty test switches the source off; a pass preserves its switch.
                   enabled: nextEnabledAfterTest(source, result),
                   requestCount:
                     source.requestCount + (result.status === "blocked" ? 0 : 1),
                 }
               : source,
-          ),
-        })),
+          );
+          const tested = sources.find((source) => source.key === key);
+          const normalizedConfig = tested
+            ? updateNormalizedConfigTest(state.normalizedConfig, tested)
+            : state.normalizedConfig;
+          const document = state.activeConfigId === null ? undefined : state.configDocumentCache[state.activeConfigId];
+          return {
+            sources, normalizedConfig,
+            ...(document ? { configDocumentCache: { [document.id]: { ...document, sources, normalizedConfig } } } : {}),
+          };
+        }),
       setConfigDocuments: (configDocuments) => set({ configDocuments }),
-      setConfigDocument: (document) =>
+      setConfigDocument: (document, replaceAll = false) =>
         set((state) => ({
           activeConfigId: document.id,
-          configDocumentCache: {
-            ...state.configDocumentCache,
-            [document.id]: document,
-          },
+          configDocumentCache: { [document.id]: document },
           sources: document.sources.map((source) => ({ ...source })),
           rawConfig: document.rawConfig,
           normalizedConfig: document.normalizedConfig,
@@ -574,7 +588,7 @@ export const useAppStore = create<AppStore>()(
               liveCount: document.liveCount,
               importedAt: document.importedAt,
             },
-            ...state.configDocuments.filter((item) => item.id !== document.id),
+            ...(replaceAll ? [] : state.configDocuments.filter((item) => item.id !== document.id)),
           ],
         })),
       removeConfigDocument: (documentId) =>
@@ -627,13 +641,14 @@ export const useAppStore = create<AppStore>()(
             // Deliberately the same key `playbackProgress` uses. The progress map updates the
             // matching history record by id, so prefixing this would leave every saved position
             // pointing at a record that no longer exists.
-            id: `${record.item.id}:${record.episodeId}`,
+            id: vodHistoryKey(record.item, record.episodeId),
             updatedAt: new Date().toISOString(),
           };
           return {
             history: [
               footprint,
-              ...state.history.filter((item) => item.id !== footprint.id),
+              ...state.history.filter((item) => item.id !== footprint.id && !(item.kind === "vod" &&
+                item.item.sourceKey === record.item.sourceKey && item.item.id === record.item.id && item.episodeId === record.episodeId)),
             ].slice(0, 200),
           };
         }),
@@ -696,12 +711,12 @@ export const useAppStore = create<AppStore>()(
         set((state) => {
           const key = favoriteKey(item);
           const existing = state.favorites.find(
-            (favorite) => favorite.key === key,
+            (favorite) => favorite.key === key || favoriteKey(favorite.item) === key,
           );
           if (existing) {
             return {
               favorites: state.favorites.filter(
-                (favorite) => favorite.key !== key,
+                (favorite) => favorite.key !== existing.key,
               ),
             };
           }
@@ -719,10 +734,10 @@ export const useAppStore = create<AppStore>()(
             ],
           };
         }),
-      setFavoriteProgress: (itemId, progress) =>
+      setFavoriteProgress: (key, progress) =>
         set((state) => ({
           favorites: state.favorites.map((favorite) =>
-            favorite.item.id === itemId
+            favorite.key === key
               ? { ...favorite, progress }
               : favorite,
           ),
@@ -735,6 +750,7 @@ export const useAppStore = create<AppStore>()(
         })),
       setPlaybackProgress: (historyId, seconds) =>
         set((state) => {
+          if (!Number.isFinite(seconds)) return state;
           const progress = Math.max(0, Math.floor(seconds));
           return {
             playbackProgress: {
@@ -785,12 +801,16 @@ export const useAppStore = create<AppStore>()(
           const liveKeys = new Set(
             state.liveFavorites.map((favorite) => favorite.key),
           );
-          const incomingVod = (incoming.favorites ?? []).filter(
-            (favorite) => !vodKeys.has(favorite.key),
-          );
-          const incomingLive = (incoming.liveFavorites ?? []).filter(
-            (favorite) => !liveKeys.has(favorite.key),
-          );
+          const incomingVod = (incoming.favorites ?? []).filter((favorite) => {
+            if (vodKeys.has(favorite.key)) return false;
+            vodKeys.add(favorite.key);
+            return true;
+          });
+          const incomingLive = (incoming.liveFavorites ?? []).filter((favorite) => {
+            if (liveKeys.has(favorite.key)) return false;
+            liveKeys.add(favorite.key);
+            return true;
+          });
           addedVod = incomingVod.length;
           addedLive = incomingLive.length;
           if (addedVod === 0 && addedLive === 0) return {};
@@ -842,26 +862,30 @@ export const useAppStore = create<AppStore>()(
           ? persisted.configDocuments.length > 0
           : false;
         const keepMirroredDocument = hasImportedConfig || hasConfigDocuments;
+        const rawConfig = typeof persisted?.rawConfig === "string" ? persisted.rawConfig : "";
+        const normalizedConfig = typeof persisted?.normalizedConfig === "string" ? persisted.normalizedConfig : "";
+        const activeConfigId = typeof persisted?.activeConfigId === "number" && Number.isSafeInteger(persisted.activeConfigId)
+          ? persisted.activeConfigId : null;
         return {
           ...currentState,
-          ...persisted,
           // Validated like the others rather than trusted from the spread above. See `migrateTheme`.
 
           // Defaults to on for existing installs that predate the setting.
           autoEpgEnabled:
-            persisted?.autoEpgEnabled ?? currentState.autoEpgEnabled,
+            typeof persisted?.autoEpgEnabled === "boolean" ? persisted.autoEpgEnabled : currentState.autoEpgEnabled,
           // The stored filter is validated rather than trusted: it is a persisted shape that a
           // newer version could have widened, and a value the filter module does not know would
           // silently exclude every source. An unrecognised group folds back to the default instead.
           theme: migrateTheme(persisted?.theme),
           sourceFilter: migrateSourceFilter(persisted?.sourceFilter),
-          isSourceFilterOpen: persisted?.isSourceFilterOpen ?? false,
+          isSourceFilterOpen: persisted?.isSourceFilterOpen === true,
           // Shape-checked rather than defaulted: `?? []` only replaces `null`/`undefined`, so a
           // non-array from an older or hand-edited mirror would reach the UI, where every reader maps
           // over it. `configDocuments` is also the other half of the gate above, so a non-array there
           // has to answer "no documents" rather than a truthy object.
           configDocuments: Array.isArray(persisted?.configDocuments)
-            ? persisted.configDocuments
+            ? persisted.configDocuments.filter((document) => document && typeof document === "object" &&
+              Number.isSafeInteger(document.id) && typeof document.name === "string" && typeof document.importedAt === "string")
             : [],
           // The cache is stored stripped, so the active document's payload is put back from the top
           // level — which is where it lives and what it describes. See
@@ -870,17 +894,20 @@ export const useAppStore = create<AppStore>()(
             (persisted as { configDocumentCache?: Record<number, never> } | undefined)
               ?.configDocumentCache,
             {
-              activeConfigId: persisted?.activeConfigId ?? null,
-              rawConfig: persisted?.rawConfig ?? "",
-              normalizedConfig: persisted?.normalizedConfig ?? "",
+              activeConfigId,
+              rawConfig,
+              normalizedConfig,
               sources: migrateSources(persisted?.sources),
             },
           ),
-          activeConfigId: persisted?.activeConfigId ?? null,
+          activeConfigId,
           activeView: migrateActiveView(persisted?.activeView),
           // The mirror. Safe to drop when it does not describe an import, because the backend
           // reloads these on startup.
           sources: keepMirroredDocument ? migrateSources(persisted?.sources) : [],
+          rawConfig,
+          normalizedConfig,
+          lastImportedAt: typeof persisted?.lastImportedAt === "string" ? persisted.lastImportedAt : null,
           // The user's own content, kept unconditionally. The migrations above are what validate the
           // stored shape — each returns `[]` for anything that is not the array it expects — so a
           // second, coarser check here would only ever remove data that the migration had already
@@ -943,6 +970,26 @@ function updateNormalizedConfigEnabled(
       if (!item || typeof item !== "object" || Array.isArray(item)) continue;
       const source = item as Record<string, unknown>;
       if (source.key === sourceKey) source.enabled = enabled;
+    }
+  }
+  return JSON.stringify(parsed, null, 2);
+}
+
+function updateNormalizedConfigTest(normalizedConfig: string, source: SourceRecord): string {
+  let parsed: unknown;
+  try { parsed = JSON.parse(normalizedConfig); } catch { return normalizedConfig; }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return normalizedConfig;
+  for (const section of ["sites", "lives"]) {
+    const items = (parsed as Record<string, unknown>)[section];
+    if (!Array.isArray(items)) continue;
+    for (const entry of items) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || entry.key !== source.key) continue;
+      Object.assign(entry, {
+        enabled: source.enabled, testStatus: source.testStatus, testMessage: source.testMessage,
+        testedAt: source.testedAt, testItemCount: source.testItemCount, testCategoryCount: source.testCategoryCount,
+        testDurationMs: source.testDurationMs, testOperations: source.testOperations,
+        lastCheckedAt: source.lastCheckedAt, requestCount: source.requestCount,
+      });
     }
   }
   return JSON.stringify(parsed, null, 2);

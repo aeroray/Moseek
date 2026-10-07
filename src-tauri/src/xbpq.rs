@@ -327,7 +327,10 @@ impl Marker {
 /// Collapses whitespace and strips the tags a marker slice usually still carries.
 fn clean_text(value: &str) -> String {
     let without_tags = strip_tags(value);
-    without_tags.split_whitespace().collect::<Vec<_>>().join(" ")
+    without_tags
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Removes tags, keeping their text. Used because these markers slice raw HTML and the value is
@@ -486,10 +489,7 @@ fn pair_config_to_value(raw: &str) -> Result<Value, String> {
         if key.is_empty() {
             continue;
         }
-        object.insert(
-            key.to_string(),
-            Value::String(value.trim().to_string()),
-        );
+        object.insert(key.to_string(), Value::String(value.trim().to_string()));
     }
     if object.is_empty() {
         return Err("XBPQ 配置没有可识别的字段。".to_string());
@@ -543,10 +543,7 @@ fn categories(config: &XbpqConfig) -> Vec<VodCategory> {
         .as_deref()
         .or(config.category_values_alt.as_deref())
         .unwrap_or_default();
-    let values: Vec<&str> = values
-        .split(['&', '#'])
-        .map(str::trim)
-        .collect();
+    let values: Vec<&str> = values.split(['&', '#']).map(str::trim).collect();
     names
         .split(['&', '#'])
         .map(str::trim)
@@ -1159,7 +1156,13 @@ fn lazy_cover_url(segment: &str) -> Option<String> {
     let at = segment.find("<img")?;
     let end = segment[at..].find('>').map(|offset| at + offset)?;
     let tag = &segment[at..end];
-    for name in ["data-url", "data-src", "data-original", "data-lazy-src", "data-echo"] {
+    for name in [
+        "data-url",
+        "data-src",
+        "data-original",
+        "data-lazy-src",
+        "data-echo",
+    ] {
         if let Some(value) = attribute(tag, name) {
             let value = value.trim();
             if !value.is_empty() && !is_placeholder_image(value) {
@@ -1180,9 +1183,17 @@ fn lazy_cover_url(segment: &str) -> Option<String> {
 /// Whether an image address is a theme's loading spinner rather than a cover.
 fn is_placeholder_image(url: &str) -> bool {
     let lowered = url.to_ascii_lowercase();
-    ["load.gif", "loading.gif", "lazy.gif", "placeholder", "blank.gif", "spacer.gif", "px.gif"]
-        .iter()
-        .any(|needle| lowered.contains(needle))
+    [
+        "load.gif",
+        "loading.gif",
+        "lazy.gif",
+        "placeholder",
+        "blank.gif",
+        "spacer.gif",
+        "px.gif",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
 }
 
 /// Reads one attribute out of a tag's text, tolerating both quote styles.
@@ -1381,7 +1392,8 @@ mod tests {
     fn reads_the_xyqhiker_category_spellings() {
         // The sibling dialect names the same two fields differently.
         let config: XbpqConfig =
-            serde_json::from_str(r#"{"分类名称":"电影&电视剧&综艺","分类名称替换词":"1&2&3"}"#).unwrap();
+            serde_json::from_str(r#"{"分类名称":"电影&电视剧&综艺","分类名称替换词":"1&2&3"}"#)
+                .unwrap();
         let categories = categories(&config);
 
         assert_eq!(categories.len(), 3);
@@ -1613,7 +1625,10 @@ mod tests {
             config.category_url.as_deref(),
             Some("http://web.zzdj.cc/index.php/vod/show/by/{by}/id/{cateId}/page/{catePg}.html")
         );
-        assert_eq!(config.category_names.as_deref(), Some("快手$2#抖音$3#都市$4"));
+        assert_eq!(
+            config.category_names.as_deref(),
+            Some("快手$2#抖音$3#都市$4")
+        );
     }
 
     #[test]

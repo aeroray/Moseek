@@ -123,7 +123,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
     const current = get().phase;
     if (current === "checking" || current === "downloading" || current === "installing") return;
 
-    set({ phase: "checking", error: null, progress: null });
+    set({ phase: "checking", error: null, progress: null, upToDate: false });
     try {
       const check = await loadUpdater();
       const update = await check();
@@ -150,6 +150,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         lastCheckedAt: checkedAt,
         error: null,
       });
+      await update.close().catch(() => undefined);
     } catch (error) {
       // A failed check is reported, not swallowed: the user pressed a button and is owed an answer.
       set({
@@ -163,7 +164,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   install: async () => {
     if (!canCheckForUpdates()) return;
     const phase = get().phase;
-    if (phase === "downloading" || phase === "installing") return;
+    if (phase === "checking" || phase === "downloading" || phase === "installing" || !get().available) return;
 
     set({ phase: "downloading", error: null, progress: 0 });
     try {
@@ -179,20 +180,24 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
       let downloaded = 0;
       let total: number | null = null;
-      await update.downloadAndInstall((event) => {
-        if (event.event === "Started") {
-          total = event.data.contentLength ?? null;
-          set({ phase: "downloading", progress: updatePercent({ downloaded, total }) });
-          return;
-        }
-        if (event.event === "Progress") {
-          downloaded += event.data.chunkLength;
-          set({ phase: "downloading", progress: updatePercent({ downloaded, total }) });
-          return;
-        }
-        // `Finished` means the bytes are down and the installer is about to run.
-        set({ phase: "installing", progress: null });
-      });
+      try {
+        await update.downloadAndInstall((event) => {
+          if (event.event === "Started") {
+            total = event.data.contentLength ?? null;
+            set({ phase: "downloading", progress: updatePercent({ downloaded, total }) });
+            return;
+          }
+          if (event.event === "Progress") {
+            downloaded += event.data.chunkLength;
+            set({ phase: "downloading", progress: updatePercent({ downloaded, total }) });
+            return;
+          }
+          // `Finished` means the bytes are down and the installer is about to run.
+          set({ phase: "installing", progress: null });
+        });
+      } finally {
+        await update.close().catch(() => undefined);
+      }
 
       // The installer has replaced the files on disk; the running process is still the old build, so
       // the app has to restart itself. Without this the user would be told an update had been
@@ -210,7 +215,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   dismiss: () => {
     const phase = get().phase;
-    if (phase === "downloading" || phase === "installing") return;
+    if (phase === "checking" || phase === "downloading" || phase === "installing") return;
     set({ available: null, phase: "idle", upToDate: false, error: null, progress: null });
   },
 }));

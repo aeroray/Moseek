@@ -12,11 +12,15 @@ export function favoriteKey(item: Pick<VodItem, "id" | "sourceKey">): string {
   return `${item.sourceKey}:${item.id}`;
 }
 
+export function vodHistoryKey(item: Pick<VodItem, "id" | "sourceKey">, episodeId: string): string {
+  return `${favoriteKey(item)}:${episodeId}`;
+}
+
 /** Whether this exact work, from this exact source, is favourited. */
 export function isFavoriteItem(
   favorites: VodFavorite[],
   item: Pick<VodItem, "id" | "sourceKey">,
 ): boolean {
   const key = favoriteKey(item);
-  return favorites.some((favorite) => favorite.key === key);
+  return favorites.some((favorite) => favorite.key === key || favoriteKey(favorite.item) === key);
 }

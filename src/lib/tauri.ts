@@ -335,12 +335,18 @@ export async function fetchMediaResource(
   url: string,
   headers: Record<string, string> = {},
   maxBytes?: number,
+  requestId?: string,
 ) {
   return invokeCommand<MediaResource>("fetch_media_resource", {
     url,
     headers,
     maxBytes: maxBytes ?? null,
+    requestId: requestId ?? null,
   });
+}
+
+export async function cancelMediaRequest(requestId: string) {
+  return invokeCommand<void>("cancel_media_stream", { streamId: requestId });
 }
 
 /**

@@ -60,6 +60,14 @@ function fieldRow(name: string) {
 describe("required and optional field labels", () => {
   afterEach(cleanup);
 
+  it("survives valid to invalid to valid text without changing hook order", () => {
+    const { rerender } = render(<ConfigVisualEditor value={CONFIG} onChange={vi.fn()} sources={[]} />);
+    rerender(<ConfigVisualEditor value="{" onChange={vi.fn()} sources={[]} />);
+    expect(screen.getByText("无法以可视化方式打开")).toBeInTheDocument();
+    rerender(<ConfigVisualEditor value={CONFIG} onChange={vi.fn()} sources={[]} />);
+    expect(screen.getByRole("button", { name: "编辑 甲源" })).toBeInTheDocument();
+  });
+
   it("labels the address field 必需", () => {
     renderEditor();
 

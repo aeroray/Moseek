@@ -32,6 +32,7 @@ vi.mock("@/lib/tauri", async (importOriginal) => {
     ...actual,
     downloadImage: (...args: unknown[]) => downloadImage(...args),
     isTauriRuntime: () => isTauriRuntime(),
+    fetchMediaResource: async (url: string) => ({ url, bodyBase64: btoa(url), contentType: "image/jpeg" }),
   };
 });
 
@@ -77,7 +78,7 @@ describe("poster viewer", () => {
     });
   });
 
-  it("opens the large view from the card's own button", () => {
+  it("opens the large view from the card's own button", async () => {
     renderWithHost(
       <PosterZoomButton name="测试影片" poster="https://img.example/p.jpg" />,
     );
@@ -87,9 +88,9 @@ describe("poster viewer", () => {
     fireEvent.click(trigger);
 
     expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(
+    await waitFor(() => expect(
       screen.getByRole("img", { name: /测试影片 海报大图/ }),
-    ).toHaveAttribute("src", "https://img.example/p.jpg");
+    ).toHaveAttribute("src", `data:image/jpeg;base64,${btoa("https://img.example/p.jpg")}`));
   });
 
   it("offers no viewer when the work has no poster", () => {
@@ -397,7 +398,7 @@ describe("poster viewer", () => {
     await waitFor(() =>
       expect(
         screen.getByRole("img", { name: /海报大图/ }).getAttribute("src"),
-      ).toBe("https://img.example/p-large.jpg"),
+      ).toBe(`data:image/jpeg;base64,${btoa("https://img.example/p-large.jpg")}`),
     );
 
     const download = screen.getByRole("button", { name: "下载" });

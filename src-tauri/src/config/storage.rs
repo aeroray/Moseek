@@ -17,8 +17,8 @@ pub(super) fn deserialize_sources(
     let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
-    let mut sources: Vec<SourceRecord> = serde_json::from_str(&value)
-        .map_err(|error| format!("配置源快照解析失败：{error}"))?;
+    let mut sources: Vec<SourceRecord> =
+        serde_json::from_str(&value).map_err(|error| format!("配置源快照解析失败：{error}"))?;
     for source in &mut sources {
         source.api = unwrap_local_proxy_url(&source.api);
     }
@@ -47,7 +47,10 @@ pub(crate) fn unwrap_local_proxy_url(value: &str) -> String {
     let Some(host) = parsed.host_str() else {
         return value.to_string();
     };
-    let host = host.trim_start_matches('[').trim_end_matches(']').to_ascii_lowercase();
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_ascii_lowercase();
     let is_loopback =
         host == "127.0.0.1" || host == "localhost" || host == "::1" || host == "0.0.0.0";
     if !is_loopback {
@@ -58,11 +61,7 @@ pub(crate) fn unwrap_local_proxy_url(value: &str) -> String {
         .find(|(key, _)| key == "url" || key == "target")
         .map(|(_, value)| value.into_owned());
     match target {
-        Some(target)
-            if target.starts_with("http://") || target.starts_with("https://") =>
-        {
-            target
-        }
+        Some(target) if target.starts_with("http://") || target.starts_with("https://") => target,
         _ => value.to_string(),
     }
 }
@@ -633,8 +632,12 @@ pub(super) fn remove_sources_in_connection(
         .filter(|url| matches!(url.scheme(), "http" | "https"));
 
     let sources_json = serialize_sources(&sources)?;
-    let normalized_config =
-        remove_sources_from_config(&document.normalized_config, base_url.as_ref(), &removed, &sources);
+    let normalized_config = remove_sources_from_config(
+        &document.normalized_config,
+        base_url.as_ref(),
+        &removed,
+        &sources,
+    );
     let raw_config =
         remove_sources_from_config(&document.raw_config, base_url.as_ref(), &removed, &sources);
     // `source_count` is derived from `sources_json` when the document is read, so only the live
@@ -805,11 +808,7 @@ fn entry_address(item: &Value, is_live: bool) -> &str {
 
 /// The identity of an entry inside a configuration text.
 fn entry_identity(item: &Value, is_live: bool, base_url: Option<&Url>) -> String {
-    source_identity(
-        entry_address(item, is_live),
-        item.get("ext"),
-        base_url,
-    )
+    source_identity(entry_address(item, is_live), item.get("ext"), base_url)
 }
 
 /// The display name of an entry, folded so casing and padding cannot make it look absent.
@@ -890,7 +889,10 @@ fn remove_sources_from_config(
         // `min_by_key`'s "first of equal minima" behaviour, so the same entry is chosen as before.
         let mut by_identity: HashMap<&str, Vec<usize>> = HashMap::new();
         for (index, identity) in identities.iter().enumerate() {
-            by_identity.entry(identity.as_str()).or_default().push(index);
+            by_identity
+                .entry(identity.as_str())
+                .or_default()
+                .push(index);
         }
         // Owned keys rather than borrowed ones: `items` is borrowed mutably by `retain` below, and a
         // borrow of it held this long would not compile.
@@ -905,8 +907,7 @@ fn remove_sources_from_config(
             }
         }
         // Membership sets for the traceability check below, which had the same nested-scan shape.
-        let present_identities: HashSet<&str> =
-            identities.iter().map(String::as_str).collect();
+        let present_identities: HashSet<&str> = identities.iter().map(String::as_str).collect();
         let present_labels: HashSet<&str> = labels.iter().map(String::as_str).collect();
 
         let mut drop = vec![false; items.len()];
@@ -942,11 +943,9 @@ fn remove_sources_from_config(
                 .or_else(|| {
                     // An entry that carries no usable address cannot be matched by identity, so the
                     // key is still tried — it is what the previous implementation relied on.
-                    by_key
-                        .get(source.key.as_str())
-                        .and_then(|candidates| {
-                            candidates.iter().copied().find(|index| !drop[*index])
-                        })
+                    by_key.get(source.key.as_str()).and_then(|candidates| {
+                        candidates.iter().copied().find(|index| !drop[*index])
+                    })
                 });
             if let Some(index) = best {
                 drop[index] = true;
@@ -1254,7 +1253,9 @@ mod tests {
     ) -> ConfigDocument {
         let sources_json = serialize_sources(sources).unwrap();
         let transaction = connection.transaction().unwrap();
-        transaction.execute("DELETE FROM config_documents", []).unwrap();
+        transaction
+            .execute("DELETE FROM config_documents", [])
+            .unwrap();
         transaction
             .execute(
                 "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, source_base_url, live_count) VALUES (?1, ?2, ?3, ?4, NULL, 0)",
@@ -1321,7 +1322,11 @@ mod tests {
 
             // Both entries share an identity (same api, no ext), so the ranking is what decides:
             // the entry whose key matches is the one removed.
-            assert_eq!(keys, vec!["other"], "the key match should have been removed");
+            assert_eq!(
+                keys,
+                vec!["other"],
+                "the key match should have been removed"
+            );
         }
 
         /// Entries with no address are never matched by identity, because an empty address would
@@ -1408,11 +1413,16 @@ mod tests {
             &mut connection,
             "中心配置",
             r#"{"sites":[]}"#,
-            &[test_source_with_key("a", true), test_source_with_key("b", true)],
+            &[
+                test_source_with_key("a", true),
+                test_source_with_key("b", true),
+            ],
         );
 
         let remaining: i64 = connection
-            .query_row("SELECT COUNT(*) FROM config_documents", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM config_documents", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(remaining, 1);
         assert_eq!(merged.name, "中心配置");
@@ -1678,7 +1688,11 @@ mod tests {
             "http://127.0.0.1:9978/proxy?do=live",
             "http://127.0.0.1:9978/proxy?url=file:///etc/passwd",
         ] {
-            assert_eq!(unwrap_local_proxy_url(url), url, "{url} should be unchanged");
+            assert_eq!(
+                unwrap_local_proxy_url(url),
+                url,
+                "{url} should be unchanged"
+            );
         }
     }
 
@@ -1968,12 +1982,9 @@ mod tests {
             .unwrap();
         let document_id = connection.last_insert_rowid();
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["drop".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["drop".to_string()])
+                .unwrap();
 
         assert_eq!(updated.sources.len(), 2);
         assert!(updated.sources.iter().all(|source| source.key != "drop"));
@@ -2066,8 +2077,7 @@ mod tests {
         );
 
         let updated =
-            remove_sources_in_connection(&mut connection, document_id, &["a".to_string()])
-                .unwrap();
+            remove_sources_in_connection(&mut connection, document_id, &["a".to_string()]).unwrap();
 
         assert_eq!(updated.raw_config, "not json at all");
         assert_eq!(updated.sources.len(), 1);
@@ -2077,8 +2087,10 @@ mod tests {
     fn removing_sources_only_affects_the_target_document() {
         let mut connection = Connection::open_in_memory().unwrap();
         create_test_schema(&connection);
-        let first = insert_document_with_sources(&connection, "配置 A", "{\"a\":1}", &["a", "b"], None);
-        let second = insert_document_with_sources(&connection, "配置 B", "{\"b\":1}", &["a", "b"], None);
+        let first =
+            insert_document_with_sources(&connection, "配置 A", "{\"a\":1}", &["a", "b"], None);
+        let second =
+            insert_document_with_sources(&connection, "配置 B", "{\"b\":1}", &["a", "b"], None);
 
         remove_sources_in_connection(&mut connection, first, &["a".to_string()]).unwrap();
 
@@ -2281,12 +2293,9 @@ mod tests {
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["live-2".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["live-2".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         let names: Vec<&str> = raw_value["lives"]
@@ -2322,12 +2331,9 @@ mod tests {
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["一起看".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["一起看".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         let keys: Vec<&str> = raw_value["sites"]
@@ -2352,18 +2358,19 @@ mod tests {
             &connection,
             raw,
             &[
-                test_site("relative", "相对", "https://example.com/config/libs/tv/tvlive.txt"),
+                test_site(
+                    "relative",
+                    "相对",
+                    "https://example.com/config/libs/tv/tvlive.txt",
+                ),
                 test_site("keep", "保留", "csp_Keep"),
             ],
             Some("https://example.com/config/config.json"),
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["relative".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["relative".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         let keys: Vec<&str> = raw_value["sites"]
@@ -2395,18 +2402,19 @@ mod tests {
             raw,
             &[
                 // The recovered record: absolute, and no base URL on the document.
-                test_live("live-2-2", "SAO0", "https://iptv-org.github.io/iptv/countries/cn.m3u"),
+                test_live(
+                    "live-2-2",
+                    "SAO0",
+                    "https://iptv-org.github.io/iptv/countries/cn.m3u",
+                ),
                 test_live("keep", "保留", "https://keep.example/tv.txt"),
             ],
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["live-2-2".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["live-2-2".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         let names: Vec<&str> = raw_value["lives"]
@@ -2416,7 +2424,12 @@ mod tests {
             .filter_map(|item| item["name"].as_str())
             .collect();
 
-        assert_eq!(names, vec!["保留"], "raw config was: {}", updated.raw_config);
+        assert_eq!(
+            names,
+            vec!["保留"],
+            "raw config was: {}",
+            updated.raw_config
+        );
     }
 
     #[test]
@@ -2458,7 +2471,10 @@ mod tests {
             updated.raw_config
         );
         // The recovered entry was the only one meant to change.
-        assert_eq!(lives[1]["url"].as_str(), Some("https://keep.example/tv.txt"));
+        assert_eq!(
+            lives[1]["url"].as_str(),
+            Some("https://keep.example/tv.txt")
+        );
         // An unrelated section is left exactly as it was.
         assert_eq!(
             raw_value["sites"][0]["api"].as_str(),
@@ -2580,12 +2596,9 @@ mod tests {
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["live-1".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["live-1".to_string()])
+                .unwrap();
 
         let leftovers = unclaimed_entries(&updated);
         assert!(
@@ -2616,12 +2629,9 @@ mod tests {
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["site-3".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["site-3".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         let names: Vec<&str> = raw_value["sites"]
@@ -2649,16 +2659,17 @@ mod tests {
         let document_id = insert_document_with_records(
             &connection,
             raw,
-            &[test_site("unrelated", "无关", "http://unrelated.example/api")],
+            &[test_site(
+                "unrelated",
+                "无关",
+                "http://unrelated.example/api",
+            )],
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["unrelated".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["unrelated".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         assert_eq!(
@@ -2687,12 +2698,9 @@ mod tests {
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["xgapp".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["xgapp".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         let keys: Vec<&str> = raw_value["sites"]
@@ -2725,12 +2733,9 @@ mod tests {
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["keep".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["keep".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         assert_eq!(
@@ -2756,12 +2761,9 @@ mod tests {
             None,
         );
 
-        let updated = remove_sources_in_connection(
-            &mut connection,
-            document_id,
-            &["live-1".to_string()],
-        )
-        .unwrap();
+        let updated =
+            remove_sources_in_connection(&mut connection, document_id, &["live-1".to_string()])
+                .unwrap();
 
         let raw_value: Value = serde_json::from_str(&updated.raw_config).unwrap();
         let items = raw_value["lives"].as_array().unwrap();

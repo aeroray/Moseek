@@ -78,12 +78,14 @@ describe("update store", () => {
   });
 
   it("surfaces the version and notes the manifest announced", async () => {
+    const close = vi.fn(async () => undefined);
     vi.doMock("@/lib/tauri", () => ({ isTauriRuntime: () => true }));
     vi.doMock("@tauri-apps/plugin-updater", () => ({
       check: async () => ({
         version: "0.2.0",
         body: "## 修复\n\n- 导出按钮",
         date: "2026-10-04T00:00:00Z",
+        close,
       }),
     }));
     const { useUpdateStore } = await import("@/features/update/update-store");
@@ -94,5 +96,36 @@ describe("update store", () => {
     expect(state.phase).toBe("available");
     expect(state.available?.version).toBe("0.2.0");
     expect(state.available?.notes).toContain("导出按钮");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("releases an update handle even when installation fails", async () => {
+    const close = vi.fn(async () => undefined);
+    vi.doMock("@/lib/tauri", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@tauri-apps/plugin-updater", () => ({ check: async () => ({
+      close, downloadAndInstall: async () => { throw new Error("签名校验失败"); },
+    }) }));
+    const { useUpdateStore } = await import("@/features/update/update-store");
+    useUpdateStore.setState({ phase: "available", available: { version: "0.2.0", notes: "" } });
+    await useUpdateStore.getState().install();
+    expect(close).toHaveBeenCalledOnce();
+    expect(useUpdateStore.getState().phase).toBe("error");
+    expect(useUpdateStore.getState().error).toContain("签名校验失败");
+  });
+
+  it("does not start an install while a check is pending", async () => {
+    let finish!: (result: null) => void;
+    const pending = new Promise<null>((resolve) => { finish = resolve; });
+    const check = vi.fn(() => pending);
+    vi.doMock("@/lib/tauri", () => ({ isTauriRuntime: () => true }));
+    vi.doMock("@tauri-apps/plugin-updater", () => ({ check }));
+    const { useUpdateStore } = await import("@/features/update/update-store");
+    useUpdateStore.setState({ available: { version: "0.2.0", notes: "" } });
+    const checking = useUpdateStore.getState().check();
+    await useUpdateStore.getState().install();
+    finish(null);
+    await checking;
+    expect(check).toHaveBeenCalledOnce();
+    expect(useUpdateStore.getState().upToDate).toBe(true);
   });
 });

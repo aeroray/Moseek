@@ -303,7 +303,7 @@ describe("footprints", () => {
     });
 
     const record = useAppStore.getState().history[0];
-    expect(record.id).toBe("vod-1:ep-1");
+    expect(record.id).toBe("cms-main:vod-1:ep-1");
 
     useAppStore.getState().setPlaybackProgress(record.id, 620);
     const updated = useAppStore.getState().history[0];
@@ -326,7 +326,7 @@ describe("footprints", () => {
 
     const history = useAppStore.getState().history;
     expect(history).toHaveLength(2);
-    expect(history[0].id).toBe("vod-1:ep-1");
+    expect(history[0].id).toBe("cms-main:vod-1:ep-1");
   });
 
   it("records a channel without a position", () => {

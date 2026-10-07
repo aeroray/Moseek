@@ -306,8 +306,9 @@ async function requestGuide(
 ): Promise<EpgAdapterResult> {
   const { origin } = request;
   const url = resolveEpgUrl(request.template, channel);
-  const cached = epgCache.get(url);
-  if (cached) return { data: cached, mode: "remote", origin, error: null };
+  const cacheKey = `${url}\u0000${new Date().toDateString()}`;
+  const cached = epgCache.get(cacheKey);
+  if (cached) return { data: { programs: claimPrograms(cached.programs, request.template, identity) }, mode: "remote", origin, error: null };
   try {
     const remote = await getEpg(url, "auto");
     const programs = remote?.programs ?? [];
@@ -323,7 +324,8 @@ async function requestGuide(
       const oldest = epgCache.keys().next().value;
       if (oldest !== undefined) epgCache.delete(oldest);
     }
-    epgCache.set(url, catalog);
+    // Cache the provider's data, since the same URL can be requested under different channel aliases.
+    epgCache.set(cacheKey, { programs });
     return { data: catalog, mode: "remote", origin, error: null };
   } catch (error) {
     return {

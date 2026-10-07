@@ -11,7 +11,7 @@
  */
 import { appendFile, readFile } from "node:fs/promises";
 
-const rawTag = process.argv[2] || process.env.GITHUB_REF_NAME;
+const rawTag = process.argv[2] || process.env.RELEASE_TAG || process.env.GITHUB_REF_NAME;
 const tag = rawTag?.startsWith("v") ? rawTag : `v${rawTag ?? ""}`;
 
 if (!tag || !/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {

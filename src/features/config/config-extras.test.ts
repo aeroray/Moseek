@@ -109,8 +109,8 @@ describe("readExportExtras", () => {
         sites: [],
         moseek: {
           schemaVersion: 1,
-          favorites: [{ key: "good", item: {} }, { key: 42 }, null, "nope"],
-          liveFavorites: [{ key: "ok", channel: {} }, { channel: {} }],
+          favorites: [favorite("good"), { key: "bad", item: {} }, { key: 42 }, null, "nope"],
+          liveFavorites: [liveFavorite("ok"), { key: "bad", channel: {} }, { channel: {} }],
         },
       }),
     );

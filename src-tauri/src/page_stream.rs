@@ -202,7 +202,10 @@ mod tests {
             <div class="video"><iframe src="https://us-m3u8.urldwz.com/index.php/play/2179.html?" allowfullscreen></iframe></div>
             <a href="/archives/193/">next</a>
         "#;
-        let found = iframe_urls_in_page(html, &"https://www.dora-video.cn/archives/192/".parse().unwrap());
+        let found = iframe_urls_in_page(
+            html,
+            &"https://www.dora-video.cn/archives/192/".parse().unwrap(),
+        );
         assert_eq!(
             found,
             vec!["https://us-m3u8.urldwz.com/index.php/play/2179.html?".to_string()]
@@ -261,7 +264,10 @@ mod tests {
         const vid = 'https://play.hhuus.com/play/epYkgmma/index.m3u8';
         const videoConfig = { url: vid, type: 'hls' };
         </script>"#;
-        let found = media_urls_in_page(html, &"https://play.hhuus.com/play/epYkgmma".parse().unwrap());
+        let found = media_urls_in_page(
+            html,
+            &"https://play.hhuus.com/play/epYkgmma".parse().unwrap(),
+        );
         assert_eq!(
             found,
             vec!["https://play.hhuus.com/play/epYkgmma/index.m3u8".to_string()]
@@ -273,10 +279,7 @@ mod tests {
     fn unescapes_slashes_before_resolving() {
         let html = r#"<script>var v={"url":"https:\/\/cdn.example\/a\/index.m3u8"};</script>"#;
         let found = media_urls_in_page(html, &base());
-        assert_eq!(
-            found,
-            vec!["https://cdn.example/a/index.m3u8".to_string()]
-        );
+        assert_eq!(found, vec!["https://cdn.example/a/index.m3u8".to_string()]);
     }
 
     /// A page carrying the same address twice yields it once.

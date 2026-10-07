@@ -29,10 +29,7 @@ fn script_family(source: &SourceRecord) -> Option<ScriptFamily> {
     if haystack.contains("drpy") {
         return Some(ScriptFamily::RemoteCode);
     }
-    if haystack.contains("xbpq")
-        || haystack.contains("panda")
-        || haystack.contains("xyqhiker")
-    {
+    if haystack.contains("xbpq") || haystack.contains("panda") || haystack.contains("xyqhiker") {
         return Some(ScriptFamily::Declarative);
     }
     if haystack.contains("appmao") {
@@ -311,7 +308,10 @@ mod tests {
         let mut stored = source(None, None);
         stored.key = "drpy_xbpq".to_string();
 
-        assert_eq!(SiteAdapterKind::from_source(&stored), SiteAdapterKind::Spider);
+        assert_eq!(
+            SiteAdapterKind::from_source(&stored),
+            SiteAdapterKind::Spider
+        );
     }
 
     #[test]
@@ -321,7 +321,8 @@ mod tests {
         // answered from a value written before the support existed.
         let mut stale = source(Some(3), Some("xbpq"));
         stale.capability = "blocked".to_string();
-        stale.capability_note = "API 部分可用；存在远程 JAR 依赖，Moseek 不会下载或执行。".to_string();
+        stale.capability_note =
+            "API 部分可用；存在远程 JAR 依赖，Moseek 不会下载或执行。".to_string();
         stale.jar = Some("https://example.com/1.jar".to_string());
 
         assert_eq!(SiteAdapterKind::from_source(&stale), SiteAdapterKind::Xbpq);
@@ -371,7 +372,14 @@ mod tests {
         for api in ["https://live.example/tv.txt", "http://live.example/tv.txt"] {
             assert!(is_fetchable_live_url(api), "{api} should be fetchable");
         }
-        for api in ["", "  ", "proxy://demo", "./libs/tv/tvlive.txt", "file:///x", "javascript:1"] {
+        for api in [
+            "",
+            "  ",
+            "proxy://demo",
+            "./libs/tv/tvlive.txt",
+            "file:///x",
+            "javascript:1",
+        ] {
             assert!(!is_fetchable_live_url(api), "{api} must not be fetched");
         }
     }

@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::policy::{
     fetch_media_bytes, fetch_media_prefix, fetch_text_following_redirects,
     fetch_text_following_redirects_with_headers, fetch_text_with_headers, fetch_text_with_method,
-    open_media_response, validate_remote_url,
+    open_media_response, validate_public_destination, validate_remote_url,
 };
 
 #[derive(Clone, Deserialize)]
@@ -89,7 +89,10 @@ fn classify_media_container(body: &[u8], content_type: Option<&str>) -> (String,
     // MPEG-TS: 188-byte packets each starting with the sync byte 0x47. One sync byte is a
     // coincidence; two in a row at the packet stride is the format.
     if body.len() >= 377 && body[0] == 0x47 && body[188] == 0x47 && body[376] == 0x47 {
-        return ("mpegts".to_string(), "文件头为 MPEG-TS（188 字节包）".to_string());
+        return (
+            "mpegts".to_string(),
+            "文件头为 MPEG-TS（188 字节包）".to_string(),
+        );
     }
     // An HLS playlist is text and is unambiguous when present. A BOM is tolerated because
     // `isHlsPlaylist` on the player side tolerates one too.
@@ -109,7 +112,10 @@ fn classify_media_container(body: &[u8], content_type: Option<&str>) -> (String,
     if label.contains("flv") {
         return (
             "flv".to_string(),
-            format!("仅凭响应头 video/x-flv 判定（前 {} 字节无文件头）", body.len()),
+            format!(
+                "仅凭响应头 video/x-flv 判定（前 {} 字节无文件头）",
+                body.len()
+            ),
         );
     }
     if label.contains("mpegurl") {
@@ -119,7 +125,10 @@ fn classify_media_container(body: &[u8], content_type: Option<&str>) -> (String,
         );
     }
     if label.starts_with("video/mp2t") {
-        return ("mpegts".to_string(), "仅凭响应头 video/mp2t 判定".to_string());
+        return (
+            "mpegts".to_string(),
+            "仅凭响应头 video/mp2t 判定".to_string(),
+        );
     }
     (
         "unknown".to_string(),
@@ -144,10 +153,7 @@ pub async fn probe_media_container(
     headers: Option<HashMap<String, String>>,
 ) -> Result<MediaContainerProbe, String> {
     let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
-    let header_pairs = headers
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let header_pairs = headers.unwrap_or_default().into_iter().collect::<Vec<_>>();
     let (body, content_type, final_url) = fetch_media_prefix(
         parsed_url,
         CONTAINER_PROBE_BYTES,
@@ -170,10 +176,7 @@ pub async fn probe_media_container(
 /// A live response never ends on its own, so a stream the user has navigated away from would keep
 /// downloading until the process exits unless something cancels it. Keyed by an id the frontend
 /// generates, because the frontend is the side that knows when playback has moved on.
-#[derive(Default)]
-pub struct MediaStreamRegistry(
-    std::sync::Mutex<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>,
-);
+pub use crate::media_requests::MediaStreamRegistry;
 
 /// Streams a live media response to the frontend over a channel.
 ///
@@ -191,65 +194,51 @@ pub async fn stream_media_resource(
     channel: tauri::ipc::Channel<tauri::ipc::InvokeResponseBody>,
     registry: tauri::State<'_, MediaStreamRegistry>,
 ) -> Result<(), String> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
     use tauri::ipc::InvokeResponseBody;
-
-    let cancelled = Arc::new(AtomicBool::new(false));
     registry
-        .0
-        .lock()
-        .map_err(|_| "媒体流注册表不可用".to_string())?
-        .insert(stream_id.clone(), cancelled.clone());
-    // The guard removes the entry on every exit path, including the early `?` returns below, so a
-    // finished or failed stream cannot leave a stale id behind.
-    let _guard = StreamRegistrationGuard {
-        registry: &registry,
-        stream_id: stream_id.clone(),
-    };
+        .run(&stream_id, async {
+            let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
+            let header_pairs = headers.unwrap_or_default().into_iter().collect::<Vec<_>>();
+            let (mut response, final_url) =
+                open_media_response(parsed_url, "媒体流", &header_pairs).await?;
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(ToOwned::to_owned);
+            channel
+                .send(InvokeResponseBody::Json(
+                    serde_json::json!({
+                        "kind": "meta",
+                        "url": final_url.to_string(),
+                        "contentType": content_type,
+                    })
+                    .to_string(),
+                ))
+                .map_err(|error| format!("媒体流元数据发送失败：{error}"))?;
 
-    let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
-    let header_pairs = headers
-        .unwrap_or_default()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let (mut response, final_url) = open_media_response(parsed_url, "媒体流", &header_pairs).await?;
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
-    channel
-        .send(InvokeResponseBody::Json(
-            serde_json::json!({
-                "kind": "meta",
-                "url": final_url.to_string(),
-                "contentType": content_type,
-            })
-            .to_string(),
-        ))
-        .map_err(|error| format!("媒体流元数据发送失败：{error}"))?;
-
-    while !cancelled.load(Ordering::Relaxed) {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                if chunk.is_empty() {
-                    continue;
-                }
-                if channel.send(InvokeResponseBody::Raw(chunk.to_vec())).is_err() {
-                    // The webview dropped the channel, which means nothing is listening any more.
-                    return Ok(());
+            loop {
+                match response.chunk().await {
+                    Ok(Some(chunk)) => {
+                        if chunk.is_empty() {
+                            continue;
+                        }
+                        if channel
+                            .send(InvokeResponseBody::Raw(chunk.to_vec()))
+                            .is_err()
+                        {
+                            // The webview dropped the channel, which means nothing is listening any more.
+                            return Ok(());
+                        }
+                    }
+                    Ok(None) => return Ok(()),
+                    Err(error) => {
+                        return Err(format!("媒体流读取失败：{error}"));
+                    }
                 }
             }
-            Ok(None) => return Ok(()),
-            Err(error) => {
-                if cancelled.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-                return Err(format!("媒体流读取失败：{error}"));
-            }
-        }
-    }
+        })
+        .await?;
     Ok(())
 }
 
@@ -262,29 +251,7 @@ pub fn cancel_media_stream(
     stream_id: String,
     registry: tauri::State<'_, MediaStreamRegistry>,
 ) -> Result<(), String> {
-    use std::sync::atomic::Ordering;
-    let registry = registry
-        .0
-        .lock()
-        .map_err(|_| "媒体流注册表不可用".to_string())?;
-    if let Some(flag) = registry.get(&stream_id) {
-        flag.store(true, Ordering::Relaxed);
-    }
-    Ok(())
-}
-
-/// Removes a stream's registration however the streaming command exits.
-struct StreamRegistrationGuard<'a> {
-    registry: &'a tauri::State<'a, MediaStreamRegistry>,
-    stream_id: String,
-}
-
-impl Drop for StreamRegistrationGuard<'_> {
-    fn drop(&mut self) {
-        if let Ok(mut registry) = self.registry.0.lock() {
-            registry.remove(&self.stream_id);
-        }
-    }
+    registry.cancel(&stream_id)
 }
 
 /// One line's probe outcome. `ok` means the address really served a playable manifest, not
@@ -304,7 +271,7 @@ pub struct StreamProbe {
 
 const PROBE_TIMEOUT_MS: u64 = 4_000;
 /// Enough for a manifest; anything larger is not a playlist we can use.
-const PROBE_MAX_BYTES: usize = 512 * 1024;
+const PROBE_MAX_BYTES: usize = 4 * 1024;
 /// Bounds the fan-out so a playlist with hundreds of mirrors cannot open hundreds of sockets.
 ///
 /// This was 12, which silently ignored every line past the twelfth. A channel carrying 16 lines
@@ -323,6 +290,8 @@ pub async fn fetch_media_resource(
     url: String,
     headers: HashMap<String, String>,
     max_bytes: Option<usize>,
+    request_id: Option<String>,
+    registry: tauri::State<'_, MediaStreamRegistry>,
 ) -> Result<MediaResource, String> {
     let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
     let header_pairs = headers.into_iter().collect::<Vec<_>>();
@@ -332,8 +301,15 @@ pub async fn fetch_media_resource(
     let limit = max_bytes
         .unwrap_or(MAX_MEDIA_RESOURCE_BYTES)
         .clamp(MIN_MEDIA_RESOURCE_BYTES, MAX_MEDIA_RESOURCE_BYTES);
-    let (body, content_type, final_url) =
-        fetch_media_bytes(parsed_url, limit, "媒体资源", &header_pairs).await?;
+    let work = fetch_media_bytes(parsed_url, limit, "媒体资源", &header_pairs);
+    let (body, content_type, final_url) = if let Some(id) = request_id {
+        registry
+            .run(&id, work)
+            .await?
+            .ok_or_else(|| "媒体请求已取消".to_string())?
+    } else {
+        work.await?
+    };
     Ok(MediaResource {
         body_base64: BASE64.encode(body),
         content_type,
@@ -396,7 +372,7 @@ pub async fn resolve_playback(
     allow_page_scan: Option<bool>,
 ) -> Result<PlaybackResolution, String> {
     let parsed_url = reqwest::Url::parse(&url).map_err(|error| error.to_string())?;
-    validate_remote_url(&parsed_url)?;
+    validate_public_destination(&parsed_url).await?;
     let direct_media_kind = media_kind(&url);
     if direct_media_kind != "unknown" {
         return Ok(PlaybackResolution {
@@ -411,6 +387,10 @@ pub async fn resolve_playback(
     // tried before any third party because the address is usually already on the page.
     if allow_page_scan.unwrap_or(false) {
         if let Some(resolution) = scan_episode_page(&parsed_url).await {
+            validate_public_destination(
+                &Url::parse(&resolution.url).map_err(|error| error.to_string())?,
+            )
+            .await?;
             return Ok(resolution);
         }
     }
@@ -468,7 +448,7 @@ async fn resolve_with_services(
             .map_err(|_| format!("解析服务「{}」超时", service.key))??;
             let resolved_url = reqwest::Url::parse(&resolved)
                 .map_err(|error| format!("解析服务返回了无效地址：{error}"))?;
-            validate_remote_url(&resolved_url)?;
+            validate_public_destination(&resolved_url).await?;
             Ok::<PlaybackResolution, String>(PlaybackResolution {
                 media_kind: media_kind(resolved_url.as_str()).to_string(),
                 url: resolved_url.to_string(),
@@ -477,7 +457,10 @@ async fn resolve_with_services(
             })
         })
     });
-    select_ok(attempts).await.ok().map(|(resolution, _)| resolution)
+    select_ok(attempts)
+        .await
+        .ok()
+        .map(|(resolution, _)| resolution)
 }
 
 /// Scans a player page for a media address it embeds, descending into one embedded player frame.
@@ -557,7 +540,6 @@ fn resolution_from_page(html: &str, base_url: &Url) -> Option<PlaybackResolution
     })
 }
 
-
 /// Probes several candidate stream URLs at once and reports which ones actually serve a
 /// playable manifest, fastest first.
 ///
@@ -590,10 +572,7 @@ pub async fn probe_stream_urls(
 /// The index is what ties a result back to its position in the channel's line list, so dropping
 /// it — rather than the cap itself — is what would make the UI label the wrong line.
 fn probe_targets(urls: Vec<String>) -> Vec<(usize, String)> {
-    urls.into_iter()
-        .enumerate()
-        .take(MAX_PROBE_URLS)
-        .collect()
+    urls.into_iter().enumerate().take(MAX_PROBE_URLS).collect()
 }
 
 /// Orders probes so the caller can take the head of the list: reachable lines first, then the
@@ -636,7 +615,7 @@ async fn probe_one(index: usize, url: &str, timeout_ms: u64) -> StreamProbe {
     // cannot hold the whole comparison.
     let fetched = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
-        fetch_media_bytes(parsed, PROBE_MAX_BYTES, "直播线路探测", &[]),
+        fetch_media_prefix(parsed, PROBE_MAX_BYTES, "直播线路探测", &[]),
     )
     .await;
     match fetched {
@@ -644,21 +623,19 @@ async fn probe_one(index: usize, url: &str, timeout_ms: u64) -> StreamProbe {
             probe.elapsed_ms = started.elapsed().as_millis() as u64;
             probe.message = format!("探测超时（{} 毫秒）", timeout_ms);
         }
-        Ok(Ok((body, content_type, final_url))) => {
+        Ok(Ok((body, content_type, _final_url))) => {
             probe.elapsed_ms = started.elapsed().as_millis() as u64;
             probe.content_type = content_type;
             probe.status = Some(200);
-            let text = String::from_utf8_lossy(&body);
-            let looks_like_manifest = text.trim_start().starts_with("#EXTM3U");
-            let kind = media_kind(final_url.as_str());
+            let kind = probe_media_kind(&body);
             probe.media_kind = kind.to_string();
             // A 200 alone is not enough: an expired line often answers with an HTML error page
             // or an empty body, which the player then fails on. Require a real manifest.
-            if looks_like_manifest || kind == "hls" {
+            if kind != "unknown" {
                 probe.ok = true;
                 probe.message = "可用".to_string();
             } else {
-                probe.message = "响应不是有效的直播清单".to_string();
+                probe.message = "响应不是有效的直播媒体".to_string();
             }
         }
         Ok(Err(error)) => {
@@ -667,6 +644,22 @@ async fn probe_one(index: usize, url: &str, timeout_ms: u64) -> StreamProbe {
         }
     }
     probe
+}
+
+fn probe_media_kind(body: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(body);
+    if text
+        .trim_start_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
+        .starts_with("#EXTM3U")
+    {
+        "hls"
+    } else if body.starts_with(b"FLV") {
+        "flv"
+    } else if body.len() >= 377 && body[0] == 0x47 && body[188] == 0x47 && body[376] == 0x47 {
+        "mpegts"
+    } else {
+        "unknown"
+    }
 }
 
 #[tauri::command]
@@ -692,12 +685,13 @@ pub async fn sniff_with_companion(
         .append_pair("mode", "0")
         .append_pair("timeout", &timeout.to_string());
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_millis(timeout + 1_000))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent("Moseek/0.1")
         .build()
         .map_err(|error| error.to_string())?;
-    let response = client
+    let mut response = client
         .get(endpoint)
         .send()
         .await
@@ -710,15 +704,18 @@ pub async fn sniff_with_companion(
     {
         return Err("本地嗅探伴侣响应超过 2 MB 限制".to_string());
     }
-    let body = response
-        .bytes()
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|error| format!("读取本地嗅探结果失败：{error}"))?;
-    if body.len() > 2 * 1024 * 1024 {
-        return Err("本地嗅探伴侣响应超过 2 MB 限制".to_string());
+        .map_err(|error| format!("读取本地嗅探结果失败：{error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
+            return Err("本地嗅探伴侣响应超过 2 MB 限制".to_string());
+        }
+        body.extend_from_slice(&chunk);
     }
-    let body =
-        String::from_utf8(body.to_vec()).map_err(|_| "本地嗅探结果不是有效 UTF-8".to_string())?;
+    let body = String::from_utf8(body).map_err(|_| "本地嗅探结果不是有效 UTF-8".to_string())?;
     let resolved_url = extract_resolved_url(&body)
         .ok_or_else(|| "本地嗅探伴侣未返回可识别的 HTTP 播放地址".to_string())?;
     let resolved =
@@ -750,7 +747,8 @@ fn build_parser_request(service_url: &str, source_url: &str) -> Result<Url, Stri
     match parser_parameter_name(url.query()) {
         Some(name) => {
             // Replace the trailing empty value rather than adding a second one.
-            let filled = replace_query_parameter(url.query().unwrap_or_default(), &name, source_url);
+            let filled =
+                replace_query_parameter(url.query().unwrap_or_default(), &name, source_url);
             url.set_query(Some(&filled));
         }
         None => {
@@ -932,7 +930,11 @@ fn validate_companion_url(url: &Url) -> Result<(), String> {
     let host = url
         .host_str()
         .ok_or_else(|| "本地嗅探伴侣地址缺少主机名".to_string())?;
-    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    let normalized = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
     let is_loopback = normalized == "localhost"
         || normalized == "::1"
         || normalized
@@ -947,6 +949,24 @@ fn validate_companion_url(url: &Url) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stream_probes_accept_real_containers_instead_of_trusting_a_url_suffix() {
+        assert_eq!(
+            super::probe_media_kind(b"<html>stream.m3u8 is unavailable</html>"),
+            "unknown"
+        );
+        assert_eq!(
+            super::probe_media_kind(b"\xef\xbb\xbf#EXTM3U\n#EXTINF:1"),
+            "hls"
+        );
+        assert_eq!(super::probe_media_kind(b"FLV\x01\x05\0\0\0\x09"), "flv");
+        let mut packets = vec![0; 377];
+        for offset in [0, 188, 376] {
+            packets[offset] = 0x47;
+        }
+        assert_eq!(super::probe_media_kind(&packets), "mpegts");
+    }
+
     use serde_json::json;
 
     use super::{
@@ -995,11 +1015,9 @@ mod tests {
     /// service uses `?v=`, and appending `url=` left it with no `v` at all.
     #[test]
     fn a_template_with_a_differently_named_parameter_is_still_filled() {
-        let built = build_parser_request(
-            "https://huayong.net/999/?v=",
-            "https://cdn.example/a.m3u8",
-        )
-        .expect("a public template builds");
+        let built =
+            build_parser_request("https://huayong.net/999/?v=", "https://cdn.example/a.m3u8")
+                .expect("a public template builds");
         assert_eq!(
             built.as_str(),
             "https://huayong.net/999/?v=https%3A%2F%2Fcdn.example%2Fa.m3u8"
@@ -1068,7 +1086,10 @@ mod tests {
     /// A parser URL is a prefix, so a local one must be refused before it is contacted.
     #[test]
     fn a_local_parser_template_is_refused() {
-        assert!(build_parser_request("http://127.0.0.1:9978/proxy?url=", "https://a.example/x").is_err());
+        assert!(
+            build_parser_request("http://127.0.0.1:9978/proxy?url=", "https://a.example/x")
+                .is_err()
+        );
     }
 
     /// The service list in a real configuration is dozens of entries, most of them dead. Only the
@@ -1107,11 +1128,29 @@ mod tests {
             enabled,
             capability: capability.to_string(),
         };
-        assert!(super::is_usable_parse_service(&make(true, "supported", "GET")));
-        assert!(super::is_usable_parse_service(&make(true, "supported", "post")));
-        assert!(!super::is_usable_parse_service(&make(false, "supported", "GET")));
-        assert!(!super::is_usable_parse_service(&make(true, "blocked", "GET")));
-        assert!(!super::is_usable_parse_service(&make(true, "supported", "PUT")));
+        assert!(super::is_usable_parse_service(&make(
+            true,
+            "supported",
+            "GET"
+        )));
+        assert!(super::is_usable_parse_service(&make(
+            true,
+            "supported",
+            "post"
+        )));
+        assert!(!super::is_usable_parse_service(&make(
+            false,
+            "supported",
+            "GET"
+        )));
+        assert!(!super::is_usable_parse_service(&make(
+            true, "blocked", "GET"
+        )));
+        assert!(!super::is_usable_parse_service(&make(
+            true,
+            "supported",
+            "PUT"
+        )));
     }
 
     #[test]
@@ -1163,7 +1202,11 @@ mod tests {
 
     #[test]
     fn probe_ordering_is_stable_for_equal_timings() {
-        let mut probes = vec![probe(2, true, 100), probe(0, true, 100), probe(1, true, 100)];
+        let mut probes = vec![
+            probe(2, true, 100),
+            probe(0, true, 100),
+            probe(1, true, 100),
+        ];
         super::sort_probes(&mut probes);
 
         assert_eq!(
@@ -1358,10 +1401,8 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let playlist = reqwest::Url::parse(
-                "https://play.hhuus.com/play/bW68KKEa/index.m3u8",
-            )
-            .unwrap();
+            let playlist =
+                reqwest::Url::parse("https://play.hhuus.com/play/bW68KKEa/index.m3u8").unwrap();
             let (manifest, _, _) =
                 crate::policy::fetch_media_bytes(playlist, 4 * 1024 * 1024, "测试清单", &[])
                     .await
@@ -1382,7 +1423,10 @@ mod tests {
                     crate::policy::fetch_media_bytes(url, 16 * 1024 * 1024, "测试分片", &[])
                         .await
                         .unwrap_or_else(|error| {
-                            panic!("{fragment} failed after {}ms: {error}", started.elapsed().as_millis())
+                            panic!(
+                                "{fragment} failed after {}ms: {error}",
+                                started.elapsed().as_millis()
+                            )
                         });
                 let elapsed = started.elapsed().as_millis();
                 slowest = slowest.max(elapsed);

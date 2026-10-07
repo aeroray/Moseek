@@ -1,3 +1,6 @@
+import { cancelMediaRequest, fetchMediaResource, isTauriRuntime } from "@/lib/tauri";
+import { imageDataUrl, isEmbeddedImage } from "@/components/policy-image";
+
 /**
  * Candidate addresses for a poster, best-quality first.
  *
@@ -157,10 +160,13 @@ function measure(url: string, timeoutMs: number): Promise<PosterResolution | nul
   return new Promise((resolve) => {
     const image = new Image();
     let settled = false;
+    const requestId = isTauriRuntime() && !isEmbeddedImage(url) ? crypto.randomUUID() : null;
+    let pendingRequest = requestId !== null;
     const finish = (value: PosterResolution | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (requestId && pendingRequest) void cancelMediaRequest(requestId).catch(() => undefined);
       image.onload = null;
       image.onerror = null;
       resolve(value);
@@ -169,6 +175,13 @@ function measure(url: string, timeoutMs: number): Promise<PosterResolution | nul
     image.onload = () =>
       finish({ url, width: image.naturalWidth, height: image.naturalHeight });
     image.onerror = () => finish(null);
-    image.src = url;
+    if (requestId) {
+      void fetchMediaResource(url, {}, undefined, requestId ?? undefined).then((resource) => {
+        pendingRequest = false;
+        if (settled) return;
+        if (!resource) { finish(null); return; }
+        image.src = imageDataUrl(resource.bodyBase64, resource.contentType);
+      }).catch(() => finish(null));
+    } else image.src = url;
   });
 }

@@ -14,9 +14,11 @@ import Plyr from "plyr";
 import "plyr/dist/plyr.css";
 
 import { Button } from "@/components/ui/button";
+import { imageDataUrl, isEmbeddedImage } from "@/components/policy-image";
 import { cn } from "@/lib/utils";
 import {
   fetchMediaResource,
+  cancelMediaRequest,
   isTauriRuntime,
   probeMediaContainer,
   streamMediaResource,
@@ -165,6 +167,7 @@ class TauriMediaLoader implements Loader<LoaderContext> {
   private aborted = false;
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
   private responseHeaders = new Map<string, string>();
+  private requestId: string | null = null;
 
   constructor(
     _config: HlsConfig,
@@ -178,8 +181,11 @@ class TauriMediaLoader implements Loader<LoaderContext> {
     config: LoaderConfiguration,
     callbacks: LoaderCallbacks<LoaderContext>,
   ) {
+    this.abort();
     this.context = context;
     this.aborted = false;
+    const requestId = crypto.randomUUID();
+    this.requestId = requestId;
     this.stats = new LoadStats();
     this.stats.loading.start = performance.now();
     const headers = { ...(this.getRequestHeaders() ?? {}), ...context.headers };
@@ -201,6 +207,7 @@ class TauriMediaLoader implements Loader<LoaderContext> {
     const timeoutPromise = new Promise<never>((_, reject) => {
       this.timeoutId = setTimeout(() => {
         timedOut = true;
+        void cancelMediaRequest(requestId).catch(() => undefined);
         reject(new Error("媒体请求超时"));
       }, timeoutMs);
     });
@@ -210,11 +217,12 @@ class TauriMediaLoader implements Loader<LoaderContext> {
         context.url,
         headers,
         isPlaylistContext(context) ? PLAYLIST_MAX_BYTES : undefined,
+        requestId,
       ),
       timeoutPromise,
     ])
       .then((resource) => {
-        if (this.aborted) return;
+        if (this.aborted || this.requestId !== requestId) return;
         if (!resource) throw new Error("桌面运行时未返回媒体资源");
         const bytes = decodeBase64(resource.bodyBase64);
         const now = performance.now();
@@ -263,7 +271,7 @@ class TauriMediaLoader implements Loader<LoaderContext> {
         );
       })
       .catch((error: unknown) => {
-        if (this.aborted) return;
+        if (this.aborted || this.requestId !== requestId) return;
         const message = error instanceof Error ? error.message : String(error);
         if (timedOut) {
           callbacks.onTimeout(this.stats, context, null);
@@ -277,12 +285,18 @@ class TauriMediaLoader implements Loader<LoaderContext> {
         }
       })
       .finally(() => {
+        if (this.requestId !== requestId) return;
+        this.requestId = null;
         if (this.timeoutId !== null) clearTimeout(this.timeoutId);
         this.timeoutId = null;
       });
   }
 
   abort() {
+    if (this.requestId) {
+      void cancelMediaRequest(this.requestId).catch(() => undefined);
+      this.requestId = null;
+    }
     this.aborted = true;
     this.stats.aborted = true;
     if (this.timeoutId !== null) clearTimeout(this.timeoutId);
@@ -528,6 +542,23 @@ export function MediaPlayer({
   onPlayable,
 }: MediaPlayerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const posterImageRef = useRef<{ source: string; url: string } | null>(null);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !isTauriRuntime() || !poster || isEmbeddedImage(poster)) return;
+    let cancelled = false;
+    const requestId = crypto.randomUUID();
+    void fetchMediaResource(poster, {}, undefined, requestId).then((resource) => {
+      if (cancelled || !resource) return;
+      const imageUrl = imageDataUrl(resource.bodyBase64, resource.contentType);
+      posterImageRef.current = { source: poster, url: imageUrl };
+      video.poster = imageUrl;
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+      void cancelMediaRequest(requestId).catch(() => undefined);
+    };
+  }, [poster]);
   const playerRef = useRef<Plyr | null>(null);
   /** Whether the player can be driven yet; shared by every pipeline, so it lives in a ref. */
   const playerReadyRef = useRef(false);
@@ -1123,7 +1154,7 @@ export function MediaPlayer({
         );
       },
       onTimeUpdate: (currentTime) => {
-        if (Number.isFinite(currentTime) && currentTime - lastProgress >= 5) {
+        if (Number.isFinite(currentTime) && Math.abs(currentTime - lastProgress) >= 5) {
           lastProgress = currentTime;
           callbackRef.current.onProgress?.(currentTime);
         }
@@ -1138,7 +1169,13 @@ export function MediaPlayer({
     // between the probe answering and the picture starting, on a channel that was about to work.
     setHasFailed(false);
     if (!liveMode) report("loading");
-    video.poster = initialSource.poster ?? "";
+    const setVideoPoster = (source: MediaSourceState) => {
+      const image = posterImageRef.current;
+      video.poster = isTauriRuntime() && !isEmbeddedImage(source.poster)
+        ? (image?.source === source.poster ? image?.url ?? "" : "")
+        : source.poster ?? "";
+    };
+    setVideoPoster(initialSource);
 
     // Playability is reported from the media element, not from Plyr's `ready` event. `ready`
     // only means Plyr finished building its DOM, which happens before any media is fetched, so
@@ -1411,7 +1448,7 @@ export function MediaPlayer({
         playbackRequested = source.isLive;
         setIsBuffering(source.isLive);
         setHasFailed(false);
-        video.poster = source.poster ?? "";
+        setVideoPoster(source);
         recorder.push("切换播放地址", truncateForDiagnostics(source.url));
         // mpegts.js has no "change the address" call: the data source is fixed at construction, so
         // a switch rebuilds the instance. `restartFlvPipeline` is exactly that path.
@@ -1751,7 +1788,7 @@ export function MediaPlayer({
         playbackRequested = source.isLive;
         setIsBuffering(source.isLive);
         setHasFailed(false);
-        video.poster = source.poster ?? "";
+        setVideoPoster(source);
         recorder.push("切换播放地址", truncateForDiagnostics(source.url));
         instance.loadSource(source.url);
         instance.startLoad(-1);
@@ -1769,7 +1806,7 @@ export function MediaPlayer({
         if (isHlsSource(source) || isFlvSource(source)) return;
         setIsBuffering(false);
         setHasFailed(false);
-        video.poster = source.poster ?? "";
+        setVideoPoster(source);
         recorder.push("原生装载地址", truncateForDiagnostics(source.url));
         video.src = source.url;
         video.load();
@@ -1777,7 +1814,7 @@ export function MediaPlayer({
       retryRef.current = () => {
         setHasFailed(false);
         recorder.push("用户重试", "重新装载当前地址");
-        video.poster = sourceRef.current.poster ?? "";
+        setVideoPoster(sourceRef.current);
         video.src = sourceRef.current.url;
         video.load();
       };

@@ -70,6 +70,21 @@ function merge(persisted: unknown) {
 }
 
 describe("the persisted store's merge", () => {
+  it("never lets stored fields replace actions or put malformed snapshots into the UI", () => {
+    const merged = merge({ setTheme: "broken", rawConfig: 42, normalizedConfig: {}, activeConfigId: "1", autoEpgEnabled: "false",
+      configDocuments: [null], sources: [null], configDocumentCache: { 1: null },
+      favorites: [{ key: "bad", item: {} }], liveFavorites: [{ key: "bad", channel: {} }], history: [{ kind: "vod" }] });
+    expect(merged.setTheme).toBe(useAppStore.getState().setTheme);
+    expect(merged.rawConfig).toBe("");
+    expect(merged.normalizedConfig).toBe("");
+    expect(merged.activeConfigId).toBeNull();
+    expect(merged.autoEpgEnabled).toBe(true);
+    expect(merged.configDocuments).toEqual([]);
+    expect(merged.sources).toEqual([]);
+    expect(merged.favorites).toEqual([]);
+    expect(merged.liveFavorites).toEqual([]);
+    expect(merged.history).toEqual([]);
+  });
   it("keeps favourites and footprints even with no configuration imported", () => {
     // **The reported defect.** With no configuration, the merge answered `[]` for every collection, so
     // an install without one lost its favourites, its footprints and its saved positions on the next

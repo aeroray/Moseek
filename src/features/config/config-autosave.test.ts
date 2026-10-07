@@ -30,6 +30,13 @@ const previous = {
 };
 
 describe("what a save writes", () => {
+  it("removes omitted sources and follows the edited order while keeping local state", () => {
+    const old = [source({ key: "a", api: "https://a.example", enabled: false }), source({ key: "b", api: "https://b.example" }), source({ key: "c", api: "https://c.example" })];
+    const text = JSON.stringify({ sites: [{ key: "c", name: "C", api: "https://c.example" }, { key: "a", name: "A", api: "https://a.example" }] });
+    const payload = resolveSavePayload({ text, parsed: parseConfigText(text), previousSources: old, previousNormalizedConfig: "{}", previousLiveCount: 0 });
+    expect(payload.sources.map((item) => item.key)).toEqual(["c", "a"]);
+    expect(payload.sources[1].enabled).toBe(false);
+  });
   it("writes valid text and regenerates the derived state", () => {
     // The kept source shares the parsed source's address, so the merge recognises it as the same
     // source and its switch state survives. That is the point of merging by identity rather than

@@ -261,7 +261,9 @@ fn apply_request_headers(
     for (name, value) in headers {
         // `upgrade` is checked here rather than being listed above so the message names the header
         // the caller actually sent.
-        if PROTECTED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) || name.eq_ignore_ascii_case("upgrade") {
+        if PROTECTED_HEADERS.contains(&name.to_ascii_lowercase().as_str())
+            || name.eq_ignore_ascii_case("upgrade")
+        {
             return Err(format!("不允许覆盖受保护的 HTTP 请求头：{name}"));
         }
         let header_name = HeaderName::from_bytes(name.as_bytes())
@@ -271,6 +273,16 @@ fn apply_request_headers(
         request = request.header(header_name, header_value);
     }
     Ok(request)
+}
+
+fn redirect_headers(headers: &mut Vec<(String, String)>, from: &Url, to: &Url) {
+    if from.origin() != to.origin() {
+        headers.retain(|(name, _)| {
+            !["authorization", "cookie", "cookie2"]
+                .iter()
+                .any(|sensitive| name.eq_ignore_ascii_case(sensitive))
+        });
+    }
 }
 
 /// Opens a media response and hands back the body as a stream, following bounded redirects.
@@ -283,10 +295,11 @@ pub(crate) async fn open_media_response(
     headers: &[(String, String)],
 ) -> Result<(reqwest::Response, Url), String> {
     let mut current_url = url;
+    let mut headers = headers.to_vec();
     for redirect_index in 0..=MEDIA_REDIRECT_LIMIT {
         validate_remote_url(&current_url)?;
         let client = build_http_client_with(&current_url, ClientMode::Streaming).await?;
-        let request = apply_request_headers(client.get(current_url.clone()), headers)?;
+        let request = apply_request_headers(client.get(current_url.clone()), &headers)?;
         let response = request
             .send()
             .await
@@ -312,6 +325,7 @@ pub(crate) async fn open_media_response(
                     "{resource_name}的重定向没有指向新地址（Location 为空或指向自身），该地址当前不可用"
                 ));
             }
+            redirect_headers(&mut headers, &current_url, &next_url);
             current_url = next_url;
             continue;
         }
@@ -493,11 +507,12 @@ async fn fetch_response_bytes(
     max_redirects: usize,
 ) -> Result<(Vec<u8>, Option<String>, Url), String> {
     let mut current_url = url;
+    let mut headers = headers.to_vec();
     for redirect_index in 0..=max_redirects {
         validate_remote_url(&current_url)?;
         let client = build_http_client(&current_url).await?;
         let mut request = client.request(method.clone(), current_url.clone());
-        request = apply_request_headers(request, headers)?;
+        request = apply_request_headers(request, &headers)?;
         if let Some(body) = body.clone() {
             request = request.body(body);
         }
@@ -535,6 +550,7 @@ async fn fetch_response_bytes(
                     "{resource_name}的重定向没有指向新地址（Location 为空或指向自身），该地址当前不可用"
                 ));
             }
+            redirect_headers(&mut headers, &current_url, &next_url);
             current_url = next_url;
             continue;
         }
@@ -633,7 +649,10 @@ async fn resolve_allowed_addresses(
     let addresses = resolve_host_with_timeout(host, port).await?;
     // Any disallowed address rejects the host outright, matching the rule applied to a literal
     // address: a name that can reach the local network is not a name we contact.
-    if addresses.iter().any(|address| is_disallowed_ip(address.ip())) {
+    if addresses
+        .iter()
+        .any(|address| is_disallowed_ip(address.ip()))
+    {
         return Err(format!("{host} 解析到本机或局域网地址，Moseek 不会请求它"));
     }
     if addresses.is_empty() {
@@ -644,6 +663,14 @@ async fn resolve_allowed_addresses(
 
 async fn build_http_client(url: &Url) -> Result<Client, String> {
     build_http_client_with(url, ClientMode::Buffered).await
+}
+
+pub(crate) async fn validate_public_destination(url: &Url) -> Result<(), String> {
+    validate_remote_url(url)?;
+    let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    resolve_allowed_addresses(host, url.port_or_known_default().unwrap_or(443)).await?;
+    Ok(())
 }
 
 /// How a request's deadline is applied.
@@ -673,6 +700,8 @@ async fn build_http_client_with(url: &Url, mode: ClientMode) -> Result<Client, S
     // enforced for names.
     let resolved_addresses = resolve_allowed_addresses(host, port).await?;
     let builder = Client::builder()
+        // A proxy resolves the target itself, bypassing our pinned DNS addresses.
+        .no_proxy()
         .connect_timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         // **All** resolved addresses are handed to reqwest, not just the first. reqwest tries them
@@ -726,6 +755,39 @@ fn is_disallowed_ip(address: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn redirects_drop_credentials_on_every_origin_change() {
+        let original: reqwest::Url = "https://example.com/a".parse().unwrap();
+        for target in [
+            "https://cdn.example.com/b",
+            "http://example.com/b",
+            "https://example.com:444/b",
+        ] {
+            let mut headers = vec![
+                ("Authorization".to_string(), "Bearer secret".to_string()),
+                ("cOoKiE".to_string(), "session=secret".to_string()),
+                ("Range".to_string(), "bytes=0-9".to_string()),
+                ("Referer".to_string(), "https://example.com/".to_string()),
+            ];
+            super::redirect_headers(&mut headers, &original, &target.parse().unwrap());
+            assert_eq!(headers.len(), 2);
+            assert_eq!(headers[0].0, "Range");
+            super::redirect_headers(&mut headers, &target.parse().unwrap(), &original);
+            assert_eq!(
+                headers.len(),
+                2,
+                "credentials must not return on a later hop"
+            );
+        }
+        let mut same_origin = vec![("Cookie".to_string(), "session=secret".to_string())];
+        super::redirect_headers(
+            &mut same_origin,
+            &original,
+            &"https://example.com/b".parse().unwrap(),
+        );
+        assert_eq!(same_origin.len(), 1);
+    }
+
     use super::{
         collapse_whitespace, is_disallowed_ip, resolve_allowed_addresses, resolve_host,
         validate_remote_url, DNS_TIMEOUT,

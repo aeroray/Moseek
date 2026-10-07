@@ -91,6 +91,8 @@ export function ConfigVisualEditor({
     return map;
   }, [sources]);
 
+  const hasComments = useMemo(() => hasUnpreservedSyntax(value), [value]);
+
   if (!model.ok) {
     return (
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 rounded-md border border-dashed border-border/70 p-8 text-center">
@@ -105,7 +107,6 @@ export function ConfigVisualEditor({
     );
   }
 
-  const hasComments = useMemo(() => hasUnpreservedSyntax(value), [value]);
   const normalizedQuery = query.trim().toLowerCase();
 
   const apply = (next: string, error: string | null) => {

@@ -1,4 +1,5 @@
 import type { LiveFavorite, ThemeMode, VodFavorite } from "@/types/moseek";
+import { normalizeLiveFavorite, normalizeVodFavorite } from "@/lib/user-content";
 
 /**
  * The part of an export that is not configuration.
@@ -88,14 +89,10 @@ export function readExportExtras(configText: string): MoseekExportExtras | null 
   if (source.theme === "light" || source.theme === "dark" || source.theme === "system") {
     extras.theme = source.theme;
   }
-  const favorites = sanitizeList<VodFavorite>(source.favorites, (entry) =>
-    Boolean(entry && typeof entry.key === "string" && entry.item && typeof entry.item === "object"),
-  );
+  const favorites = sanitizeList(source.favorites, normalizeVodFavorite);
   if (favorites) extras.favorites = favorites;
 
-  const liveFavorites = sanitizeList<LiveFavorite>(source.liveFavorites, (entry) =>
-    Boolean(entry && typeof entry.key === "string" && entry.channel && typeof entry.channel === "object"),
-  );
+  const liveFavorites = sanitizeList(source.liveFavorites, normalizeLiveFavorite);
   if (liveFavorites) extras.liveFavorites = liveFavorites;
 
   return extras;
@@ -110,8 +107,8 @@ export function readExportExtras(configText: string): MoseekExportExtras | null 
  */
 function sanitizeList<T>(
   value: unknown,
-  isValid: (entry: T) => boolean,
+  normalize: (entry: unknown) => T | null,
 ): T[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  return value.filter((entry): entry is T => isValid(entry as T));
+  return value.map(normalize).filter((entry): entry is T => entry !== null);
 }

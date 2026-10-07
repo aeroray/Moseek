@@ -5,6 +5,7 @@ mod db;
 mod download;
 mod html;
 mod live;
+mod media_requests;
 mod models;
 mod page_stream;
 mod policy;

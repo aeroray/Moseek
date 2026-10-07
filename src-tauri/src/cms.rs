@@ -124,8 +124,7 @@ pub async fn browse_source(
     );
     let mut page = match fetch_catalog(&source, adapter, &params).await {
         Ok(payload) => {
-            let parsed =
-                parse_catalog_page(&payload, &source.key, current_page, current_page_size);
+            let parsed = parse_catalog_page(&payload, &source.key, current_page, current_page_size);
             if parsed.items.is_empty() && wants_detail {
                 None
             } else {
@@ -563,11 +562,21 @@ fn catalog_url(api: &str, params: &[(String, String)]) -> Result<reqwest::Url, S
 const CMS_RESPONSE_MAX_BYTES: usize = 15 * 1024 * 1024;
 
 async fn request_json(api: &str, params: &[(String, String)]) -> Result<Value, String> {
-    fetch_json(catalog_url(api, params)?, CMS_RESPONSE_MAX_BYTES, "CMS 响应").await
+    fetch_json(
+        catalog_url(api, params)?,
+        CMS_RESPONSE_MAX_BYTES,
+        "CMS 响应",
+    )
+    .await
 }
 
 async fn request_text(api: &str, params: &[(String, String)]) -> Result<String, String> {
-    fetch_text(catalog_url(api, params)?, CMS_RESPONSE_MAX_BYTES, "CMS 响应").await
+    fetch_text(
+        catalog_url(api, params)?,
+        CMS_RESPONSE_MAX_BYTES,
+        "CMS 响应",
+    )
+    .await
 }
 
 /// Which `ac` a catalog listing should use for a given adapter. Only plain JSON CMS sources
@@ -1261,7 +1270,13 @@ mod tests {
     /// The fallback path must still be able to ask for the slim listing.
     #[test]
     fn slim_listing_variant_still_uses_ac_list() {
-        let params = cms_params_with_ac("list", "关键词".to_string(), Some("电影".to_string()), 3, 20);
+        let params = cms_params_with_ac(
+            "list",
+            "关键词".to_string(),
+            Some("电影".to_string()),
+            3,
+            20,
+        );
 
         assert!(params.contains(&("ac".to_string(), "list".to_string())));
         assert!(params.contains(&("pg".to_string(), "3".to_string())));
@@ -1446,7 +1461,10 @@ mod tests {
                 "default: items={} total={} with_poster={}",
                 page.items.len(),
                 page.total,
-                page.items.iter().filter(|i| !i.poster.trim().is_empty()).count()
+                page.items
+                    .iter()
+                    .filter(|i| !i.poster.trim().is_empty())
+                    .count()
             );
             assert!(!page.items.is_empty());
             assert!(
@@ -1455,11 +1473,20 @@ mod tests {
             );
 
             // The category that returns the folder list: nothing must survive as a work.
-            let folders =
-                super::browse_source(diag_extension_source(), String::new(), Some("1".to_string()), 1, 20)
-                    .await
-                    .expect("the folder category answers");
-            println!("category 1: items={} total={}", folders.items.len(), folders.total);
+            let folders = super::browse_source(
+                diag_extension_source(),
+                String::new(),
+                Some("1".to_string()),
+                1,
+                20,
+            )
+            .await
+            .expect("the folder category answers");
+            println!(
+                "category 1: items={} total={}",
+                folders.items.len(),
+                folders.total
+            );
             assert!(
                 folders.items.is_empty(),
                 "the folder rows must be filtered out, got {}",
@@ -1632,7 +1659,10 @@ mod tests {
         );
 
         assert_eq!(page.items.len(), 3);
-        assert_eq!(page.total, 3, "a page with works keeps the source's own total");
+        assert_eq!(
+            page.total, 3,
+            "a page with works keeps the source's own total"
+        );
     }
 
     /// A mixed page keeps the source's total: only a wholly-folder page is re-counted.
@@ -1690,7 +1720,10 @@ mod tests {
             20,
         );
 
-        assert_eq!(page.items[0].description, "改编自同名小说。 顾长歌穿越到玄幻世界。");
+        assert_eq!(
+            page.items[0].description,
+            "改编自同名小说。 顾长歌穿越到玄幻世界。"
+        );
     }
 
     /// `vod_area` is frequently absent, which is why the card showed "未知地区". The parser
@@ -1713,10 +1746,12 @@ mod tests {
     fn plain_text_handles_entities_and_stray_markup() {
         assert_eq!(super::plain_text("a &lt; b &gt; c"), "a < b > c");
         assert_eq!(super::plain_text("x&nbsp;y"), "x y");
-        assert_eq!(super::plain_text("未知实体 &foo; 保留"), "未知实体 &foo; 保留");
+        assert_eq!(
+            super::plain_text("未知实体 &foo; 保留"),
+            "未知实体 &foo; 保留"
+        );
         assert_eq!(super::plain_text("<b>粗体</b>普通"), "粗体 普通");
         assert_eq!(super::plain_text("  多   空格  "), "多 空格");
         assert_eq!(super::plain_text(""), "");
     }
-
 }

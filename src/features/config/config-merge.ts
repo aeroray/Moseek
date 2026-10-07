@@ -499,7 +499,7 @@ export function mergeSourceLists<
     capability?: string;
     enabled?: boolean;
   },
->(existing: T[], incoming: T[]): SourceMergeResult<T> {
+>(existing: T[], incoming: T[], keepOnlyIncoming = false): SourceMergeResult<T> {
   const merged = [...existing];
   const slotsByIdentity = new Map<string, number[]>();
   merged.forEach((source, index) => {
@@ -513,6 +513,7 @@ export function mergeSourceLists<
   // an identity would both resolve to the first free slot and one would overwrite the other —
   // which is exactly how the author's 配置 2 lost 米搜 to 米搜-2.
   const claimed = new Set<number>();
+  const incomingOrder: number[] = [];
   let added = 0;
   let updated = 0;
   let unchanged = 0;
@@ -550,11 +551,13 @@ export function mergeSourceLists<
       if (slots) slots.push(index);
       else slotsByIdentity.set(identity, [index]);
       claimed.add(index);
+      incomingOrder.push(index);
       added += 1;
       continue;
     }
 
     claimed.add(at);
+    incomingOrder.push(at);
     const before = merged[at];
     // A plain record for the copy: an intersection with a generic parameter is readable but not
     // writable, and the fields being restored are not part of the generic's known shape.
@@ -586,7 +589,10 @@ export function mergeSourceLists<
     updated += 1;
   }
 
-  return { sources: ensureUniqueKeys(merged), added, updated, unchanged };
+  return {
+    sources: ensureUniqueKeys(keepOnlyIncoming ? incomingOrder.map((index) => merged[index]) : merged),
+    added, updated, unchanged,
+  };
 }
 
 /**

@@ -11,7 +11,7 @@
  */
 import { readFile } from "node:fs/promises";
 
-const rawTag = process.argv[2] || process.env.GITHUB_REF_NAME;
+const rawTag = process.argv[2] || process.env.RELEASE_TAG || process.env.GITHUB_REF_NAME;
 const version = rawTag?.replace(/^v/, "");
 
 if (!version || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {

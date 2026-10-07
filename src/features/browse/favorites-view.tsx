@@ -658,7 +658,7 @@ function FavoriteWatchView({
     (episode: VodEpisode) => {
       setActiveEpisodeId(episode.id);
       if (activeLine) {
-        setFavoriteProgress(item.id, {
+        setFavoriteProgress(favorite.key, {
           lineId: activeLine.id,
           episodeId: episode.id,
           episodeName: episode.name,
@@ -668,7 +668,7 @@ function FavoriteWatchView({
         });
       }
     },
-    [activeLine, item.id, setFavoriteProgress],
+    [activeLine, favorite.key, setFavoriteProgress],
   );
 
   /**
@@ -686,7 +686,7 @@ function FavoriteWatchView({
         : undefined;
       const next = sameEpisode ?? line.episodes[0];
       setActiveEpisodeId(next?.id ?? "");
-      setFavoriteProgress(item.id, {
+      setFavoriteProgress(favorite.key, {
         lineId: line.id,
         episodeId: next?.id ?? "",
         episodeName: next?.name ?? "",
@@ -695,7 +695,7 @@ function FavoriteWatchView({
         updatedAt: new Date().toISOString(),
       });
     },
-    [activeEpisode?.name, item.id, setFavoriteProgress],
+    [activeEpisode?.name, favorite.key, setFavoriteProgress],
   );
 
   return (
@@ -817,7 +817,7 @@ function FavoriteWatchView({
                     : null,
                 )}
                 onProgress={(seconds) =>
-                  setFavoriteProgress(item.id, {
+                  setFavoriteProgress(favorite.key, {
                     lineId: activeLine?.id ?? "",
                     episodeId: activeEpisode.id,
                     episodeName: activeEpisode.name,
@@ -1165,5 +1165,4 @@ async function resolvePlaybackSafe(url: string) {
     return { url, mediaKind: "hls" as MediaKind };
   }
 }
-
 

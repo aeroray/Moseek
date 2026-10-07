@@ -410,7 +410,6 @@ export function ConfigCenter() {
    * backend's own timeout, and their results are discarded once cancelled.
    */
   const [isBatchTesting, setIsBatchTesting] = useState(false);
-  const cancelTestRef = useRef(false);
   /**
    * Releases the running batch when the user cancels. Held in a ref so the row-level cancel
    * buttons and the toolbar button all reach the same in-flight run.
@@ -426,6 +425,8 @@ export function ConfigCenter() {
    */
   const lastSavedText = useRef<string | null>(null);
   const editorText = rawDraft ?? rawConfig;
+  const latestEditorText = useRef(editorText);
+  latestEditorText.current = editorText;
   const activeDocument =
     activeConfigId === null ? undefined : configDocumentCache[activeConfigId];
   const relativeLiveSources = useMemo(
@@ -848,16 +849,19 @@ export function ConfigCenter() {
   const cancelledTestKeys = useRef(new Set<string>());
   /** The run id each in-flight single test is registered under, so cancelling can reach it. */
   const singleTestRunIds = useRef(new Map<string, string>());
+  const testingOwners = useRef(new Map<string, string>());
 
   const handleTestSource = useCallback(
     async (source: SourceRecord) => {
-      if (testingKeys.has(source.key)) return;
+      if (testingOwners.current.has(source.key)) return;
     cancelledTestKeys.current.delete(source.key);
-    const runId = `single-${source.key}-${Date.now()}`;
+    const runId = `single-${source.key}-${crypto.randomUUID()}`;
     singleTestRunIds.current.set(source.key, runId);
+    testingOwners.current.set(source.key, runId);
     setTestingKeys((current) => new Set(current).add(source.key));
     try {
       const result = await testSource(source, runId);
+      if (singleTestRunIds.current.get(source.key) !== runId || useAppStore.getState().activeConfigId !== activeConfigId) return null;
       // **Checked before anything is written.** A cancelled test must not persist its result: a
       // failure would switch the source off, so abandoning a test and then having it silently
       // disable the source would be worse than not offering the cancel at all.
@@ -884,10 +888,11 @@ export function ConfigCenter() {
         return null;
       }
       if (persistedDocument) {
-        setConfigDocument(persistedDocument);
-      } else {
-        setSourceTestResult(source.key, result);
+        if (useAppStore.getState().activeConfigId !== activeConfigId || singleTestRunIds.current.get(source.key) !== runId) return null;
       }
+      // Replies contain a full snapshot, and concurrent replies can arrive out of order.
+      // Apply only this result so an older reply cannot erase another source's newer result.
+      setSourceTestResult(source.key, result);
       // Reported as a toast rather than a banner: this describes one finished operation, and a
       // banner left it on the page until the next action replaced it. A test that found the
       // source unusable also switches it off, which is worth saying because the switch in the
@@ -904,6 +909,7 @@ export function ConfigCenter() {
       });
       return result;
     } catch (error) {
+      if (singleTestRunIds.current.get(source.key) !== runId || useAppStore.getState().activeConfigId !== activeConfigId) return null;
       if (cancelledTestKeys.current.has(source.key)) {
         cancelledTestKeys.current.delete(source.key);
         return null;
@@ -921,20 +927,22 @@ export function ConfigCenter() {
       });
       return null;
     } finally {
-      singleTestRunIds.current.delete(source.key);
-      setTestingKeys((current) => {
-        const next = new Set(current);
-        next.delete(source.key);
-        return next;
-      });
+      if (singleTestRunIds.current.get(source.key) === runId) {
+        singleTestRunIds.current.delete(source.key);
+        if (testingOwners.current.get(source.key) === runId) testingOwners.current.delete(source.key);
+        setTestingKeys((current) => {
+          const next = new Set(current);
+          next.delete(source.key);
+          return next;
+        });
+      }
+      void forgetSourceTestRun(runId).catch(() => undefined);
     }
     },
     [
       activeConfigId,
-      setConfigDocument,
       setSourceTestResult,
       testSource,
-      testingKeys,
       toast,
     ],
   );
@@ -954,8 +962,8 @@ export function ConfigCenter() {
     cancelledTestKeys.current.add(sourceKey);
     const runId = singleTestRunIds.current.get(sourceKey);
     if (runId) {
+      if (testingOwners.current.get(sourceKey) === runId) testingOwners.current.delete(sourceKey);
       void cancelSourceTest(runId)
-        .then(() => forgetSourceTestRun(runId))
         .catch(() => undefined);
     }
     setTestingKeys((current) => {
@@ -972,10 +980,13 @@ export function ConfigCenter() {
    * finish overwrote every other result and the summary was the only thing the user ever saw.
    * Per-source outcomes belong on the rows; the banner is for the batch.
    */
-  const runBatchTest = async (source: SourceRecord, runId: string) => {
+  const runBatchTest = async (source: SourceRecord, runId: string, run: { cancelled: boolean }) => {
+    if (run.cancelled || useAppStore.getState().activeConfigId !== activeConfigId || testingOwners.current.has(source.key)) return null;
+    testingOwners.current.set(source.key, runId);
     setTestingKeys((current) => new Set(current).add(source.key));
     try {
       const result = await testSource(source, runId);
+      if (run.cancelled || useAppStore.getState().activeConfigId !== activeConfigId) return null;
       if (!result) return null;
       // **A cancelled test must not be written.** The backend returns a sentinel rather than a
       // result when it drops the request, and persisting that would mark the source 测试失败 — or
@@ -989,12 +1000,9 @@ export function ConfigCenter() {
           : await updateSourceTest(activeConfigId, source.key, result);
       // The user can cancel while the result is being written, so the check is repeated after the
       // round-trip: the write may already be in flight when the cancel arrives.
-      if (cancelTestRef.current) return null;
-      if (persistedDocument) {
-        setConfigDocument(persistedDocument);
-      } else {
-        setSourceTestResult(source.key, result);
-      }
+      if (run.cancelled || useAppStore.getState().activeConfigId !== activeConfigId) return null;
+      void persistedDocument;
+      setSourceTestResult(source.key, result);
       return result;
     } catch (error) {
       // A cancelled request rejects rather than resolving with a sentinel, so the cancellation has
@@ -1002,11 +1010,14 @@ export function ConfigCenter() {
       if (isCancelledTestError(error)) return null;
       return null;
     } finally {
-      setTestingKeys((current) => {
-        const next = new Set(current);
-        next.delete(source.key);
-        return next;
-      });
+      if (testingOwners.current.get(source.key) === runId) {
+        testingOwners.current.delete(source.key);
+        setTestingKeys((current) => {
+          const next = new Set(current);
+          next.delete(source.key);
+          return next;
+        });
+      }
     }
   };
 
@@ -1027,7 +1038,6 @@ export function ConfigCenter() {
       return;
     }
     setIsBatchTesting(true);
-    cancelTestRef.current = false;
     /**
      * This run's identity, which is what makes cancelling reach the sockets.
      *
@@ -1037,6 +1047,7 @@ export function ConfigCenter() {
      * drop exactly this batch's requests without touching a later run.
      */
     const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const run = { cancelled: false };
     /**
      * Cancelling now does two things, and it needs both.
      *
@@ -1050,7 +1061,11 @@ export function ConfigCenter() {
       releaseCancellation = resolve;
     });
     const cancelRequested = () => {
-      cancelTestRef.current = true;
+      run.cancelled = true;
+      for (const [key, owner] of testingOwners.current) {
+        if (owner === runId) testingOwners.current.delete(key);
+      }
+      setTestingKeys(new Set(testingOwners.current.keys()));
       releaseCancellation();
       // Fire-and-forget: the local state is already correct, and making the button await a
       // round-trip would reintroduce the delay this exists to remove.
@@ -1060,6 +1075,7 @@ export function ConfigCenter() {
 
     const queue = [...targets];
     const results: SourceTestResult[] = [];
+    const inFlight: Promise<SourceTestResult | null>[] = [];
     // A small worker pool rather than one request at a time or all at once: testing serially made
     // a 70-source configuration take as long as the sum of every source's latency, while firing
     // every request together would open dozens of sockets and trip rate limits.
@@ -1067,25 +1083,27 @@ export function ConfigCenter() {
       { length: Math.min(TEST_CONCURRENCY, queue.length) },
       async () => {
         for (;;) {
-          if (cancelTestRef.current) return;
+          if (run.cancelled) return;
           const source = queue.shift();
           if (!source) return;
+          const task = runBatchTest(source, runId, run);
+          inFlight.push(task);
           const outcome = await Promise.race([
-            runBatchTest(source, runId).then((result) => ({ result })),
+            task.then((result) => ({ result })),
             cancelledSignal.then(() => null),
           ]);
-          if (cancelTestRef.current) return;
+          if (run.cancelled) return;
           if (outcome?.result) results.push(outcome.result);
         }
       },
     );
     await Promise.all(workers);
-    const cancelled = cancelTestRef.current;
+    const cancelled = run.cancelled;
     cancelRunRef.current = null;
     setIsBatchTesting(false);
     // The run is over, so its flag is released. Without this a long session of many batches would
     // accumulate one entry per run for the process's lifetime.
-    void forgetSourceTestRun(runId).catch(() => undefined);
+    void Promise.allSettled(inFlight).then(() => forgetSourceTestRun(runId)).catch(() => undefined);
 
     const passedCount = results.filter(
       (result) => result.status === "passed",
@@ -1714,10 +1732,13 @@ export function ConfigCenter() {
         importedAt: new Date().toISOString(),
         sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
       };
-      setConfigDocument(document);
+      // The save replaces the document id. Mark its snapshot before the reset effect runs,
+      // so a newer edit typed during the write is not replaced by the older saved text.
+      draftSourceRef.current = { documentId: document.id, rawConfig: document.rawConfig };
+      setConfigDocument(document, true);
       // The draft is dropped so the editors read the saved document again; keeping it would leave
       // the page showing text that no longer matches what is stored.
-      setRawDraft(null);
+      setRawDraft((current) => latestEditorText.current === text ? null : current);
       setRawStatus(
         payload.warning
           ? { tone: "error", message: payload.warning }
@@ -1897,7 +1918,7 @@ export function ConfigCenter() {
       importedAt: new Date().toISOString(),
       sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
     };
-    setConfigDocument(document);
+    setConfigDocument(document, true);
     setLastMergeSummary(
       mergeReport
         ? {

@@ -17,6 +17,17 @@ import type { EpgProgram } from "@/types/moseek";
  */
 const getEpg = vi.fn();
 
+it("relabels cached programmes for each alias of the same channel", async () => {
+  getEpg.mockReset();
+  getEpg.mockResolvedValue({ programs: [{ id: "p", channelId: "provider", title: "新闻", description: "", startAt: "10:00", endAt: "11:00" }] });
+  const request = { template: "https://alias-cache.example/?ch={epg_id}", origin: "configured" as const };
+  const first = await loadEpg(request, { name: "央视一套", epgId: "CCTV1" });
+  const second = await loadEpg(request, { name: "CCTV-1", epgId: "CCTV1" });
+  expect(first.data.programs[0].channelId).toBe("央视一套");
+  expect(second.data.programs[0].channelId).toBe("CCTV-1");
+  expect(getEpg).toHaveBeenCalledTimes(1);
+});
+
 vi.mock("@/lib/tauri", () => ({
   getEpg: (...args: unknown[]) => getEpg(...args),
 }));

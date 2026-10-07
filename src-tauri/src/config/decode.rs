@@ -385,7 +385,10 @@ mod tests {
         // rejecting it reported our encoding guess as the file's fault.
         let (encoded, _, had_errors) = encoding_rs::GB18030.encode("{\"name\":\"中文配置\"}");
         assert!(!had_errors);
-        assert!(std::str::from_utf8(&encoded).is_err(), "must not be valid UTF-8");
+        assert!(
+            std::str::from_utf8(&encoded).is_err(),
+            "must not be valid UTF-8"
+        );
 
         let text = decode_text(&encoded).unwrap();
         assert!(text.contains("中文配置"), "decoded: {text}");
@@ -483,7 +486,11 @@ mod tests {
                 "http://www.饭太硬.net/tv",
                 Expected::Config { unwrapped: true },
             ),
-            ("肥猫", "http://肥猫.net/", Expected::Config { unwrapped: false }),
+            (
+                "肥猫",
+                "http://肥猫.net/",
+                Expected::Config { unwrapped: false },
+            ),
             ("王二小", "http://new.王二小放牛娃.top", Expected::Text),
             (
                 "老刘备",
@@ -528,9 +535,12 @@ mod tests {
 
             for (label, url, expected) in addresses {
                 let parsed = reqwest::Url::parse(url).expect("a valid address");
-                let fetched =
-                    crate::policy::fetch_response_bytes_public(parsed, 10 * 1024 * 1024, "配置响应")
-                        .await;
+                let fetched = crate::policy::fetch_response_bytes_public(
+                    parsed,
+                    10 * 1024 * 1024,
+                    "配置响应",
+                )
+                .await;
 
                 // A dead address is a fact about the address, not a defect here. Everything else must
                 // decode.
@@ -541,7 +551,10 @@ mod tests {
 
                 let decoded = decode_config_body(&body);
                 match (decoded, expected) {
-                    (Ok(DecodedBody::Text { text, unwrap_note }), Expected::Config { unwrapped }) => {
+                    (
+                        Ok(DecodedBody::Text { text, unwrap_note }),
+                        Expected::Config { unwrapped },
+                    ) => {
                         // The BOM is skipped here because one of the measured responses carries it and
                         // it is an encoding artefact rather than content. `looks_like_configuration`
                         // already tolerates it; this assertion has to agree, or it fails a document

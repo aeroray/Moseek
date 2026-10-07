@@ -211,7 +211,7 @@ describe("PlayerView composition", () => {
     const first = useAppStore.getState().history[0].updatedAt;
     await act(async () => {
       // Simulate the player reporting its position, as it does every few seconds.
-      useAppStore.getState().setPlaybackProgress("vod-1:ep-1", 120);
+      useAppStore.getState().setPlaybackProgress("cms-1:vod-1:ep-1", 120);
       await new Promise((resolve) => setTimeout(resolve, 200));
     });
 

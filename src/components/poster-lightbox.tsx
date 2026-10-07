@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { PolicyImage } from "@/components/policy-image";
 import {
   Dialog,
   DialogContent,
@@ -421,7 +422,7 @@ export function PosterLightbox({
               </p>
             </div>
           ) : (
-            <img
+            <PolicyImage
               src={resolvedUrl}
               alt={`${name} 海报大图`}
               draggable={false}
