@@ -85,6 +85,22 @@ describe("the self-drawn window bar", () => {
     expect(windowApi.close).toHaveBeenCalled();
   });
 
+  it("stacks the window bar above the workspace rather than beside it", () => {
+    // **The defect this exists for.** The bar was added inside a container that was still `flex-row`,
+    // so it became a narrow column on the left and the window buttons appeared in the top-left corner
+    // of the window instead of the top-right. jsdom performs no layout, so the class contract is what
+    // is asserted — and it is the contract that was wrong.
+    renderShell();
+
+    const shell = document.querySelector("div.flex.h-screen") as HTMLElement;
+    expect(shell).toBeTruthy();
+    expect(shell.className).toContain("flex-col");
+
+    // The bar must be the first child, so it renders above the rail and the work area.
+    const bar = document.querySelector("[data-tauri-drag-region]") as HTMLElement;
+    expect(shell.firstElementChild).toBe(bar);
+  });
+
   it("keeps the drag region on the bar, so the window can still be moved", () => {
     // Without `data-tauri-drag-region` a frameless window cannot be dragged at all, and the user has
     // no way to move it — the native bar was the thing providing that before.

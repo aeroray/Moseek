@@ -48,7 +48,10 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
 
   return (
     <TooltipProvider delayDuration={150}>
-      <div className="flex h-screen min-h-[640px] min-w-[1080px] bg-background text-foreground antialiased selection:bg-primary/20 selection:text-primary">
+      {/* `flex-col`, because the window bar sits **above** the workspace rather than beside it. With
+          the default `flex-row` the bar became a narrow column on the left and the window buttons
+          ended up in the top-left corner of the screen. */}
+      <div className="flex h-screen min-h-[640px] min-w-[1080px] flex-col bg-background text-foreground antialiased selection:bg-primary/20 selection:text-primary">
         {/* The window's own chrome, drawn inside the content area.
             `decorations` is off in `tauri.conf.json`, so this row is the only place the window can be
             dragged and closed — but it carries **no text at all**. The native title bar repeated the
