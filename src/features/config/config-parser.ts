@@ -3,10 +3,12 @@ import JSON5 from "json5";
 import {
   RAW_FLAG_FIELDS,
   RawConfigSchema,
+  RawLiveSchema,
+  RawSiteSchema,
   type RawLive,
   type RawSite,
 } from "@/features/config/config-schema";
-import { getAdapterProfile } from "@/lib/adapters";
+import { getAdapterProfile, isPermanentlyUnsupported } from "@/lib/adapters";
 import type {
   CapabilityStatus,
   ParseServiceRecord,
@@ -277,6 +279,124 @@ export function parseRawObject(
   } catch {
     return null;
   }
+}
+
+export interface PruneResult {
+  raw: Record<string, unknown>;
+  removed: number;
+}
+
+/**
+ * Removes entries Moseek will never be able to run.
+ *
+ * The user's decision, in their own words: an adapter we cannot support has no business staying on
+ * screen, because recognising it tells the reader nothing and this application is never going to
+ * implement it. Five such adapters used to be listed — drpy, AppMao, remote JAR, spider and CatVod
+ * JS — and an entry belonging to one of them now belongs nowhere: it is dropped from the
+ * configuration, so it is gone from the list, from the export and from the file.
+ *
+ * **The verdict comes from the parser's own classifier, not from a second copy of the rules.** That
+ * is why this lives beside it: the parser already knows that a `type: 3` entry carrying a declarative
+ * vocabulary is XBPQ (readable) while a `type: 3` entry carrying a script address is a spider (not),
+ * and that distinction is buried in dozens of real-world shape checks. Re-deriving it here would
+ * eventually disagree with the parser, and the disagreement would delete working sources from a
+ * user's file — the worst outcome this function could have.
+ *
+ * Only the source collections are touched. `parses` holds playback resolvers rather than sources, and
+ * a bare `proxy://` scheme is left alone: it is not a family we have decided against.
+ *
+ * The document keeps its own shape: an entry that lived under Kitty's `data` stays there, and a
+ * collection the file did not have is not invented.
+ */
+export function pruneUnsupportedEntries(
+  raw: Record<string, unknown>,
+  baseUrl?: string | null,
+): PruneResult {
+  // The dialect decides whether an entry is a CatVod JS extension, so it has to come from the same
+  // reading of the document the parser uses.
+  const { dialect } = normalizeConfigShape(raw);
+  // The classifiers take `string | undefined`; every caller here naturally has a nullable base URL.
+  const base = baseUrl ?? undefined;
+
+  let removed = 0;
+  const next: Record<string, unknown> = { ...raw };
+
+  // Each collection is pruned on its own terms, keeping the document's own spelling: `sites` and
+  // Kitty's `data` are two keys holding the same kind of entry, and a file that uses one does not
+  // get the other invented for it.
+  const pruneSiteCollection = (key: "sites" | "data") => {
+    const entries = raw[key];
+    if (!Array.isArray(entries)) return;
+    const survivors = entries.filter((entry, index) => {
+      const parsed = RawSiteSchema.safeParse(entry);
+      // An entry the schema cannot read is left alone rather than removed: failing to understand
+      // something is not evidence that it is unsupported, and this function's whole risk is
+      // deleting a source that works.
+      if (!parsed.success) return true;
+      const source = classifySource(parsed.data, index, dialect, base);
+      if (!isPermanentlyUnsupported(recordInput(source))) return true;
+      removed += 1;
+      return false;
+    });
+    next[key] = survivors;
+  };
+
+  pruneSiteCollection("sites");
+  pruneSiteCollection("data");
+
+  if (Array.isArray(raw.lives)) {
+    next.lives = raw.lives.filter((entry, index) => {
+      const parsed = RawLiveSchema.safeParse(entry);
+      if (!parsed.success) return true;
+      const source = classifyLiveSource(parsed.data, index, base);
+      if (!isPermanentlyUnsupported(recordInput(source))) return true;
+      removed += 1;
+      return false;
+    });
+  }
+
+  if (removed === 0) return { raw, removed: 0 };
+  return { raw: next, removed };
+}
+
+/**
+ * The fields `isPermanentlyUnsupported` reads, taken from a classified record.
+ *
+ * Delegates to the registry's own adapter for records so the two cannot drift; kept as a local name
+ * because this file classifies raw entries into records and then asks the question immediately.
+ */
+function recordInput(source: SourceRecord) {
+  return {
+    key: source.key,
+    api: source.api,
+    jar: source.jar,
+    siteProtocol: source.siteProtocol ?? null,
+    siteType: source.siteType ?? null,
+    isLive: source.sourceType === "live",
+  };
+}
+
+/**
+ * The text form of `pruneUnsupportedEntries`, for the paths that hold a document as text.
+ *
+ * Text, its source list and its normalised form are three views of one document, so they have to be
+ * pruned **before** the text is parsed: pruning the list afterwards would leave the unsupported
+ * entries in the file, which is the "the list says one thing and the configuration says another"
+ * failure this project has fixed repeatedly.
+ *
+ * A document that cannot be read is returned untouched with `removed: 0`. That is the safe
+ * direction: failing to understand a file is not evidence that anything in it is unusable, and this
+ * function's only real risk is deleting a source that works.
+ */
+export function pruneUnsupportedConfigText(
+  text: string,
+  baseUrl?: string | null,
+): { text: string; removed: number } {
+  const raw = parseRawObject(text);
+  if (!raw) return { text, removed: 0 };
+  const { raw: pruned, removed } = pruneUnsupportedEntries(raw, baseUrl);
+  if (removed === 0) return { text, removed: 0 };
+  return { text: JSON.stringify(pruned, null, 2), removed };
 }
 
 export function formatConfigText(rawText: string): ConfigTextTransformResult {

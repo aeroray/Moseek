@@ -742,6 +742,19 @@ export function MediaPlayer({
    * a genuinely dead stream from sitting on the spinner for ever.
    */
   const armStartupWatchdogRef = useRef<(() => void) | null>(null);
+  /**
+   * The FLV branch's "build the player now", so the resume path can create one that was deferred.
+   *
+   * **Why a pipeline needs to be *created* on return rather than merely restarted.** The FLV branch
+   * refuses to build anything while the view is away — that refusal is what stops a hidden pane from
+   * opening a stream — so a viewer who left before the deferred boot ran, or who changed channel while
+   * away, comes back to a pipeline that does not exist yet. `load()` cannot be called on an instance
+   * that was never constructed, so the resume has to be able to build one.
+   *
+   * Null for every other pipeline: hls.js is restarted by `seekToLiveEdge` → `startLoad(-1)`, and the
+   * native path needs no library at all.
+   */
+  const rebuildFlvPipelineRef = useRef<(() => void) | null>(null);
   const isLiveRef = useRef(isLive);
   isLiveRef.current = isLive;
   useEffect(() => {
@@ -756,18 +769,23 @@ export function MediaPlayer({
     /**
      * Restore what the pipeline withheld while the view was away.
      *
-     * The pipeline sets `autoplay`/`preload` only at mount and skips them when the pane is hidden — see
-     * the note there. Without this, a player mounted during the absence (the favourites page remounts
-     * one when a stream probe resolves, which can happen after the user has left) would stay inert for
-     * ever: `preload="none"` means nothing is even fetched, so returning would show a spinner that
-     * never resolves.
+     * The pipeline sets `preload` only at mount and skips it when the pane is hidden — see the note
+     * there. Without this, a player mounted during the absence (the favourites page remounts one when a
+     * stream probe resolves, which can happen after the user has left) would stay inert for ever:
+     * `preload="none"` means nothing is even fetched, so returning would show a spinner that never
+     * resolves.
+     *
+     * **`autoplay` is deliberately not restored with it.** It used to be set here, and that was a second
+     * way to arm Plyr's own `canplay` handler on a *live* element — Plyr forces `config.autoplay` true
+     * whenever the attribute is present, whatever the constructor was told. The attribute is now never
+     * written anywhere; see the note in the pipeline effect. Starting the stream is this branch's job
+     * below, and it does it explicitly.
      *
      * Done before the resume decision below, because that decision may call `play()` and the element
      * has to be allowed to load by then.
      */
     if (video.preload === "none") {
       video.preload = "auto";
-      video.autoplay = isLiveRef.current;
       // A player that mounted while hidden was never played, so `autoResumeRef` is false and the
       // resume path below would decline. Starting it here is the same intent as resuming a paused one:
       // the user asked for this stream and is now looking at it.
@@ -777,15 +795,23 @@ export function MediaPlayer({
         });
       }
     }
-    if (!autoResumeRef.current) return;
-    autoResumeRef.current = false;
     // Live is handed to the pipeline, which knows how to rejoin the live edge; `play()` alone would
     // resume a buffer that is already behind. VOD has no live edge to catch up to, so it resumes.
     if (isLiveRef.current) {
+      // **A pipeline that was deferred while away still has to be resumed even though this player was
+      // never "left".** `autoResumeRef` is only set by the branch above when the view goes away, so a
+      // player *mounted* inside a hidden pane — the favourites page's remount, or a channel switch made
+      // while away — leaves it false and used to return right here. The effect was then skipped
+      // entirely and nothing ever built the pipeline, so the viewer came back to a spinner that could
+      // not resolve: the audio fix traded for a black pane. `pipelineStoppedByViewRef` is the record
+      // that a pipeline is owed, and it is set by every branch that deferred its work.
+      if (!autoResumeRef.current && !pipelineStoppedByViewRef.current) return;
       resumeLiveRef.current = true;
       liveResumeRef.current?.();
       return;
     }
+    if (!autoResumeRef.current) return;
+    autoResumeRef.current = false;
     void video.play().catch(() => {
       // A rejected play() is normal here: the element may still be waiting for data, and the live
       // path has its own retry policy that owns this decision (`requestLivePlayback`).
@@ -929,7 +955,31 @@ export function MediaPlayer({
         return existing;
       }
       const player = new Plyr(video, {
-        autoplay: liveMode,
+        /**
+         * **Plyr's own autoplay must stay off, and this is not a style choice.**
+         *
+         * Plyr does not merely mirror the option onto the element. When `autoplay` is true it binds
+         * **its own** one-shot handler — `this.once('canplay', () => this.play())` — on its container,
+         * which it feeds by re-dispatching every media event (`canplay` among them). That is a second,
+         * independent path to `play()` that never consults anything in this component: not
+         * `viewAwayRef`, not the pipeline's timers, not `requestLivePlayback`.
+         *
+         * Measured in isolation against the real Plyr with a real <video>: `autoplay: true` produced
+         * exactly one `play()` call from a single `canplay` dispatch, `autoplay: false` produced zero.
+         *
+         * **This is the reported "切到别的页面还能听到直播的声音".** The element's own `autoplay`
+         * attribute is withheld while the view is away (see `viewAway` below), which is what the
+         * earlier fix covered — but a player constructed while the pane was hidden had Plyr's handler
+         * armed regardless. A live channel buffers for a while after the user leaves, fires `canplay`
+         * once the first fragment lands, and Plyr starts the stream into an empty room. It also
+         * explains the timing: nothing happens on the click away, and the sound appears "过一阵子",
+         * because it waits for that first buffered fragment.
+         *
+         * Playback is still started for a live channel — by `requestLivePlayback`, through
+         * `startLivePlayback`, which is where the retry policy, the muted fallback and the
+         * view-away guard all live. Removing this option takes away only the unguarded path.
+         */
+        autoplay: false,
         seekTime: 10,
         settings: ["quality", "speed"],
         speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
@@ -1087,6 +1137,22 @@ export function MediaPlayer({
         pipelineStoppedByViewRef.current = false;
         recorder.push("恢复 FLV 直播流", "视图返回后重新装载");
         flv.load();
+      } else if (pipelineStoppedByViewRef.current && hlsRef.current) {
+        // An HLS pipeline built while away: `loadSource` recorded the address but `autoStartLoad` was
+        // false, so no fragment loader ever started. `seekToLiveEdge` below calls `startLoad(-1)`,
+        // which is what starts them — the flag is cleared by that path, so only the FLV case needs an
+        // explicit branch here.
+        pipelineStoppedByViewRef.current = false;
+        recorder.push("恢复 HLS 直播流", "视图返回后重新开始加载");
+      } else if (pipelineStoppedByViewRef.current) {
+        // **The FLV instance was never built, because the away-guard refused to build it.** This is the
+        // case you reach by navigating away before the deferred boot ran, or by changing channel while
+        // away: nothing exists to `load()`, so the pipeline has to be created here instead. Without
+        // this branch the fix for the background audio would leave a live pane that never starts —
+        // the same trade the FLV reconnect's flag exists to avoid, one step earlier.
+        pipelineStoppedByViewRef.current = false;
+        recorder.push("恢复 FLV 直播流", "视图返回后创建播放器");
+        rebuildFlvPipelineRef.current?.();
       } else {
         pipelineStoppedByViewRef.current = false;
       }
@@ -1209,16 +1275,34 @@ export function MediaPlayer({
     // case where the element does refuse. Pre-muting therefore bought nothing and silenced every
     // stream — the fallback is what handles a refusal, and it now tells the user it did.
     //
-    // **`autoplay` and `preload` are withheld while the view is away, and that is what stops the audio
-    // the user reported.** Everything else here guards *our* calls to `play()`; the `autoplay`
-    // attribute is not ours — the element starts itself, and nothing in this component is consulted.
-    // That matters because the favourites page keys its player on the resolved stream URL, and
-    // `useStreamProbes` changes that URL when a probe finishes. A probe can land after the user has
-    // navigated away, which unmounts the old player and mounts a new one — and a new player has no
-    // memory of having been paused, so it would start playing to an empty room. `preload` goes with it:
-    // fetching ahead for a view nobody is looking at is the same waste as playing to one.
+    /**
+     * **The `autoplay` attribute is never set, and that is the fix for "过一阵子我会听到直播的声音".**
+     *
+     * It used to be `video.autoplay = liveMode && !viewAway`, on the theory that withholding it while the
+     * pane was hidden stopped the element starting itself. The attribute is not only about the element:
+     * **Plyr reads it at construction and forces its own `config.autoplay` to true** —
+     *
+     *     if (this.media.hasAttribute('autoplay')) { this.config.autoplay = true; }
+     *
+     * — which then arms Plyr's own `once('canplay', () => play())`. So a player built while the view was
+     * *visible* (the ordinary case, and the only time this line set it true) permanently gave Plyr a way
+     * to start the stream that consults nothing in this component: not `viewAwayRef`, not
+     * `requestLivePlayback`, not the retry policy. Passing `autoplay: false` to the Plyr constructor does
+     * not help, because the attribute wins over the option.
+     *
+     * **Measured, with the fix for the option already in place but this line still present**: leaving a
+     * channel while it was still buffering produced a `play()` while the pane was hidden, with a stack
+     * that was entirely Plyr's — `HTMLVideoElement canplay` → Plyr's proxy → Plyr's container listener →
+     * `Plyr.play()` → `HTMLMediaElement.play()`. No application frame was involved. The stream then ran
+     * for the ~10 s it took to drain the buffer, which is exactly the "sound a while after leaving" the
+     * user described: the pane was hidden while nothing had been buffered yet, so nothing was paused, and
+     * the sound began when the first fragment finally arrived.
+     *
+     * Playback is started the same way it always was — by `requestLivePlayback` through
+     * `startLivePlayback`, which owns the retry policy, the muted fallback and the view-away guard.
+     * `preload` is kept, because it is purely about fetching and Plyr reads it for nothing.
+     */
     const viewAway = viewAwayRef.current;
-    video.autoplay = liveMode && !viewAway;
     video.defaultMuted = false;
     video.muted = false;
     video.preload = viewAway ? "none" : "auto";
@@ -1343,6 +1427,24 @@ export function MediaPlayer({
       }
 
       const createFlvPlayerNow = () => {
+        /**
+         * **Nothing is built for a view the user has left, and the guard has to be the first line.**
+         *
+         * `createFlvPlayerNow` runs from `scheduleBoot` — a deferred macrotask — and from
+         * `loadSourceRef` when the channel changes, so either can land after a navigation away. It
+         * builds a transmuxer, opens the stream through `load()` and then plays it; every one of those
+         * is work for a viewer who is not there. Measured on the reported bug: with the guard placed
+         * only around `load()`, the mpegts instance was still constructed for a hidden pane.
+         *
+         * mpegts.js has no `autoStartLoad` equivalent — `load()` is the only thing that ever issues the
+         * request — so deferring means not building at all, and `liveResumeRef` builds it on return.
+         * The flag tells that path it must: `pipelineStoppedByViewRef` is what the FLV resume already
+         * consults before calling `load()`.
+         */
+        if (viewAwayRef.current) {
+          pipelineStoppedByViewRef.current = true;
+          return;
+        }
         const config: Mpegts.Config = {
           // Deliberately on the main thread. The project already measured that a blob-URL worker is
           // the CSP-sensitive path here (the black live screen was a refused `worker-src blob:`),
@@ -1418,6 +1520,12 @@ export function MediaPlayer({
       };
 
       pipelineMode = "flv-mpegts";
+      armStartupWatchdogRef.current = armStartupWatchdog;
+      // The resume path's way to build a pipeline this branch deferred. See `rebuildFlvPipelineRef`.
+      rebuildFlvPipelineRef.current = () => {
+        createFlvPlayerNow();
+        armStartupWatchdog();
+      };
       armStartupWatchdog();
       scheduleBoot(createFlvPlayerNow);
       retryRef.current = () => {
@@ -1630,8 +1738,30 @@ export function MediaPlayer({
         );
       };
       const createHlsInstanceNow = (enableWorker: boolean) => {
+        /**
+         * Whether this instance was built for a view the user had already left.
+         *
+         * **What hls.js actually does, read from its source rather than assumed.** `loadSource` sets the
+         * address and triggers `MANIFEST_LOADING`, and the playlist loader answers that by fetching the
+         * playlist — unconditionally, before any of this configuration is consulted. So a manifest
+         * request (a few kilobytes of text) is issued either way and cannot be avoided while still
+         * recording the address that `startLoad` needs.
+         *
+         * What *is* controllable is everything after it: once the manifest is parsed, hls.js calls
+         * `checkAutostartLoad`, which starts the level and fragment loaders **only if `autoStartLoad`
+         * is true**. Fragments are the multi-megabyte, never-ending part of a live stream — the part
+         * that made "a hidden live stream keeps downloading until the process exits" true. Setting this
+         * false trades an unavoidable manifest for suppressing the download that follows it.
+         *
+         * It is not a refusal: `startLoad(-1)` on return is what starts the loaders, which is exactly
+         * what `seekToLiveEdge` already calls. The flag is set from `viewAwayRef` because this runs from
+         * `scheduleBoot` — a deferred macrotask — and from `loadSourceRef` on a channel switch, either of
+         * which can land after the user has navigated away.
+         */
+        const builtWhileAway = viewAwayRef.current;
         const hlsConfig: Partial<HlsConfig> = {
           enableWorker,
+          autoStartLoad: !builtWhileAway,
           lowLatencyMode: liveMode,
           startPosition: liveMode ? -1 : 0,
           liveDurationInfinity: liveMode,
@@ -1722,8 +1852,19 @@ export function MediaPlayer({
         });
         instance.on(Hls.Events.ERROR, handleHlsError);
         ensurePlayer();
+        // The address has to be recorded even while away: this triggers the playlist request (a few
+        // kilobytes, and unavoidable — see `autoStartLoad` above), but it is also the only way
+        // `startLoad(-1)` can later know what to load. Withholding it would leave the returning viewer
+        // with a player that has nothing to resume.
         instance.loadSource(sourceRef.current.url);
         instance.attachMedia(video);
+        if (builtWhileAway) {
+          // The record that this pipeline owes a load. `liveResumeRef` consults it and calls
+          // `startLoad(-1)`, which is the only thing that starts the fragment loaders while
+          // `autoStartLoad` is false. Without it the viewer returns to a pane that never loads —
+          // the audio fix paid for with a black screen.
+          pipelineStoppedByViewRef.current = true;
+        }
         return instance;
       };
       const restartPipeline = (enableWorker: boolean) => {
@@ -1850,6 +1991,9 @@ export function MediaPlayer({
       pipelineEventsRef.current = null;
       loadSourceRef.current = null;
       retryRef.current = null;
+      // The build hook belongs to the branch that installed it; leaving a stale one would let a later
+      // resume rebuild a pipeline this effect has already torn down.
+      rebuildFlvPipelineRef.current = null;
       video.removeAttribute("src");
       video.load();
     };

@@ -101,11 +101,7 @@ export function SourceFilterFacets({
     )
     .map(([id]) => id);
 
-  const executionOrder: SourceExecutionFacet[] = [
-    "enabled",
-    "needs-adapter",
-    "blocked",
-  ];
+  const executionOrder: SourceExecutionFacet[] = ["enabled", "needs-adapter"];
   // No "blocked" entry: a source with no runnable adapter has no test outcome, and the 适配器状态
   // group offers exactly that set. See `sourceStatusFacet`.
   const statusOrder: SourceStatusFacet[] = [

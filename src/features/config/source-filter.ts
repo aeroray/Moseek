@@ -34,6 +34,10 @@ export type SourceFilterState = {
  * "blocked"` here while `AdapterExecution` in the adapter registry said exactly the same thing, so a
  * new execution state could be added to one and silently missing from the other. The registry owns
  * the vocabulary; the filter reuses it.
+ *
+ * There are now two choices rather than three. `blocked` was dropped along with the adapters that
+ * carried it: the sources it described are removed from the configuration at import, so a choice
+ * filtering to them could only ever return nothing.
  */
 export type SourceExecutionFacet = AdapterExecution;
 export type SourceEnabledFacet = "on" | "off";
@@ -177,7 +181,6 @@ export function toggleFacet<T extends string>(group: T[], value: T): T[] {
 export const executionFacetLabels: Record<SourceExecutionFacet, string> = {
   enabled: adapterStatusLabel("enabled"),
   "needs-adapter": adapterStatusLabel("needs-adapter"),
-  blocked: adapterStatusLabel("blocked"),
 };
 
 /**

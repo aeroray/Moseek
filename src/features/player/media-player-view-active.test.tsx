@@ -21,6 +21,7 @@ const hlsInstances: Array<{
   startLoad: ReturnType<typeof vi.fn>;
   stopLoad: ReturnType<typeof vi.fn>;
   loadSource: ReturnType<typeof vi.fn>;
+  config: Record<string, unknown>;
 }> = [];
 
 vi.mock("hls.js", () => {
@@ -45,8 +46,11 @@ vi.mock("hls.js", () => {
     startLoad = vi.fn();
     stopLoad = vi.fn();
     loadSource = vi.fn();
-    constructor() {
-      hlsInstances.push(this);
+    /** The config the player handed over, so the load-start policy can be asserted. */
+    config: Record<string, unknown> = {};
+    constructor(config: Record<string, unknown> = {}) {
+      this.config = config;
+      hlsInstances.push(this as unknown as (typeof hlsInstances)[number]);
     }
     on() {}
     attachMedia() {}
@@ -152,6 +156,70 @@ describe("MediaPlayer inside a hidden view", () => {
     // while the view was away, so what it holds is behind the live edge, and playing it directly would
     // show stale content and then stall. `startLoad` is hls.js being told to fetch again from the live
     // edge, which is the signal that the resume went through the right path.
+    expect(hls.startLoad).toHaveBeenCalled();
+  });
+
+  it("does not let hls.js start loading for a view the user has left", async () => {
+    // **The reported defect on the HLS path: "切到别的页面，过一阵子还能听到直播的声音".**
+    //
+    // hls.js starts fetching by itself. `loadSource` triggers `MANIFEST_LOADING`, and the playlist
+    // loader answers that by calling `startLoad` unless `autoStartLoad` is false — so the address being
+    // recorded is also the download starting. This branch is reached from a deferred macrotask and from
+    // a channel switch, either of which can land after the user has navigated away, which is why the
+    // sound arrives a while later rather than at the moment of leaving: it waits for the buffered data.
+    //
+    // Suppressed through hls.js's own switch rather than by withholding `loadSource`, because the URL
+    // still has to be recorded — `startLoad(-1)` is a no-op before a source is set, so skipping
+    // `loadSource` would leave the returning viewer with a player that never loads.
+    render(
+      <ViewPane active={false}>
+        <MediaPlayer
+          title="CCTV1"
+          url="https://stream.example/live.m3u8"
+          kind="hls"
+          isLive
+          fill
+        />
+      </ViewPane>,
+    );
+    await waitFor(() => expect(hlsInstances.length).toBeGreaterThan(0));
+
+    expect(hlsInstances.at(-1)!.config.autoStartLoad).toBe(false);
+    // The address is still recorded, which is what makes the resume work.
+    expect(hlsInstances.at(-1)!.loadSource).toHaveBeenCalled();
+  });
+
+  it("lets hls.js start loading again once the view comes back", async () => {
+    // The other half: the flag must not be a permanent refusal, or returning would show a black pane.
+    const { rerender } = render(
+      <ViewPane active={false}>
+        <MediaPlayer
+          title="CCTV1"
+          url="https://stream.example/live.m3u8"
+          kind="hls"
+          isLive
+          fill
+        />
+      </ViewPane>,
+    );
+    await waitFor(() => expect(hlsInstances.length).toBeGreaterThan(0));
+    const hls = hlsInstances.at(-1)!;
+    hls.startLoad.mockClear();
+
+    rerender(
+      <ViewPane active>
+        <MediaPlayer
+          title="CCTV1"
+          url="https://stream.example/live.m3u8"
+          kind="hls"
+          isLive
+          fill
+        />
+      </ViewPane>,
+    );
+
+    // `startLoad(-1)` is what hls.js is told on return; with `autoStartLoad` false it is the only
+    // thing that starts the download, so this is the signal that returning really does load.
     expect(hls.startLoad).toHaveBeenCalled();
   });
 

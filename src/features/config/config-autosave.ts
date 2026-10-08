@@ -1,5 +1,6 @@
 import { mergeSourceLists } from "@/features/config/config-merge";
 import type { ParseResult } from "@/features/config/config-parser";
+import { isPermanentlyUnsupportedSource } from "@/lib/adapters";
 import type { SourceRecord } from "@/types/moseek";
 
 /**
@@ -50,7 +51,12 @@ export function resolveSavePayload({
   // cleared the file — and it means "no sources" rather than "keep the old ones", so it takes the
   // derived path with an empty result instead of the keep-the-previous path.
   if (parsed?.ok) {
-    const merged = mergeSourceLists(previousSources, parsed.sources, true).sources;
+    // The merged list is filtered, because the text reaching here has already been pruned by
+    // `pruneUnsupportedConfigText` while `previousSources` may still hold entries from a document
+    // written before that rule existed. Without this the list and the file disagree: rows would
+    // remain on screen for entries the text no longer contains.
+    const merged = mergeSourceLists(previousSources, parsed.sources, true)
+      .sources.filter((source) => !isPermanentlyUnsupportedSource(source));
     return {
       rawConfig: text,
       normalizedConfig: parsed.normalizedConfig,

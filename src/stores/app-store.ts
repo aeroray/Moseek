@@ -134,7 +134,6 @@ export function migrateSourceFilter(value: unknown): SourceFilterState {
     executions: group(stored.executions, [
       "enabled",
       "needs-adapter",
-      "blocked",
     ] as const),
     // No "blocked": that facet was removed because the 适配器状态 group already offers exactly that
     // set. A filter saved before the change simply loses the choice rather than emptying the list,

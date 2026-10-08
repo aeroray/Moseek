@@ -24,7 +24,6 @@ import {
   FileJson,
   FileUp,
   FlaskConical,
-  Filter,
   Globe2,
   Info,
   List,
@@ -80,14 +79,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea, ScrollBar } from "@/components/ui/scroll-area";
 import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -120,6 +111,7 @@ import {
   formatConfigText,
   parseConfigText,
   parseRawObject,
+  pruneUnsupportedConfigText,
   repairConfigText,
   type ParseIssue,
   type ParseResult,
@@ -152,6 +144,7 @@ import {
   adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
+  isPermanentlyUnsupportedSource,
   isTestableSource,
   type AdapterExecution,
 } from "@/lib/adapters";
@@ -205,9 +198,6 @@ const AUTO_SAVE_DELAY_MS = 600;
 
 /** The two views of the configuration document. */
 type RawMode = "visual" | "code";
-
-/** The adapter tab's own filter, which narrows a table of adapters rather than of sources. */
-type AdapterFilter = "all" | AdapterExecution;
 
 /**
  * How many sources a batch test probes at once.
@@ -292,7 +282,6 @@ export function ConfigCenter() {
   const sources = useAppStore((state) => state.sources);
   const rawConfig = useAppStore((state) => state.rawConfig);
   const normalizedConfig = useAppStore((state) => state.normalizedConfig);
-  const lastImportedAt = useAppStore((state) => state.lastImportedAt);
   const toggleSource = useAppStore((state) => state.toggleSource);
   const removeSources = useAppStore((state) => state.removeSources);
   const setConfigDocument = useAppStore((state) => state.setConfigDocument);
@@ -318,7 +307,6 @@ export function ConfigCenter() {
   const liveFavorites = useAppStore((state) => state.liveFavorites);
   const setTheme = useAppStore((state) => state.setTheme);
   const restoreFavorites = useAppStore((state) => state.restoreFavorites);
-  const [adapterFilter, setAdapterFilter] = useState<AdapterFilter>("all");
   const [adapterQuery, setAdapterQuery] = useState("");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
     null,
@@ -486,36 +474,26 @@ export function ConfigCenter() {
     [sources],
   );
   /**
-   * Counts of adapters, not of sources. The table lists adapters and the filter selects among
-   * them, so the number beside a filter option has to answer "how many rows will I get". Counting
-   * sources there said "可执行 26 个源" next to a choice that revealed 9 rows.
+   * The table lists adapters, and every registered adapter can run.
+   *
+   * That is why there is no 状态 column and no 状态 filter here any more: each row would say
+   * 可执行 and every filter option would lead to the same eight rows. Both controls existed because
+   * five registry entries could not run, so both went with them — the same rule this page has
+   * applied twice before (部分支持, and the `blocked` facet in the source filter): **a control whose
+   * every option leads to the same place is not a control.** What is left is the question a reader
+   * actually has — which of these is this file using — and 当前源 answers it.
    */
-  const adapterStateCounts = useMemo(() => {
-    const counts: Record<AdapterExecution, number> = {
-      enabled: 0,
-      "needs-adapter": 0,
-      blocked: 0,
-    };
-    for (const { adapter } of adapterRows) counts[adapter.execution] += 1;
-    return counts;
-  }, [adapterRows]);
   const visibleAdapterRows = useMemo(() => {
-    const byState =
-      adapterFilter === "all"
-        ? adapterRows
-        : adapterRows.filter(
-            ({ adapter }) => adapter.execution === adapterFilter,
-          );
     const keyword = adapterQuery.trim().toLowerCase();
-    if (!keyword) return byState;
+    if (!keyword) return adapterRows;
     // The same fields the row shows, so anything a reader can see is something they can search.
-    return byState.filter(({ adapter }) =>
+    return adapterRows.filter(({ adapter }) =>
       [adapter.label, adapter.id, adapter.reason]
         .join(" ")
         .toLowerCase()
         .includes(keyword),
     );
-  }, [adapterFilter, adapterQuery, adapterRows]);
+  }, [adapterQuery, adapterRows]);
 
   useEffect(() => {
     const sourceBaseUrl = activeDocument?.sourceBaseUrl ?? undefined;
@@ -535,6 +513,73 @@ export function ConfigCenter() {
     setRawDraft(rawConfig);
     setImportText(rawConfig);
   }, [activeConfigId, configBaseUrl, rawConfig]);
+
+  /**
+   * Removes entries Moseek can never run from a document that was stored before that rule existed.
+   *
+   * **Pruning on write is not enough.** An import, an autosave and the multi-document collapse all
+   * pass through it, but a database written by an older version — or simply not edited since — keeps
+   * its blocked entries in the raw text forever. Measured in a real browser with such a document:
+   * the source list was clean and every removed family name was gone from the interface, while the
+   * raw configuration still held four entries reading 无法测试. The user asked for these to be gone
+   * from the configuration, not merely from one view of it.
+   *
+   * It runs once per document id and only writes when something was actually removed, so an
+   * already-clean document costs one parse and no write. The guard is a ref holding the id that has
+   * been handled rather than a boolean, because switching to another document must run it again.
+   */
+  const prunedDocumentId = useRef<number | null>(null);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    if (activeConfigId === null || !rawConfig.trim()) return;
+    if (prunedDocumentId.current === activeConfigId) return;
+    prunedDocumentId.current = activeConfigId;
+
+    const pruned = pruneUnsupportedConfigText(rawConfig, configBaseUrl ?? null);
+    if (pruned.removed === 0) return;
+
+    const parsed = parseConfigText(
+      pruned.text,
+      configBaseUrl ?? activeDocument?.sourceBaseUrl ?? undefined,
+    );
+    const kept = sources.filter(
+      (source) => !isPermanentlyUnsupportedSource(source),
+    );
+    void replaceAllConfigDocuments({
+      name: activeDocument?.name ?? "中心配置",
+      rawConfig: pruned.text,
+      normalizedConfig: parsed.ok
+        ? parsed.normalizedConfig
+        : (activeDocument?.normalizedConfig ?? normalizedConfig),
+      sources: kept,
+      liveCount: parsed.ok ? parsed.liveCount : sources.filter(
+        (source) => source.sourceType === "live",
+      ).length,
+      sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
+    })
+      .then((saved) => {
+        if (!saved) return;
+        setConfigDocument(saved, true);
+        setParseState({
+          type: "success",
+          title: "已清理无法适配的源",
+          message: `配置里有 ${pruned.removed} 个源需要远程脚本或 JAR，Moseek 不会执行它们，已从配置中移除。`,
+        });
+      })
+      .catch(() => {
+        // Not fatal and not worth a message of its own: the document is still readable, the
+        // interface does not render these entries, and the next edit writes a pruned document.
+        prunedDocumentId.current = null;
+      });
+  }, [
+    activeConfigId,
+    rawConfig,
+    configBaseUrl,
+    sources,
+    activeDocument,
+    normalizedConfig,
+    setConfigDocument,
+  ]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -618,7 +663,18 @@ export function ConfigCenter() {
       }
 
       const mergedText = JSON.stringify(raw, null, 2);
-      const parsed = parseConfigText(mergedText, sourceBaseUrl ?? undefined);
+      // Unsupported entries are dropped here too. This path writes the document directly rather than
+      // going through the import or autosave routes, so without this an old database would keep
+      // carrying families Moseek has decided against — the list would show nothing for them and the
+      // file would keep them forever.
+      const prunedMerge = pruneUnsupportedConfigText(
+        mergedText,
+        sourceBaseUrl ?? null,
+      );
+      const parsed = parseConfigText(
+        prunedMerge.text,
+        sourceBaseUrl ?? undefined,
+      );
       if (!parsed.ok) {
         // Surface rather than swallow: silently declining to collapse would leave the user with
         // several documents and no explanation.
@@ -639,10 +695,16 @@ export function ConfigCenter() {
       for (const document of ordered.slice(1)) {
         mergedSources = mergeSourceLists(mergedSources, document.sources).sources;
       }
+      // The snapshots are pruned too, and with the same predicate the text was pruned by. Leaving
+      // them would keep the removed families in the list, which is the half of this document the
+      // page actually renders.
+      mergedSources = mergedSources.filter(
+        (source) => !isPermanentlyUnsupportedSource(source),
+      );
 
       const saved = await replaceAllConfigDocuments({
         name: "中心配置",
-        rawConfig: mergedText,
+        rawConfig: prunedMerge.text,
         normalizedConfig: parsed.normalizedConfig,
         sources: mergedSources,
         liveCount: parsed.liveCount,
@@ -669,7 +731,14 @@ export function ConfigCenter() {
       setParseState({
         type: "success",
         title: "已合并为一套配置",
-        message: `原来的 ${ordered.length} 套配置已合并为「中心配置」：新增 ${mergedCount.added} 个源，去重 ${mergedCount.unchanged} 个，当前共 ${saved.sources.length} 个源。以后导入会继续合并进这一套。`,
+        message: [
+          `原来的 ${ordered.length} 套配置已合并为「中心配置」：新增 ${mergedCount.added} 个源，去重 ${mergedCount.unchanged} 个，当前共 ${saved.sources.length} 个源。以后导入会继续合并进这一套。`,
+          prunedMerge.removed > 0
+            ? `已丢弃 ${prunedMerge.removed} 个无法适配的源（它们需要远程脚本或 JAR，Moseek 不会执行）。`
+            : null,
+        ]
+          .filter(Boolean)
+          .join(" "),
       });
     };
 
@@ -1695,9 +1764,25 @@ export function ConfigCenter() {
     const trimmed = text.trim();
     // `null` means "empty text", which is a state of its own rather than a parse failure — see
     // `resolveSavePayload`.
-    const parsed = trimmed ? parseConfigText(text, configBaseUrl) : null;
+    //
+    // **Pruning happens here rather than at the editor.** This is the one place every write passes
+    // through, so an unsupported entry cannot survive by arriving down a path that skipped a cleanup
+    // step. The text is rewritten only when something was actually removed, and the removal is what
+    // makes the unsupported entries leave the *file* rather than merely the list.
+    //
+    // This cannot loop. The pruned text is written and stored as the document, so the next save sees
+    // the same text and `pruneUnsupportedConfigText` returns it unchanged with `removed: 0`; and
+    // `lastSavedText` records the text that was asked for, so the debounce does not re-fire on a
+    // rewrite. Both guards were needed for other reasons already (see below), and they cover this.
+    const pruned = trimmed
+      ? pruneUnsupportedConfigText(text, configBaseUrl)
+      : { text, removed: 0 };
+    const storedText = pruned.text;
+    const parsed = storedText.trim()
+      ? parseConfigText(storedText, configBaseUrl)
+      : null;
     const payload = resolveSavePayload({
-      text,
+      text: storedText,
       parsed,
       previousSources: sources,
       previousNormalizedConfig:
@@ -1852,13 +1937,25 @@ export function ConfigCenter() {
     result: ParseResult,
     options: { rawOverride?: string; successNote?: string } = {},
   ) => {
-    const parsedCounts = countParsedCapabilities(result.sources);
-
     // The text to merge. Normally the editor's, but the 多仓 bulk path has already merged several
     // documents in memory and hands the result over here rather than routing it through the editor.
     const incomingText = options.rawOverride ?? importText;
 
-    let mergedRawText = incomingText;
+    // **Unsupported entries are dropped before anything else looks at them.** The user's decision:
+    // an adapter Moseek cannot support should not be carried around at all, because recognising it
+    // tells the reader nothing and this application will never implement it. Pruning the incoming
+    // side means the entries never reach the merge, the list, the export or the file.
+    //
+    // The count is taken from the same call that removes them, so the sentence the user reads is
+    // about what actually happened rather than a second count that could disagree.
+    const prunedIncoming = pruneUnsupportedConfigText(
+      incomingText,
+      configBaseUrl ?? null,
+    );
+    const prunedCount = prunedIncoming.removed;
+    const incomingRawText = prunedIncoming.text;
+
+    let mergedRawText = incomingRawText;
     let mergeReport: MergeReport | null = null;
     if (sources.length > 0 && rawConfig.trim()) {
       // Merging runs on the raw text, not on the parsed sources: the parsed model does not carry
@@ -1868,7 +1965,7 @@ export function ConfigCenter() {
       const incomingRaw = parseRawObject(
         JSON.stringify(
           absolutizeRelativeSites(
-            parseRawObject(incomingText) ?? {},
+            parseRawObject(incomingRawText) ?? {},
             configBaseUrl ?? null,
           ),
         ),
@@ -1891,29 +1988,53 @@ export function ConfigCenter() {
     const mergedParse = mergeReport ? parseConfigText(mergedRawText, configBaseUrl) : result;
 
     const name = activeDocument?.name || "中心配置";
+    // Appended to whichever message this import reports, so the removal is never silent: the user
+    // asked for it, and a file that quietly comes back smaller is exactly the kind of change that
+    // has to be stated.
+    const prunedNote =
+      prunedCount > 0
+        ? `已丢弃 ${prunedCount} 个无法适配的源（它们需要远程脚本或 JAR，Moseek 不会执行）。`
+        : null;
+
+    // The merged text is pruned as well, and for a second reason: the document already stored may
+    // still carry entries from before this rule existed. Pruning only the incoming side would clean
+    // what the user just handed us and leave the old ones in place forever.
+    const storedRawText = pruneUnsupportedConfigText(
+      mergedRawText,
+      configBaseUrl ?? null,
+    ).text;
+
+    // **The snapshot is filtered, unconditionally.** `result.sources` is the caller's parse of the
+    // *unpruned* text, so simply dropping entries from the raw text would leave the two halves of the
+    // document describing different sets — the list would still render rows for sources the file no
+    // longer contains, which is the contradiction this project has fixed repeatedly. Filtering after
+    // the merge also covers entries the existing document contributed.
+    const keptSources = finalSources.filter(
+      (source) => !isPermanentlyUnsupportedSource(source),
+    );
 
     // `replaceAll` rather than `save`: there is exactly one configuration, so the write is "the
     // centre configuration is now this", not "add another one". Using an insert here would quietly
     // reintroduce the pile of documents this feature exists to remove.
     const savedDocument = await replaceAllConfigDocuments({
       name,
-      rawConfig: mergedRawText,
+      rawConfig: storedRawText,
       normalizedConfig: mergedParse.ok
         ? mergedParse.normalizedConfig
         : result.normalizedConfig,
-      sources: finalSources,
+      sources: keptSources,
       liveCount: mergedParse.ok ? mergedParse.liveCount : result.liveCount,
       sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
     });
     const document: StoredConfigDocument = savedDocument ?? {
       id: activeConfigId ?? -Date.now(),
       name,
-      rawConfig: mergedRawText,
+      rawConfig: storedRawText,
       normalizedConfig: mergedParse.ok
         ? mergedParse.normalizedConfig
         : result.normalizedConfig,
-      sources: finalSources,
-      sourceCount: finalSources.length,
+      sources: keptSources,
+      sourceCount: keptSources.length,
       liveCount: mergedParse.ok ? mergedParse.liveCount : result.liveCount,
       importedAt: new Date().toISOString(),
       sourceBaseUrl: configBaseUrl ?? activeDocument?.sourceBaseUrl ?? null,
@@ -1925,26 +2046,32 @@ export function ConfigCenter() {
             added: mergeReport.sites.added,
             updated: mergeReport.sites.updated,
             unchanged: sourceMerge.unchanged,
-            keptLocalState: finalSources.filter((source) => !source.enabled).length,
-            total: finalSources.length,
+            keptLocalState: keptSources.filter((source) => !source.enabled).length,
+            total: keptSources.length,
           }
         : null,
     );
     setParseState({
       type: "success",
       // A caller-supplied note wins: the 多仓 bulk path knows how many documents it merged and which
-      // addresses failed, and that is more useful than the generic merge sentence.
-      message:
+      // addresses failed, and that is more useful than the generic merge sentence. The pruned note is
+      // appended to whichever sentence wins, because "some of your file was deleted" is not something
+      // a summary may leave out.
+      message: [
         options.successNote ??
-        (mergeReport
-          ? `已合并进「${name}」：新增 ${sourceMerge.added} 个源，更新 ${sourceMerge.updated} 个，${sourceMerge.unchanged} 个原本就有；当前共 ${finalSources.length} 个源。`
-          : `解析完成：${result.sources.length} 个影视源、${result.liveCount} 个直播源；可用 ${parsedCounts.supported} 个，${result.issues.length} 个需要关注。`),
+          (mergeReport
+            ? `已合并进「${name}」：新增 ${sourceMerge.added} 个源，更新 ${sourceMerge.updated} 个，${sourceMerge.unchanged} 个原本就有；当前共 ${keptSources.length} 个源。`
+            : `解析完成：${keptSources.length} 个源，${result.liveCount} 个直播源；可用 ${countParsedCapabilities(keptSources).supported} 个，${result.issues.length} 个需要关注。`),
+        prunedNote,
+      ]
+        .filter(Boolean)
+        .join(" "),
     });
     setImportOpen(false);
     // Favourites and the theme, if this file carries them. Read after the configuration has been
     // committed, so a malformed extras block cannot stop the import itself from happening — the
     // sources are the reason the user pasted the file.
-    applyImportedExtras(mergedRawText);
+    applyImportedExtras(storedRawText);
   };
 
   /**
@@ -2121,7 +2248,13 @@ export function ConfigCenter() {
           onValueChange={(value) => setActiveTab(value as ConfigTab)}
           className="flex min-h-0 flex-1 flex-col gap-5"
         >
-          <div className="flex shrink-0 items-center justify-between gap-4">
+          {/* The tab row holds only the tabs. A "最后解析：<time>" line used to sit at its right end,
+              reporting when the document was imported — an audit fact rather than something the
+              reader acts on. Nothing on this page behaves differently because the configuration is
+              an hour or a month old, and where the timestamp does mean something it is already
+              shown: the document list. Dropping it also leaves the row with a single child, so it
+              no longer needs to be a two-ended layout. */}
+          <div className="flex shrink-0 items-center gap-4">
             <TabsList>
               <TabsTrigger value="sources" className="gap-1.5">
                 <List className="size-3.5" data-icon="inline-start" aria-hidden="true" />
@@ -2136,12 +2269,6 @@ export function ConfigCenter() {
                 原始配置
               </TabsTrigger>
             </TabsList>
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span className="size-2 rounded-full bg-[color:var(--status-supported)]" />
-              {lastImportedAt
-                ? `最后解析：${formatImportTime(lastImportedAt)}`
-                : "尚未导入配置"}
-            </div>
           </div>
 
           <TabsContent
@@ -2489,11 +2616,9 @@ export function ConfigCenter() {
                   </div>
                 </div>
 
-                {/* The toolbar is the same one 源列表 uses — search, then filter, then a count —
-                    so the two lists are read the same way. The counts used to sit on their own
-                    line as clickable buttons, which was a second set of controls doing what the
-                    filter already did; they now ride inside the filter options, where the number
-                    answers "how many rows will this give me" at the moment of choosing. */}
+                {/* Search and a count, the same shape 源列表 uses so the two lists are read the same
+                    way. There is no filter dropdown here any more: every adapter in the registry can
+                    run, so a 状态 filter would offer options that all lead to the same eight rows. */}
                 <div className="mt-4 flex items-center gap-2">
                   <SearchInput
                     value={adapterQuery}
@@ -2501,44 +2626,6 @@ export function ConfigCenter() {
                     placeholder="搜索适配器名称或说明"
                     aria-label="搜索适配器名称或说明"
                   />
-                  <Select
-                    value={adapterFilter}
-                    onValueChange={(value) =>
-                      setAdapterFilter(value as AdapterFilter)
-                    }
-                  >
-                    <SelectTrigger
-                      size="sm"
-                      className="w-40 shrink-0"
-                      aria-label="筛选适配器"
-                    >
-                      <Filter
-                        className="size-3.5"
-                        data-icon="inline-start"
-                        aria-hidden="true"
-                      />
-                      <SelectValue placeholder="筛选适配器" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        <SelectItem value="all">全部适配器</SelectItem>
-                        {/* The three words come from the registry rather than being typed here.
-                            They were written out a fourth time, which is how the panel, the adapter
-                            column and this dropdown could each say something different about one
-                            source. */}
-                        {(["enabled", "needs-adapter", "blocked"] as const).map(
-                          (execution) => (
-                            <SelectItem key={execution} value={execution}>
-                              {adapterStatusLabel(execution)}
-                              <span className="ml-auto pl-3 tabular-nums text-muted-foreground">
-                                {adapterStateCounts[execution]}
-                              </span>
-                            </SelectItem>
-                          ),
-                        )}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
                   <span className="shrink-0 text-xs text-muted-foreground">
                     共 {visibleAdapterRows.length} 类
                   </span>
@@ -2555,7 +2642,6 @@ export function ConfigCenter() {
                       <TableHeader className="sticky top-0 z-10 bg-card">
                         <TableRow className="hover:bg-transparent">
                           <TableHead className="pl-6">适配器</TableHead>
-                          <TableHead>状态</TableHead>
                           <TableHead>支持操作</TableHead>
                           <TableHead>当前源</TableHead>
                           <TableHead className="pr-6">说明</TableHead>
@@ -2573,9 +2659,10 @@ export function ConfigCenter() {
                                   </p>
                                 </div>
                               </TableCell>
-                              <TableCell>
-                                <AdapterStatusBadge execution={adapter.execution} />
-                              </TableCell>
+                              {/* No 状态 column. Every adapter listed can run, so it would say
+                                  可执行 on all eight rows — a column that carries one value is not
+                                  reporting anything. What a reader needs is which entries of this
+                                  file use each adapter, and that is 当前源. */}
                               <TableCell>
                                 {adapter.operations.length > 0 ? (
                                   <div className="flex flex-wrap gap-1.5">
@@ -3467,8 +3554,6 @@ function AdapterStatusBadge({ execution }: { execution: AdapterExecution }) {
       "border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]",
     "needs-adapter":
       "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] text-[color:var(--status-adapter)]",
-    blocked:
-      "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",
   }[execution];
   return (
     <Badge variant="outline" className={toneClass}>
@@ -3830,17 +3915,6 @@ function DetailRow({
       </span>
     </div>
   );
-}
-
-function formatImportTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "numeric",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
 }
 
 /**

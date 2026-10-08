@@ -18,13 +18,17 @@ import type { CapabilityStatus } from "@/types/moseek";
  * assign it, and it only ever reached the screen from stale stored data, where it sat next to an
  * adapter badge saying 没有可用适配器.
  *
- * **`supported` and `blocked` take their words from the adapter registry** rather than restating
- * them. They are the same two words the adapter column and the filter panel use, and writing them
- * out again here is exactly how `needs-adapter` came to read 需要适配 on this badge and 待适配
- * everywhere else — one source described two ways depending on the screen. A mutation that changed
- * the word here passed every test, because the tests were checking the registry's copy.
+ * **`supported` and `needs-adapter` take their words from the adapter registry** rather than
+ * restating them. They are the same two words the adapter column and the filter panel use, and
+ * writing them out again here is exactly how `needs-adapter` came to read 需要适配 on this badge and
+ * 待适配 everywhere else — one source described two ways depending on the screen. A mutation that
+ * changed the word here passed every test, because the tests were checking the registry's copy.
  *
- * `invalid` is not an adapter execution state, so it keeps its own word.
+ * `blocked` and `invalid` keep their own words, because neither is an adapter execution state.
+ * `blocked` now means one thing only — a scheme that must never be fetched — and the sources carrying
+ * it are removed from the configuration, so this entry is the model's remnant rather than something
+ * a reader meets. It says 不可用 rather than naming a plugin family, which is what it used to do and
+ * what told the reader nothing.
  */
 const capabilityConfig: Record<
   CapabilityStatus,
@@ -43,7 +47,7 @@ const capabilityConfig: Record<
       "border-[color:var(--status-adapter-border)] bg-[color:var(--status-adapter-bg)] text-[color:var(--status-adapter)]",
   },
   blocked: {
-    label: adapterStatusLabel("blocked"),
+    label: "不可用",
     icon: Ban,
     className:
       "border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] text-[color:var(--status-blocked)]",

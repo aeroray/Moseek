@@ -341,6 +341,48 @@ pub async fn get_epg(source_url: String, format: String) -> Result<EpgCatalog, S
     Ok(EpgCatalog { programs })
 }
 
+/// Strips the promotional tail the guide providers append to every programme title.
+///
+/// **This is a watermark, not a placeholder, and that is why the existing filter misses it.** 51zmt
+/// answers with real schedules — 209 titles measured across six channels (CCTV1, CCTV5+, CCTV13,
+/// 湖南卫视, 浙江卫视, 东方卫视), and **every single one** ended in ` --免费使用`:
+///
+/// ```text
+/// 生活早参考-特别节目(生活圈)2026-275 --免费使用
+/// 晚间新闻 --免费使用
+/// ```
+///
+/// `isPlaceholderGuide` only discards a guide when **every** row is filler, which is the right rule
+/// for a provider that has no data for the channel — but it cannot help here, because these rows
+/// carry genuine programme names. So the user saw their real schedule with an advertisement glued to
+/// the end of every line.
+///
+/// **Only the exact phrase is removed, and only from the end.** A title is data the user may
+/// recognise, and a broader rule would eventually eat part of a real one — the measured set includes
+/// `生逢其时11/26` and `爱在山海间19/20`, where the numbers are part of the name. The tail is
+/// `--免费使用` with optional surrounding whitespace; the leading space in the provider's output is
+/// consumed with it so no dangling gap is left behind.
+///
+/// The description field is deliberately untouched: measured, 51zmt sends it empty, so there is
+/// nothing to strip there and a rule with no evidence behind it would be guesswork.
+///
+/// Returns the title unchanged when stripping would empty it — a title that is *only* the watermark
+/// is still more informative than a blank row, and blanking it would make the guide look broken.
+fn strip_promotional_suffix(title: &str) -> &str {
+    let trimmed = title.trim_end();
+    match trimmed.strip_suffix("--免费使用") {
+        Some(head) => {
+            let head = head.trim_end();
+            if head.is_empty() {
+                title
+            } else {
+                head
+            }
+        }
+        None => title,
+    }
+}
+
 fn parse_xmltv(text: &str) -> Result<Vec<EpgProgram>, String> {
     let mut reader = Reader::from_str(text);
     reader.config_mut().trim_text(true);
@@ -437,7 +479,7 @@ fn parse_epg_json(text: &str) -> Result<Vec<EpgProgram>, String> {
             Some(EpgProgram {
                 id: format!("{channel_id}-{index}"),
                 channel_id,
-                title,
+                title: strip_promotional_suffix(&title).to_string(),
                 description: value_text(item, &["description", "desc", "content"]),
                 start_at: normalize_time(&value_text(item, &["start", "start_at", "startAt"])),
                 end_at: normalize_time(&value_text(item, &["end", "end_at", "endAt"])),
@@ -459,7 +501,7 @@ impl XmlProgram {
         EpgProgram {
             id: format!("{}-{}", self.channel_id, self.start_at),
             channel_id: self.channel_id,
-            title: self.title,
+            title: strip_promotional_suffix(&self.title).to_string(),
             description: self.description,
             start_at: normalize_time(&self.start_at),
             end_at: normalize_time(&self.end_at),
@@ -784,7 +826,7 @@ fn fnv1a(value: &str) -> u64 {
 mod tests {
     use super::{
         collect_groups, deduplicate_channels, is_hls_manifest, make_channel, parse_epg_json,
-        parse_m3u, parse_txt, parse_xmltv,
+        parse_m3u, parse_txt, parse_xmltv, strip_promotional_suffix,
     };
 
     #[test]
@@ -964,5 +1006,211 @@ mod tests {
         .expect("json epg should parse");
 
         assert_eq!(programs[0].channel_id, "item-channel");
+    }
+
+    /// 51zmt appends ` --免费使用` to every programme title it returns.
+    ///
+    /// **Measured, not assumed**: 209 titles across six channels (CCTV1, CCTV5+, CCTV13, 湖南卫视,
+    /// 浙江卫视, 东方卫视) and all 209 carried the tail, while the `description` field came back empty
+    /// on every row. The names below are taken verbatim from that response, including the ones whose
+    /// digits are part of the programme (`生逢其时11/26`, `爱在山海间19/20`) — those are the reason the
+    /// rule strips one exact phrase from the end rather than trimming anything that looks decorative.
+    ///
+    /// The existing `isPlaceholderGuide` filter cannot catch this: it only discards a guide when
+    /// **every** row is filler, and these rows are real schedules.
+    #[test]
+    fn strips_the_promotional_suffix_from_epg_titles() {
+        let programs = parse_epg_json(
+            r#"{"channel_name":"CCTV-1综合","epg_data":[
+                {"start":"01:08","end":"01:45","title":"生活早参考-特别节目(生活圈)2026-275 --免费使用"},
+                {"start":"01:45","end":"02:15","title":"晚间新闻 --免费使用"},
+                {"start":"04:20","end":"04:52","title":"本草流芳-芍药 --免费使用"},
+                {"start":"11:00","end":"11:30","title":"生逢其时11/26 --免费使用"},
+                {"start":"20:00","end":"20:30","title":"爱在山海间19/20 --免费使用"}]}"#,
+        )
+        .expect("51zmt shape should parse");
+
+        assert_eq!(programs[0].title, "生活早参考-特别节目(生活圈)2026-275");
+        assert_eq!(programs[1].title, "晚间新闻");
+        assert_eq!(programs[2].title, "本草流芳-芍药");
+        // The digits belong to the programme and must survive.
+        assert_eq!(programs[3].title, "生逢其时11/26");
+        assert_eq!(programs[4].title, "爱在山海间19/20");
+        // No trailing whitespace left behind where the tail used to be.
+        for program in &programs {
+            assert_eq!(program.title, program.title.trim());
+            assert!(!program.title.contains("免费使用"));
+        }
+    }
+
+    /// The same watermark can arrive through an XMLTV guide, and the strip must apply there too.
+    ///
+    /// Both parsers are separate code paths that build an `EpgProgram` independently, so fixing only
+    /// the JSON one would leave a user whose source points at an XMLTV document seeing the tail.
+    #[test]
+    fn strips_the_promotional_suffix_from_xmltv_titles() {
+        let programs = parse_xmltv(
+            r#"<tv>
+                 <programme channel="cctv1" start="20260916010800 +0800" stop="20260916014500 +0800">
+                   <title>晚间新闻 --免费使用</title>
+                   <desc></desc>
+                 </programme>
+               </tv>"#,
+        )
+        .expect("xmltv should parse");
+
+        assert_eq!(programs[0].title, "晚间新闻");
+    }
+
+    /// A title that is nothing but the watermark is left alone rather than emptied.
+    ///
+    /// Blanking it would turn a row the user can see into a nameless one, which reads as a broken
+    /// guide — worse than the advertisement it replaced.
+    #[test]
+    fn keeps_a_title_that_would_be_emptied_by_the_strip() {
+        assert_eq!(strip_promotional_suffix("--免费使用"), "--免费使用");
+        assert_eq!(strip_promotional_suffix("  --免费使用  "), "  --免费使用  ");
+        // A phrase that merely appears inside a longer name is not a tail and must not be touched.
+        assert_eq!(
+            strip_promotional_suffix("免费使用说明会"),
+            "免费使用说明会"
+        );
+        assert_eq!(
+            strip_promotional_suffix("节目：免费使用技巧"),
+            "节目：免费使用技巧"
+        );
+        // An ordinary title passes through unchanged.
+        assert_eq!(strip_promotional_suffix("新闻联播"), "新闻联播");
+    }
+
+    /// The rule above, checked against the provider that produced it.
+    ///
+    /// **Why this test exists alongside the fixtures.** The unit tests use titles I typed from one
+    /// day's response. A provider is free to change its wording, and a fixture cannot notice — it
+    /// would keep passing while every real row went back to carrying the advertisement. This asks
+    /// 51zmt directly and asserts the two properties that matter for the channel the user reported:
+    /// nothing still contains the phrase, and nothing was emptied.
+    ///
+    /// It does **not** assert "every title had the suffix", because that is a claim about the
+    /// provider rather than about this code — if 51zmt drops the watermark itself, the test should
+    /// still pass.
+    ///
+    /// `#[ignore]`d because it needs the internet, so it is not part of the ordinary gate. Run it
+    /// with `cargo test --no-default-features live:: -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "requires network access"]
+    fn the_real_provider_response_comes_back_without_the_watermark() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let date = {
+            // The provider keys on the local date; the exact day does not matter to this assertion,
+            // only that it answers with a schedule.
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let days = now / 86_400;
+            // 1970-01-01 + days, in the civil calendar.
+            let (mut year, mut remaining) = (1970i64, days as i64);
+            loop {
+                let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+                let length = if leap { 366 } else { 365 };
+                if remaining < length {
+                    break;
+                }
+                remaining -= length;
+                year += 1;
+            }
+            let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+            let months = [
+                31,
+                if leap { 29 } else { 28 },
+                31,
+                30,
+                31,
+                30,
+                31,
+                31,
+                30,
+                31,
+                30,
+                31,
+            ];
+            let mut month = 0usize;
+            while remaining >= months[month] {
+                remaining -= months[month];
+                month += 1;
+            }
+            format!("{year}-{:02}-{:02}", month + 1, remaining + 1)
+        };
+
+        let url = format!("http://epg.51zmt.top:8000/api/diyp/?ch=CCTV1&date={date}");
+        let text = runtime.block_on(async {
+            let parsed = reqwest::Url::parse(&url).expect("a valid address");
+            crate::policy::fetch_response_bytes_public(parsed, 10 * 1024 * 1024, "EPG 响应")
+                .await
+                .map(|(body, _, _)| String::from_utf8_lossy(&body).into_owned())
+        });
+
+        let Ok(text) = text else {
+            // The provider being unreachable is a fact about the network, not a defect here.
+            println!("51zmt unreachable; skipping the live assertion");
+            return;
+        };
+
+        let programs = parse_epg_json(&text).expect("the provider answers with its documented shape");
+        assert!(
+            !programs.is_empty(),
+            "the provider returned no programmes, so this test proved nothing"
+        );
+
+        let dirty: Vec<&str> = programs
+            .iter()
+            .map(|program| program.title.as_str())
+            .filter(|title| title.contains("免费使用"))
+            .collect();
+        assert!(
+            dirty.is_empty(),
+            "{} of {} titles still carry the watermark: {:?}",
+            dirty.len(),
+            programs.len(),
+            &dirty[..dirty.len().min(5)]
+        );
+
+        let blank = programs
+            .iter()
+            .filter(|program| program.title.trim().is_empty())
+            .count();
+        assert_eq!(blank, 0, "the strip emptied {blank} titles");
+
+        println!(
+            "{} programmes from 51zmt, none carrying the watermark",
+            programs.len()
+        );
+
+        // Written out so the browser harness can render what this parser actually produced, rather
+        // than a hand-built fixture that merely resembles it. The directory is the harness's own and
+        // is removed with it; a failure to write is not a reason to fail the test.
+        let dump: Vec<serde_json::Value> = programs
+            .iter()
+            .map(|program| {
+                serde_json::json!({
+                    "id": program.id,
+                    "channelId": program.channel_id,
+                    "title": program.title,
+                    "description": program.description,
+                    "startAt": program.start_at,
+                    "endAt": program.end_at,
+                })
+            })
+            .collect();
+        let _ = std::fs::create_dir_all("../.verify4");
+        let _ = std::fs::write(
+            "../.verify4/epg.json",
+            serde_json::to_string_pretty(&dump).unwrap_or_default(),
+        );
     }
 }

@@ -14,13 +14,21 @@ describe("the capability badge", () => {
     const pairs: [CapabilityStatus, string][] = [
       ["supported", adapterStatusLabel("enabled")],
       ["needs-adapter", adapterStatusLabel("needs-adapter")],
-      ["blocked", adapterStatusLabel("blocked")],
     ];
     for (const [status, word] of pairs) {
       const { unmount } = render(<CapabilityBadge status={status} />);
       expect(screen.getByText(word), status).toBeInTheDocument();
       unmount();
     }
+  });
+
+  it("no longer names a plugin family for a source it cannot run", () => {
+    // `blocked` used to read 已阻止 and was produced by five adapters named after other clients'
+    // plugin families (drpy, csp_AppMao, remote JAR, spider, CatVod JS). Those adapters are gone and
+    // the entries are removed from the configuration, so the badge says the only thing left to say.
+    render(<CapabilityBadge status="blocked" />);
+    expect(screen.getByText("不可用")).toBeInTheDocument();
+    expect(screen.queryByText("已阻止")).not.toBeInTheDocument();
   });
 
   it("says 无法适配 for a source that cannot be adapted", () => {

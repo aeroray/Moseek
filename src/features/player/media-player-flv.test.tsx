@@ -1,6 +1,7 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { ViewPane } from "@/components/view-pane";
 import { MediaPlayer } from "@/features/player/media-player";
 
 /**
@@ -391,6 +392,73 @@ describe("MediaPlayer FLV pipeline wiring", () => {
 
     expect(loader._status).toBe(0);
     expect(loader.isWorking()).toBe(false);
+  });
+
+  it("does not fetch an FLV stream for a view the user has left", async () => {
+    // **The reported defect, on the FLV path.** "切到别的页面之后，还能在后台听到直播播放的声音."
+    //
+    // `createFlvPlayerNow` calls `instance.load()` and then `instance.play()`, and it runs either from
+    // `scheduleBoot` — a deferred macrotask — or from `loadSourceRef` when the channel changes. Both can
+    // land after the user has navigated away, and neither consulted `viewAwayRef`, so a hidden pane
+    // opened the stream, buffered it, and was one `play()` away from being audible. The element's own
+    // `autoplay`/`preload` attributes were already withheld while away, which is why the download and
+    // the buffer are asserted here rather than the attribute.
+    stubTextTracks();
+    render(
+      <ViewPane active={false}>
+        <MediaPlayer
+          title="斗鱼 431460"
+          url="http://cdn.example/live/stream.flv"
+          kind="unknown"
+          isLive
+          fill
+        />
+      </ViewPane>,
+    );
+
+    // Let the deferred boot run. Without the guard this is where the request would be issued.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    // No player at all is the strongest form of "nothing was fetched" here: mpegts.js is only
+    // constructed by the guarded path, so the assertion holds however the internals are arranged.
+    expect(createdPlayers).toHaveLength(0);
+    expect(streamMediaResource).not.toHaveBeenCalled();
+  });
+
+  it("starts the FLV stream once the view comes back", async () => {
+    // The other half, and the reason the guard is a *deferral* rather than a refusal: mpegts.js has no
+    // `autoStartLoad`, so `load()` is the only thing that ever issues the request. If returning did not
+    // re-issue it, the fix for the audio would be a permanently black live pane.
+    const { rerender } = render(
+      <ViewPane active={false}>
+        <MediaPlayer
+          title="斗鱼 431460"
+          url="http://cdn.example/live/stream.flv"
+          kind="unknown"
+          isLive
+          fill
+        />
+      </ViewPane>,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(createdPlayers).toHaveLength(0);
+
+    rerender(
+      <ViewPane active>
+        <MediaPlayer
+          title="斗鱼 431460"
+          url="http://cdn.example/live/stream.flv"
+          kind="unknown"
+          isLive
+          fill
+        />
+      </ViewPane>,
+    );
+    await waitFor(() => expect(createdPlayers.length).toBeGreaterThan(0));
+
+    // The return path re-armed the pipeline and it actually loaded, rather than sitting inert.
+    await waitFor(() => expect(createdPlayers[0].loaded).toBeGreaterThan(0));
+    expect(streamMediaResource).toHaveBeenCalled();
   });
 
   it("reports an FLV failure without ever mentioning an HLS manifest", async () => {

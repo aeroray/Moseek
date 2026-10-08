@@ -17,6 +17,7 @@ import {
   updateSourceTest as updateSourceTestCommand,
 } from "@/lib/tauri";
 import { useAppStore } from "@/stores/app-store";
+import { adapterStatusLabel } from "@/lib/adapters";
 import { clearedSourceFilter, defaultSourceFilter } from "@/features/config/source-filter";
 import type { SourceRecord, SourceTestResult } from "@/types/moseek";
 
@@ -141,7 +142,13 @@ function renderPageStrict(ui: React.ReactElement) {
   );
 }
 
-function renderCenter() {
+function renderCenter(
+  overrides: Partial<{
+    sources: SourceRecord[];
+    rawConfig: string;
+    normalizedConfig: string;
+  }> = {},
+) {
   const configText = JSON.stringify({
     sites: [
       { key: "ok", name: "可用的源", api: supported.api },
@@ -149,9 +156,9 @@ function renderCenter() {
     ],
   });
   useAppStore.setState({
-    sources: [supported, blocked, needsAdapter],
-    rawConfig: configText,
-    normalizedConfig: configText,
+    sources: overrides.sources ?? [supported, blocked, needsAdapter],
+    rawConfig: overrides.rawConfig ?? configText,
+    normalizedConfig: overrides.normalizedConfig ?? configText,
     configDocuments: [
       { id: 1, name: "主配置", sourceCount: 3, liveCount: 0, importedAt: "2026-01-01T00:00:00.000Z" },
     ],
@@ -165,9 +172,10 @@ function renderCenter() {
 /**
  * Sets the source list's filter from the old vocabulary.
  *
- * The panel replaced a single dropdown, so the tests keep their words. The old filter was binary —
- * 已适配 / 未适配 — while the panel splits the second into 已阻止 and 无法适配, so 未适配 means both of
- * the ways a source can lack a runnable adapter.
+ * The panel replaced a single dropdown, so the tests keep their words: the old filter was binary —
+ * 已适配 / 未适配. 未适配 used to mean two choices, 已阻止 and 无法适配; the blocked families are no
+ * longer offered at all (their entries are removed from the configuration), so 未适配 is now just
+ * 无法适配.
  */
 function chooseFilter(label: string) {
   openFilterPanel();
@@ -176,7 +184,6 @@ function chooseFilter(label: string) {
   if (label === "已适配") {
     fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
   } else if (label === "未适配") {
-    fireEvent.click(screen.getByRole("checkbox", { name: "已阻止" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "无法适配" }));
   }
   // 全部 is the reset on its own: every group cleared.
@@ -494,12 +501,15 @@ describe("config center", () => {
     for (const group of ["适配器", "适配器状态", "测试状态", "启用"]) {
       expect(within(panel).getByText(group)).toBeInTheDocument();
     }
-    // The states the parser produces are offered, and the removed one is not.
+    // The states the parser produces are offered, and the removed ones are not.
     expect(within(panel).getByRole("checkbox", { name: "可执行" })).toBeInTheDocument();
     expect(within(panel).getByRole("checkbox", { name: "无法适配" })).toBeInTheDocument();
-    expect(within(panel).getByRole("checkbox", { name: "已阻止" })).toBeInTheDocument();
     expect(within(panel).getByRole("checkbox", { name: "配置无效" })).toBeInTheDocument();
     expect(within(panel).queryByRole("checkbox", { name: "部分支持" })).not.toBeInTheDocument();
+    // 已阻止 is gone with the five adapters that produced it. The sources it described are removed
+    // from the configuration at import, so a choice filtering to them could only ever come back
+    // empty — the same dead option 部分支持 was.
+    expect(within(panel).queryByRole("checkbox", { name: "已阻止" })).not.toBeInTheDocument();
   });
 
   it("explains how the groups combine", () => {
@@ -1903,9 +1913,11 @@ describe("config center", () => {
   });
 
   it("gives the adapter list the same toolbar as the source list", () => {
-    // Both lists are read the same way — search, then filter, then a count — so a reader who has
-    // used one already knows how to use the other. The adapter tab used to have no search at all,
-    // and its counts sat on a separate line as a second set of controls doing the filter's job.
+    // Both lists are read the same way — search, then a count — so a reader who has used one already
+    // knows how to use the other. The adapter tab used to have no search at all, and its counts sat
+    // on a separate line as a second set of controls doing the filter's job. There is no filter here
+    // any more, and deliberately so: every registered adapter can run, so a 状态 filter would offer
+    // options that all lead to the same eight rows.
     renderCenter();
     openAdaptersTab();
 
@@ -1913,7 +1925,6 @@ describe("config center", () => {
     expect(
       within(card).getByPlaceholderText("搜索适配器名称或说明"),
     ).toBeInTheDocument();
-    expect(within(card).getByLabelText("筛选适配器")).toBeInTheDocument();
     // The count reads the same as the source list's.
     expect(within(card).getByText(/^共 \d+ 类$/)).toBeInTheDocument();
   });
@@ -1930,38 +1941,41 @@ describe("config center", () => {
     const rowsBefore = bodyRows().length;
 
     fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
-      target: { value: "脚本" },
+      target: { value: "声明式" },
     });
 
     const rows = bodyRows();
     expect(rows.length).toBeLessThan(rowsBefore);
     // Everything left matches the keyword, so the search is not just hiding rows arbitrarily.
     for (const row of rows) {
-      expect(row.textContent).toMatch(/脚本/);
+      expect(row.textContent).toMatch(/声明式/);
     }
   });
 
-  it("counts adapters in the filter, not sources", () => {
-    // The number beside a filter option has to answer "how many rows will I get". It counted
-    // sources instead, so it read "可执行 26 个源" next to a choice that revealed 9 rows.
+  it("counts the rows the list is actually showing", () => {
+    // The count has to answer "how many rows will I get", which is the same question the removed
+    // filter's numbers were supposed to answer. It counted sources once, reading "可执行 26 个源"
+    // beside a choice that revealed 9 rows; now it counts the rows themselves, so it cannot drift
+    // from what is on screen — including while a search is narrowing it.
     renderCenter();
     openAdaptersTab();
 
-    const trigger = screen.getByLabelText("筛选适配器");
-    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-    fireEvent.click(trigger);
-
-    const enabled = screen.getByRole("option", { name: /可执行/ });
-    const claimed = Number(enabled.textContent?.replace(/\D/g, "") ?? "0");
-    expect(claimed).toBeGreaterThan(0);
-
-    // Choosing it must yield exactly that many adapter rows.
-    fireEvent.click(enabled);
     const card = adapterCard();
-    const bodyRows = within(card)
-      .getAllByRole("row")
-      .filter((row) => row.closest("tbody"));
-    expect(bodyRows.length).toBe(claimed);
+    const bodyRows = () =>
+      within(card)
+        .getAllByRole("row")
+        .filter((row) => row.closest("tbody"));
+
+    const shown = bodyRows().length;
+    expect(shown).toBeGreaterThan(0);
+    expect(within(card).getByText(`共 ${shown} 类`)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
+      target: { value: "声明式" },
+    });
+    const narrowed = bodyRows().length;
+    expect(narrowed).toBeLessThan(shown);
+    expect(within(card).getByText(`共 ${narrowed} 类`)).toBeInTheDocument();
   });
 
   it("updates the count as the search narrows the list", () => {
@@ -2033,8 +2047,8 @@ describe("config center", () => {
 
   it("lets the adapter, not a stale capability, word the status column", () => {
     // A source whose stored capability claims more than its adapter can do. The status column used
-    // to render the capability, so this row read 可执行 next to an adapter badge saying 已阻止.
-    // The fixture is deliberately contradictory: that is the whole point.
+    // to render the capability, so this row read 可执行 next to an adapter badge naming a family it
+    // could not run. The fixture is deliberately contradictory: that is the whole point.
     renderCenter();
     act(() => {
       useAppStore.setState({
@@ -2058,7 +2072,7 @@ describe("config center", () => {
     expect(row).toBeTruthy();
     const text = (row as HTMLElement).textContent ?? "";
     // Both columns agree the adapter cannot run it.
-    expect(text).toContain("已阻止");
+    expect(text).toContain("无法适配");
     expect(text).not.toContain("可执行");
   });
 
@@ -2077,9 +2091,11 @@ describe("config center", () => {
       return (cell as HTMLElement).textContent ?? "";
     };
 
-    // A source with no runnable adapter reads 已阻止 in both columns.
+    // A source with no runnable adapter reads 无法适配 in both columns. It said 已阻止 until the five
+    // blocked families were removed; the word went with them, and every one of those sources now
+    // reads this instead — when it is in the list at all, which for the file-backed ones is never.
     const blockedRow = rowFor("不可用的源");
-    expect(blockedRow).toContain("已阻止");
+    expect(blockedRow).toContain("无法适配");
     expect(blockedRow).not.toContain("可执行");
     // And the state that used to appear here is gone for good.
     expect(blockedRow).not.toContain("部分支持");
@@ -2145,23 +2161,30 @@ describe("config center", () => {
     ).toBeInTheDocument();
   });
 
-  it("offers a shorter adapter filter without the state nothing maps to", () => {
-    // 部分支持 has no adapter in the registry, so offering it as a filter was a choice that
-    // always came back empty.
+  it("lists only adapters that can run, with no status column to read", () => {
+    // The table used to carry a 状态 column and a matching filter dropdown. Five registry entries
+    // could not run, so both made sense; now every entry can, which would make the column say
+    // 可执行 on all eight rows and every filter option lead to the same eight rows. Both are gone —
+    // 部分支持 was removed from this page for exactly the same reason.
     renderCenter();
     openAdaptersTab();
 
-    const trigger = screen.getByLabelText("筛选适配器");
-    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-    fireEvent.click(trigger);
-
-    expect(screen.getByRole("option", { name: /全部适配器/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /可执行/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /无法适配/ })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: /已阻止/ })).toBeInTheDocument();
-    expect(
-      screen.queryByRole("option", { name: /部分支持/ }),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("筛选适配器")).not.toBeInTheDocument();
+    const header = screen
+      .getAllByRole("row")[0];
+    expect(header.textContent).toContain("适配器");
+    expect(header.textContent).not.toContain("状态");
+    // Every row is an adapter Moseek can actually run, so none of them explains itself by naming a
+    // plugin family for another client.
+    for (const gone of [
+      "Drpy JS",
+      "csp_AppMao",
+      "远程 JAR",
+      "Spider 运行时",
+      "JS 扩展源",
+    ]) {
+      expect(screen.queryByText(new RegExp(gone)), gone).not.toBeInTheDocument();
+    }
   });
 
   it("names the adapter tab in plain words", () => {
@@ -2172,29 +2195,33 @@ describe("config center", () => {
     expect(screen.queryByRole("tab", { name: /矩阵/ })).not.toBeInTheDocument();
   });
 
-  it("gives the adapter filter an icon, like the source list's", () => {
+  it("uses one word for an execution state, whichever surface shows it", () => {
+    // The count said 可执行 while the rows it revealed were badged 已启用, so clicking "3 个源" left
+    // the reader hunting for three rows that did not appear to exist. The vocabulary now comes from
+    // `adapterStatusLabel` everywhere, and this checks the two surfaces that still render it: the
+    // source list's filter panel and the detail sheet's 适配器边界 block. (The adapter tab's own
+    // column and filter are gone — every registered adapter runs, so both were constants.)
     renderCenter();
-    openAdaptersTab();
+    openFilterPanel();
 
+    const panel = screen.getByLabelText("筛选条件");
+    expect(within(panel).getByRole("checkbox", { name: "可执行" })).toBeInTheDocument();
+    // The 启用 group says 已启用 — a different question, so that word belongs there and is not a
+    // second spelling of this one. What must not exist is the third: no adapter is named by the
+    // plugin family of another client any more.
     expect(
-      screen.getByLabelText("筛选适配器").querySelector("svg"),
-    ).not.toBeNull();
-  });
+      within(panel).queryByRole("checkbox", { name: "已阻止" }),
+    ).not.toBeInTheDocument();
 
-  it("uses the same word for a count as for the badge it leads to", () => {
-    // The count said 可执行 while the rows it revealed were badged 已启用, so clicking "3 个源"
-    // left the reader hunting for three rows that did not appear to exist.
-    renderCenter();
-    openAdaptersTab();
-
-    const trigger = screen.getByLabelText("筛选适配器");
-    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
-    fireEvent.click(trigger);
-    fireEvent.click(screen.getByRole("option", { name: /可执行/ }));
-
-    const card = adapterCard();
-    expect(within(card).getAllByText("可执行").length).toBeGreaterThan(0);
-    expect(within(card).queryByText("已启用")).not.toBeInTheDocument();
+    // The detail sheet's badge for a runnable source uses the same word as the filter's choice.
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("可用的源"));
+    fireEvent.click(row as HTMLElement);
+    const sheet = screen.getByRole("dialog");
+    expect(within(sheet).getByText("适配器边界")).toBeInTheDocument();
+    expect(within(sheet).getByText(adapterStatusLabel("enabled"))).toBeInTheDocument();
+    expect(within(sheet).queryByText("已阻止")).not.toBeInTheDocument();
   });
 
   it("labels the test button for assistive technology instead of showing text", () => {
@@ -3010,6 +3037,131 @@ describe("config center", () => {
     expect(saveConfigDocument).not.toHaveBeenCalled();
   });
 
+  it("drops sources Moseek can never run, from the file and the list together", async () => {
+    // **The user's decision.** An adapter we cannot support should not be carried around at all:
+    // recognising it tells the reader nothing, and this application is never going to implement it.
+    // The entry is removed from the stored text *and* from the snapshot, because a document whose
+    // two halves describe different sets would put rows on screen for sources the file no longer
+    // contains — the contradiction this project has fixed repeatedly.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [
+          { key: "好源", name: "好源", type: 1, api: "https://new.example/api.php/provide/vod" },
+          { key: "drpy源", name: "drpy 源", api: "https://x.example/lib/drpy2.min.js" },
+        ],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    expect(saved).toBeTruthy();
+    const keys = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites.map(
+      (site) => site.key,
+    );
+    expect(keys).toContain("好源");
+    expect(keys).not.toContain("drpy源");
+
+    const snapshot = saved!.sources.map((source) => source.key);
+    expect(snapshot).toContain("好源");
+    expect(snapshot).not.toContain("drpy源");
+  });
+
+  it("says how many sources it discarded, so a smaller file is never a surprise", async () => {
+    // Importing is the moment the user hands over a file; getting back something smaller without a
+    // word about it is exactly the kind of silent change this page must not make.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [
+          { key: "好源", name: "好源", type: 1, api: "https://new.example/api.php/provide/vod" },
+          { key: "drpy源", name: "drpy 源", api: "https://x.example/lib/drpy2.min.js" },
+        ],
+      }),
+    );
+
+    expect(await screen.findByText(/已丢弃 1 个无法适配的源/)).toBeInTheDocument();
+  });
+
+  it("cleans a document that was stored before the rule existed", async () => {
+    // **Pruning on write is not enough.** A database written by an older version — or simply not
+    // edited since — keeps its blocked entries in the raw text forever, because nothing passes
+    // through the import or autosave paths. Measured in a real browser with such a document: the
+    // list was clean and every removed family name was gone from the interface, while the raw
+    // configuration still held four entries reading 无法测试. The user asked for these to be gone
+    // from the configuration, not merely from one view of it.
+    //
+    // The document is seeded **before** the first render and not after it. The cleanup records the
+    // document id it has handled, so a later `setState` would arrive once the effect had already run
+    // for that id and decided there was nothing to do — which is how the first version of this test
+    // passed no calls to the write at all.
+    const stored = JSON.stringify({
+      sites: [
+        { key: "ok", name: "可用的源", api: supported.api },
+        { key: "bad", name: "drpy 源", api: "https://x.example/lib/drpy2.min.js" },
+      ],
+    });
+    renderCenter({
+      sources: [
+        supported,
+        source({ key: "bad", name: "drpy 源", api: "https://x.example/lib/drpy2.min.js" }),
+      ],
+      rawConfig: stored,
+      normalizedConfig: stored,
+    });
+
+    await waitFor(() => {
+      expect(replaceAllConfigDocuments).toHaveBeenCalled();
+    });
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const keys = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites.map(
+      (site) => site.key,
+    );
+    expect(keys).toEqual(["ok"]);
+    expect(saved!.sources.map((s) => s.key)).toEqual(["ok"]);
+  });
+
+  it("does not rewrite a document that is already clean", async () => {
+    // The cleanup runs on every visit, so it must cost nothing when there is nothing to do: a parse
+    // and no write. A version that wrote unconditionally would rewrite the database on every open.
+    renderCenter();
+    await waitFor(() => {
+      expect(screen.getAllByRole("row").length).toBeGreaterThan(0);
+    });
+
+    expect(replaceAllConfigDocuments).not.toHaveBeenCalled();
+  });
+
+  it("keeps an XBPQ source, which has the same type and JAR as a spider", async () => {
+    // **The dangerous direction.** This entry is `type: 3` with a JAR — every raw marker says
+    // "spider" — while the payload it carries is a declarative vocabulary Moseek reads today.
+    // Measured on the author's database, 60 working sources look exactly like this. Deleting one
+    // would take a source out of the user's file with nothing to tell them it happened.
+    renderCenter();
+    await importConfigText(
+      JSON.stringify({
+        sites: [
+          {
+            key: "fok",
+            name: "🌙┃夸克┃影视",
+            type: 3,
+            api: "csp_XBPQ",
+            ext: JSON.stringify({ 分类url: "https://x/vod-show/{cateId}.html", 分类: "电影$1" }),
+            jar: "https://x.example/1.jar;md5;bb155c3f0133bbce4756ad52003f5968",
+          },
+        ],
+      }),
+    );
+
+    const saved = vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0];
+    const keys = (JSON.parse(saved!.rawConfig) as { sites: { key: string }[] }).sites.map(
+      (site) => site.key,
+    );
+    expect(keys).toContain("fok");
+    expect(saved!.sources.map((source) => source.key)).toContain("fok");
+    // And nothing was reported as discarded.
+    expect(screen.queryByText(/已丢弃/)).not.toBeInTheDocument();
+  });
+
   it("reports what the merge changed", async () => {
     // A merge that silently altered the source list would leave the user unsure whether their
     // configuration had been replaced. The summary is on the page, not in the dialog, so it is
@@ -3052,8 +3204,12 @@ describe("config center", () => {
     // The repeated site kept its position but took the incoming definition.
     expect(parsed.sites[0].key).toBe("别的名字");
 
-    // The source list is unchanged in size for the same reason: nothing was appended.
-    expect(saved!.sources).toHaveLength(3);
+    // The source list is unchanged in size for the same reason: nothing was appended. It is 2 rather
+    // than the fixture's 3 because `blocked` — a spider with a JAR — is one of the families Moseek
+    // can never run, so the save removes it. That is the point of the exercise rather than a
+    // side effect: the entry leaves the file and the list in the same write.
+    expect(saved!.sources).toHaveLength(2);
+    expect(saved!.sources.map((source) => source.key)).not.toContain("no");
     const identities = saved!.sources.map((s) => `${s.api}|${s.ext ?? ""}`);
     expect(new Set(identities).size).toBe(identities.length);
   });

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
   isFetchableLiveUrl,
   isMovieLibrarySource,
+  isPermanentlyUnsupported,
   isTestableCmsSource,
   isTestableLiveSource,
   isTestableSource,
@@ -38,6 +40,9 @@ describe("adapter registry", () => {
   });
 
   it("keeps remote code and JAR paths outside the executable adapter set", () => {
+    // They used to be reported as named families — `drpy-js`, `remote-jar` — with a 已阻止 badge.
+    // The refusal stands and is what these assertions are about; the names are what the user asked
+    // to be rid of, because a name for another client's plugin tells the reader nothing.
     expect(
       getAdapterProfile(
         source({
@@ -46,7 +51,7 @@ describe("adapter registry", () => {
           capability: "blocked",
         }),
       ).execution,
-    ).toBe("blocked");
+    ).toBe("needs-adapter");
     expect(
       getAdapterProfile(
         source({
@@ -63,7 +68,7 @@ describe("adapter registry", () => {
           capability: "blocked",
         }),
       ).id,
-    ).toBe("remote-jar");
+    ).toBe("private-protocol");
   });
 
   it("uses explicit site protocols instead of capability to identify sources", () => {
@@ -78,28 +83,37 @@ describe("adapter registry", () => {
     expect(profile.execution).toBe("enabled");
   });
 
-  it("treats the safe HTTP parser as an executable adapter, and a JS extension as not", () => {
-    expect(
-      getAdapterProfile(
-        source({
-          sourceType: "parser",
-          key: "parse-post",
-          api: "https://parser.example/resolve",
-        }),
-      ).execution,
-    ).toBe("enabled");
-    // A CatVod JS source used to become executable once a local script archive was bound to it.
-    // That runtime is gone, so the profile is now `blocked` however the source is configured —
-    // which is the honest answer, and the one the interface shows.
-    expect(
-      getAdapterProfile(
-        source({
-          key: "kitty-js",
-          siteProtocol: "js-extension",
-          capability: "blocked",
-        }),
-      ).execution,
-    ).toBe("blocked");
+  it("gives a legacy parser-typed record no adapter, because Rust refuses it too", () => {
+    // **The `http-parser` row is gone, and this is the test that would have caught it lying.**
+    // Its only branch was gated on `sourceType === "parser"`, a value nothing has produced since
+    // `da8f565` replaced `capability === "supported" ? "cms" : "parser"` with a hard-coded `"cms"`.
+    // The row claimed `enabled` with three operations while `SiteAdapterKind::from_source` in Rust
+    // has no parser kind at all and answered `Unsupported` — a source the interface offered to run
+    // and the backend refused.
+    //
+    // The parse-service feature it was named after is untouched by this and very much alive: the
+    // author's configuration carries 130 resolver services, they live in `normalizedConfig.parses`,
+    // and they reach Rust through `resolve_playback`. `PlaybackResolution.adapter_id` in
+    // `resolver.rs` still says "http-parser" — a *playback* label in a different namespace that
+    // never consults this registry.
+    const legacy = source({
+      sourceType: "parser",
+      key: "parse-post",
+      api: "https://parser.example/resolve",
+    });
+    expect(getAdapterProfile(legacy).id).toBe("unknown");
+    expect(getAdapterProfile(legacy).execution).toBe("needs-adapter");
+
+    // A CatVod JS source has no adapter that can run it either: the script runtime and its archives
+    // were removed, and the family needs remote code this app will not execute. It reads 无法适配
+    // and is removed from the configuration outright.
+    const kitty = source({
+      key: "kitty-js",
+      siteProtocol: "js-extension",
+      capability: "blocked",
+    });
+    expect(getAdapterProfile(kitty).execution).toBe("needs-adapter");
+    expect(isPermanentlyUnsupported(kitty)).toBe(true);
   });
 
   it("uses the live adapter for live sources", () => {
@@ -160,17 +174,18 @@ describe("adapter registry", () => {
     expect(isMovieLibrarySource(source({ testStatus: "untested" }))).toBe(true);
   });
 
-  it("offers no way to make a CatVod JS source run", () => {
-    // The script runtime and its local archives were removed, so there is nothing a user can bind,
-    // enable or point at to execute one of these. A source like this stays blocked, and the reason
-    // must not name a switch that no longer exists — that is what sends someone hunting for a
-    // setting that is not there.
+  it("gives a CatVod JS source no adapter at all, rather than one named after it", () => {
+    // There were two mistakes in a row here. The first was promising that binding a local script
+    // archive would make one of these run; that feature is gone, so the sentence named a switch that
+    // does not exist. The second was answering with a profile called `js-extension`, which names the
+    // format rather than the fact — and it is a fact about another client, not about what the reader
+    // can do. What is left is the one answer that helps: no adapter can run this.
     const profile = getAdapterProfile(
       source({ key: "kitty", siteProtocol: "js-extension", capability: "blocked" }),
     );
 
-    expect(profile.id).toBe("js-extension");
-    expect(profile.execution).toBe("blocked");
+    expect(profile.id).toBe("private-protocol");
+    expect(profile.execution).toBe("needs-adapter");
     expect(profile.reason).not.toContain("绑定");
   });
 
@@ -248,24 +263,180 @@ describe("adapter registry", () => {
     // One source, one word, whichever screen shows it.
     expect(adapterStatusLabel("enabled")).toBe("可执行");
     expect(adapterStatusLabel("needs-adapter")).toBe("无法适配");
-    expect(adapterStatusLabel("blocked")).toBe("已阻止");
   });
 
-  it("does not blame a missing sandbox for a source blocked by something else", () => {
-    // The drpy reason said 未提供 JS 沙箱, which was false: it is not what stops these sources —
-    // measured, 9 of the 10 distinct script addresses are unusable, and running one would need a
-    // host API layer (`request`, `pdfa`/`pdfh`, `CryptoJS`) no runtime here provides. Telling the
-    // reader a sandbox is missing sends them looking for a switch that would change nothing.
+  it("lists only adapters that can actually run, one row per real code path", () => {
+    // **The user's decision, twice over.** First the five blocked families went — drpy-js,
+    // csp-appmao, remote-jar, spider-runtime, js-extension — each named after another client's
+    // plugin. Then `http-parser`, which nothing could ever assign, and the two extra rows standing
+    // for `csp_Panda`/`csp_XYQHiker`, which are the same adapter as `xbpq` in the runtime.
     //
-    // The CatVod `js-extension` case that used to live here is covered by "offers no way to make a
-    // CatVod JS source run" above: its reason no longer names a binding, because there is nothing
-    // left to bind.
+    // The table is what the 适配器 tab renders, so an entry here is a promise that code exists.
+    for (const profile of adapterRegistry) {
+      expect(profile.execution, profile.id).toBe("enabled");
+      expect(profile.operations.length, profile.id).toBeGreaterThan(0);
+    }
+    const ids = adapterRegistry.map((profile) => profile.id);
+    for (const gone of [
+      "drpy-js",
+      "csp-appmao",
+      "remote-jar",
+      "spider-runtime",
+      "js-extension",
+      // The parser feature is alive, but it is not an adapter: it works through
+      // `normalizedConfig.parses` and `resolve_playback`, never through this registry.
+      "http-parser",
+      // Folded into `xbpq`, which is what they already were in Rust.
+      "csp-panda",
+      "csp-xyqhiker",
+    ]) {
+      expect(ids, gone).not.toContain(gone);
+    }
+    // Every source the app can run maps to one of these rows, so no row is decorative.
+    const runnable = [
+      source({ api: "https://cms.example/api" }),
+      source({ sourceType: "live", api: "https://live.example/tv.m3u" }),
+      source({ siteProtocol: "http-extension", api: "https://ext.example/api" }),
+      source({ siteProtocol: "html-http", api: "https://html.example/list" }),
+      source({ key: "fok", api: "csp_XBPQ" }),
+    ];
+    for (const item of runnable) {
+      const profile = getAdapterProfile(item);
+      expect(ids, profile.id).toContain(profile.id);
+      expect(profile.execution, profile.id).toBe("enabled");
+    }
+  });
+
+  it("keeps every declarative spelling, including the two that fold into xbpq", () => {
+    // **This is the dangerous one.** `csp_XBPQ`, `csp_Panda` and `csp_XYQHiker` are one adapter with
+    // three names — Rust puts all three markers into a single `ScriptFamily::Declarative` and runs
+    // them through one module — so the registry reports one row and this function answers `xbpq` for
+    // all three.
+    //
+    // The tokens must nevertheless stay recognisable, because this is also what tells
+    // `isRemoteCodeFamily` that a `csp_`-prefixed source is not remote code — and that answer decides
+    // whether the entry is DELETED from the user's configuration file. Dropping the `panda` or
+    // `xyqhiker` token rather than folding it would make every such source look like an encrypted
+    // AppMao payload and remove it on the next import or launch.
+    for (const api of ["csp_XBPQ", "csp_Panda", "csp_XYQHiker"]) {
+      const declarative: Partial<SourceRecord> = {
+        key: "fok",
+        api,
+        siteProtocol: "spider",
+        jar: "https://example.com/1.jar",
+      };
+      expect(isPermanentlyUnsupported(declarative), api).toBe(false);
+      expect(getAdapterProfile(source(declarative)).id, api).toBe("xbpq");
+      expect(getAdapterProfile(source(declarative)).execution, api).toBe("enabled");
+    }
+  });
+
+  it("still refuses an unknown csp_ family, so folding did not become a way in", () => {
+    // Being unable to read a payload is a reason to leave it alone, not a reason to run it. Only the
+    // three spellings Moseek actually implements are exempted.
+    for (const api of ["csp_Bili", "csp_SomeRuntime"]) {
+      const unknown: Partial<SourceRecord> = { key: "x", api };
+      expect(isPermanentlyUnsupported(unknown), api).toBe(true);
+      expect(getAdapterProfile(source(unknown)).id, api).toBe("private-protocol");
+    }
+  });
+
+  it("still refuses every family that would have to execute something", () => {
+    // Removing the vocabulary must not remove the refusal. These sources are removed from the
+    // configuration by `pruneUnsupportedEntries`, which reads `isPermanentlyUnsupported`; the
+    // profile they get until then says they cannot be adapted.
+    const refused: Partial<SourceRecord>[] = [
+      { key: "drpy-one", siteProtocol: "spider" },
+      { key: "南坊", api: "csp_AppMao", siteProtocol: "spider" },
+      { key: "kitty", siteProtocol: "js-extension" },
+      // A bare `type: 3` spider whose only hint is the JAR it wants to download. This one is the
+      // reason the refusal cannot be a name list: nothing in key or api identifies it.
+      { key: "tv-box-spider", siteProtocol: "spider", jar: "https://example.com/1.jar" },
+    ];
+    for (const overrides of refused) {
+      const profile = getAdapterProfile(source(overrides));
+      expect(profile.execution, overrides.key).toBe("needs-adapter");
+      expect(isPermanentlyUnsupported({
+        key: overrides.key,
+        api: overrides.api,
+        jar: overrides.jar,
+        siteProtocol: overrides.siteProtocol,
+      }), overrides.key).toBe(true);
+    }
+  });
+
+  it("keeps a declarative source that looks like a spider", () => {
+    // **The trap this predicate has to avoid.** An XBPQ source is `type: 3` and usually ships a JAR,
+    // so every raw marker says "spider" while its configuration is a declarative vocabulary Moseek
+    // reads today. Measured on the author's database, 60 working sources look exactly like this, and
+    // a check reading only the markers would delete them from the user's file.
+    const fromName: Partial<SourceRecord> = {
+      key: "fok",
+      api: "csp_XBPQ",
+      siteProtocol: "spider",
+    };
+    expect(isPermanentlyUnsupported(fromName)).toBe(false);
+    expect(getAdapterProfile(source(fromName)).id).toBe("xbpq");
+
+    // The other shape: the parser recognised the vocabulary from `ext` alone, so neither the key nor
+    // the api names the family. `siteProtocol` is then the only evidence, and it has to win.
+    const fromVocabulary: Partial<SourceRecord> = {
+      key: "奈飞中文",
+      api: "https://example.com/api",
+      siteProtocol: "xbpq",
+      siteType: 3,
+      jar: "https://example.com/1.jar",
+    };
+    expect(isPermanentlyUnsupported(fromVocabulary)).toBe(false);
+    expect(getAdapterProfile(source(fromVocabulary)).id).toBe("xbpq");
+  });
+
+  it("lets remote code win when one name carries both markers", () => {
+    // **Order is a contract, not an implementation detail.** TVBox lets a packager write both
+    // markers on one source, and what such a source needs is the engine — the engine is what runs,
+    // and the declarative payload is merely what it is pointed at. Rust reads the same two markers
+    // in the same order (`script_family` tests drpy first), so the two sides agree about which
+    // sources are removed from the user's file.
+    expect(
+      isPermanentlyUnsupported({ key: "drpy_xbpq", api: "csp_XBPQ" }),
+    ).toBe(true);
+    // And the ordinary declarative source is still kept, so the ordering does not swallow it.
+    expect(isPermanentlyUnsupported({ key: "fok", api: "csp_XBPQ" })).toBe(false);
+  });
+
+  it("never treats an unfetchable live address as permanently unsupported", () => {
+    // A relative path or a bare token is repaired against the document's base URL, so it is not a
+    // verdict — pruning on it would race the repair and delete sources that are about to work.
+    for (const api of ["./FM.json", "yqk", "csp_MQiTV", "直播链接自定义"]) {
+      expect(
+        isPermanentlyUnsupported({ key: "live-1", api, isLive: true }),
+        api,
+      ).toBe(false);
+    }
+    // A scheme that must never be fetched is a different matter.
+    expect(
+      isPermanentlyUnsupported({ key: "live-1", api: "javascript:1", isLive: true }),
+    ).toBe(true);
+  });
+
+  it("no longer explains itself by naming a runtime it does not have", () => {
+    // Three successive versions of the drpy entry were wrong in three different ways, and the last
+    // one is why the entry is gone. It first said 未提供 JS 沙箱 — false, a sandbox existed and was
+    // never the obstacle. It then named the host APIs actually required — true, and useless, because
+    // it described a runtime nobody was going to build. The user's verdict was that recognising
+    // these sources does not help anybody, so the family is no longer named at all: the entry is
+    // removed from the configuration at import and the profile that would have described it says
+    // only that it cannot be adapted.
     const drpy = getAdapterProfile(
       source({ key: "drpy-one", api: "https://example.com/lib/drpy2.min.js" }),
     );
-    expect(drpy.id).toBe("drpy-js");
+
+    expect(drpy.id).toBe("private-protocol");
     expect(drpy.reason).not.toContain("沙箱");
-    // It names what is actually required instead.
-    expect(drpy.reason).toContain("宿主 API");
+    expect(drpy.reason).not.toContain("宿主 API");
+    // What it does say is the state the reader can act on.
+    expect(drpy.execution).toBe("needs-adapter");
+    expect(isPermanentlyUnsupported({ key: "drpy-one", api: "https://x/lib/drpy2.min.js" }))
+      .toBe(true);
   });
 });

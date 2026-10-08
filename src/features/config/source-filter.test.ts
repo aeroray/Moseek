@@ -13,7 +13,7 @@ import {
   toggleFacet,
   type SourceFilterState,
 } from "@/features/config/source-filter";
-import { adapterStatusLabel } from "@/lib/adapters";
+import { adapterRegistry, adapterStatusLabel } from "@/lib/adapters";
 import type { SourceRecord } from "@/types/moseek";
 
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
@@ -140,13 +140,17 @@ describe("the source filter's groups", () => {
   });
 
   it("does not let a status choice match a source with no test outcome", () => {
-    // Otherwise ticking 可用 would also reveal rows whose 状态 column says 已阻止. Every choice is
-    // tried, not just the two that seemed likely: a mutation that gives such a source the `failed`
-    // facet passed when only 可用 and 待测试 were asserted.
-    const blockedSource = source({
-      capability: "blocked",
-      siteProtocol: "spider",
-      jar: "https://x/1.jar",
+    // Otherwise ticking 可用 would also reveal rows whose 状态 column reports no adapter. Every
+    // choice is tried, not just the two that seemed likely: a mutation that gives such a source the
+    // `failed` facet passed when only 可用 and 待测试 were asserted.
+    //
+    // This used to read a spider with a JAR, whose row said 已阻止 — a word this vocabulary no
+    // longer has, because the sources carrying it are removed from the configuration at import.
+    // An unfetchable live address is the surviving shape: it keeps a row, and it has no test result.
+    const untestable = source({
+      sourceType: "live",
+      api: "./FM.json",
+      capability: "needs-adapter",
     });
     for (const choice of [
       "usable",
@@ -156,17 +160,17 @@ describe("the source filter's groups", () => {
       "invalid",
     ] as const) {
       expect(
-        matchesSourceFilterState(blockedSource, filter({ statuses: [choice] })),
+        matchesSourceFilterState(untestable, filter({ statuses: [choice] })),
         `statuses: ["${choice}"] must not match a source with no test outcome`,
       ).toBe(false);
     }
     // It is reachable through the group that owns its word.
     expect(
-      matchesSourceFilterState(blockedSource, filter({ executions: ["blocked"] })),
+      matchesSourceFilterState(untestable, filter({ executions: ["needs-adapter"] })),
     ).toBe(true);
     // And its count appears in that group, not in the status group's.
-    const counts = facetCounts([blockedSource], filter());
-    expect(counts.executions.get("blocked")).toBe(1);
+    const counts = facetCounts([untestable], filter());
+    expect(counts.executions.get("needs-adapter")).toBe(1);
     for (const [, n] of counts.statuses) {
       expect(n).toBe(0);
     }
@@ -238,9 +242,29 @@ describe("the vocabulary shared with the adapter registry", () => {
     // These words were written out four times — in the registry, in the filter panel, in the adapter
     // tab's dropdown and in capability-badge — so one source could be described three different ways
     // depending on the screen. The panel and the badge now read the registry's function.
-    for (const execution of ["enabled", "needs-adapter", "blocked"] as const) {
+    for (const execution of adapterRegistry.map((profile) => profile.execution)) {
       expect(executionFacetLabels[execution]).toBe(adapterStatusLabel(execution));
     }
+  });
+
+  it("offers no choice for an adapter Moseek does not have", () => {
+    // The group is derived from `AdapterExecution`, so removing the blocked families took the 已阻止
+    // choice with it. A choice left behind would filter to a set that no longer exists — exactly the
+    // empty option this project has removed twice before (部分支持, and `blocked` in the status group).
+    expect(Object.values(executionFacetLabels)).not.toContain("已阻止");
+
+    // The two choices that remain are both real: `enabled` is what every registered adapter is, and
+    // `needs-adapter` is what a source gets when no adapter can run it — an unfetchable live address,
+    // for instance. `needs-adapter` is therefore not a registry state, which is why this asserts
+    // against the *sources* rather than against the registry's own execution values.
+    const adapterless = source({
+      sourceType: "live",
+      api: "./FM.json",
+      capability: "needs-adapter",
+    });
+    const counts = facetCounts([adapterless], filter());
+    expect(counts.executions.get("needs-adapter")).toBe(1);
+    expect(counts.executions.get("enabled")).toBeUndefined();
   });
 
   it("says 无法适配 rather than 待适配", () => {
@@ -253,9 +277,9 @@ describe("the vocabulary shared with the adapter registry", () => {
   });
 
   it("gives no two choices the same word", () => {
-    // Two choices reading 已阻止 while selecting different sets is worse than either being wrong: the
-    // reader has no way to tell which one they want. This happened when the 测试状态 group kept a
-    // `blocked` facet that the 适配器状态 group already covered exactly.
+    // Two choices reading the same word while selecting different sets is worse than either being
+    // wrong: the reader has no way to tell which one they want. This happened when the 测试状态 group
+    // kept a `blocked` facet that the 适配器状态 group already covered exactly.
     const all = [
       ...Object.values(executionFacetLabels),
       ...Object.values(statusFacetLabels),
@@ -267,8 +291,7 @@ describe("the vocabulary shared with the adapter registry", () => {
   it("keeps the two groups' sets disjoint", () => {
     // The invariant behind the duplicate-word fix: a source with a test outcome is described by the
     // 测试状态 group, and one without is described by the 适配器状态 group. No source is in both, so
-    // no source can be selected by a choice from each group at once — which is what made two choices
-    // both reading 已阻止 select different sets.
+    // no source can be selected by a choice from each group at once.
     const withOutcome = source({ testStatus: "failed" });
     const withOutcomeFacet = sourceStatusFacet(withOutcome);
     expect(withOutcomeFacet).toBe("failed");
@@ -280,9 +303,9 @@ describe("the vocabulary shared with the adapter registry", () => {
 
     // A source with no outcome returns null, so no status choice can select it.
     const noOutcome = source({
-      capability: "blocked",
-      siteProtocol: "spider",
-      jar: "https://x/1.jar",
+      sourceType: "live",
+      api: "./FM.json",
+      capability: "needs-adapter",
     });
     expect(sourceStatusFacet(noOutcome)).toBeNull();
   });

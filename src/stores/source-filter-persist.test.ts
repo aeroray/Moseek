@@ -35,7 +35,7 @@ describe("the source filter survives a restart", () => {
       state: {
         sourceFilter: {
           adapters: [],
-          executions: ["blocked"],
+          executions: ["needs-adapter"],
           statuses: ["failed"],
           enabled: ["off"],
         },
@@ -52,9 +52,33 @@ describe("the source filter survives a restart", () => {
 
     expect(merged?.sourceFilter).toEqual({
       adapters: [],
-      executions: ["blocked"],
+      executions: ["needs-adapter"],
       statuses: ["failed"],
       enabled: ["off"],
+    });
+  });
+
+  it("drops a stored 已阻止 choice, which this version no longer offers", () => {
+    // A filter saved before the blocked families were removed can name a state the panel no longer
+    // has. Dropping the choice is what this validation is for; the rest of the stored filter stands,
+    // so a user who had narrowed by 已阻止 simply sees a wider list rather than an empty one.
+    const merged = useAppStore.persist.getOptions().merge?.(
+      {
+        sourceFilter: {
+          adapters: ["xbpq"],
+          executions: ["blocked"],
+          statuses: ["usable"],
+          enabled: ["on"],
+        },
+      },
+      useAppStore.getState(),
+    ) as { sourceFilter?: unknown } | undefined;
+
+    expect(merged?.sourceFilter).toEqual({
+      adapters: ["xbpq"],
+      executions: [],
+      statuses: ["usable"],
+      enabled: ["on"],
     });
   });
 });
