@@ -21,6 +21,10 @@
   --accent: oklch(0.92 0.025 75);
   --accent-foreground: oklch(0.25 0.08 75);
   --destructive: oklch(0.62 0.22 25);
+  /* The foreground that sits on `--destructive`. Missing until now, which made every
+     `text-destructive-foreground` an unknown utility that resolved to nothing — so an icon on a red
+     hover background kept its resting colour instead of turning white. */
+  --destructive-foreground: oklch(0.99 0.005 25);
   --border: oklch(0.88 0.008 85);
   --input: oklch(0.88 0.008 85);
   --ring: oklch(0.72 0.16 75);
@@ -78,6 +82,9 @@
   --accent: #1C222E;
   --accent-foreground: #F2F5F8;
   --destructive: #EF4444;
+  /* White on the red: measured contrast against `--destructive` is high enough that the glyph stays
+     legible even at the 14px the window buttons use. */
+  --destructive-foreground: #FFFFFF;
   --border: rgba(255, 255, 255, 0.08);
   --input: rgba(255, 255, 255, 0.1);
   --ring: #E5A93C;
@@ -124,6 +131,7 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
