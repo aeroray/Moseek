@@ -1,6 +1,5 @@
 import { useState } from "react";
 import {
-  Check,
   FileUp,
   HardDrive,
   Info,
@@ -8,7 +7,6 @@ import {
   Moon,
   Palette,
   Play,
-  ShieldCheck,
   Sun,
   Trash2,
 } from "lucide-react";
@@ -68,7 +66,7 @@ interface SettingsViewProps {
 }
 
 /**
- * 系统设置 — the one place a user answers "what can I change?".
+ * 设置中心 — the one place a user answers "what can I change?".
  *
  * Laid out like the configuration centre rather than as a stack of cards: a fixed header, a tab
  * row, and one card per tab whose body is the only scrolling region. The page itself never
@@ -115,7 +113,7 @@ export function SettingsView({
         <section className="flex items-center justify-between gap-4 border-b border-border/60 pb-3">
           <div>
             <h1 className="font-display text-lg font-bold tracking-tight text-foreground">
-              系统设置
+              设置中心
             </h1>
             {/* No badge beside the title. "拾影 · 偏好设置" named the product and the page in the
                 same breath as the heading, and the heading already says which page this is. */}
@@ -139,10 +137,6 @@ export function SettingsView({
             <TabsTrigger value="player" className="gap-1.5">
               <Play className="size-3.5" data-icon="inline-start" aria-hidden="true" />
               播放器
-            </TabsTrigger>
-            <TabsTrigger value="security" className="gap-1.5">
-              <ShieldCheck className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-              安全与网络
             </TabsTrigger>
             <TabsTrigger value="storage" className="gap-1.5">
               <HardDrive className="size-3.5" data-icon="inline-start" aria-hidden="true" />
@@ -227,53 +221,6 @@ export function SettingsView({
                 }
               />
             </SettingsCard>
-          </TabsContent>
-
-          <TabsContent
-            value="security"
-            className="flex min-h-0 flex-1 flex-col"
-          >
-            <SettingsScrollBody>
-              <Card className="gap-0 py-0">
-                <CardHeader className="border-b pb-4 pt-5">
-                  <CardTitle className="text-base">安全与网络</CardTitle>
-                  <CardDescription>
-                    执行边界由程序固定，导入的配置无法改变；脚本能力默认收起。
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <div className="flex flex-col px-5">
-                    {/* The boundary is a statement of fact, not a set of switches. These were
-                        offered as permissions in an earlier version and could not be honoured —
-                        the addresses are refused by a fixed policy rule — so they are enumerated
-                        as rules instead. */}
-                    <SettingsSection
-                      title="执行边界"
-                      description="这些规则由程序固定，导入配置无法改变。"
-                    >
-                      <ul className="flex flex-col gap-2.5">
-                        {[
-                          "远程 JavaScript、JAR 和 spider 默认阻止",
-                          "本机与局域网地址默认拒绝访问",
-                          "日志会隐藏 token、Cookie 和密钥",
-                        ].map((rule) => (
-                          <li
-                            key={rule}
-                            className="flex items-start gap-2 text-sm text-muted-foreground"
-                          >
-                            <Check
-                              className="mt-0.5 size-4 shrink-0 text-[color:var(--status-supported)]"
-                              aria-hidden="true"
-                            />
-                            {rule}
-                          </li>
-                        ))}
-                      </ul>
-                    </SettingsSection>
-                  </div>
-                </CardContent>
-              </Card>
-            </SettingsScrollBody>
           </TabsContent>
 
           <TabsContent value="storage" className="flex min-h-0 flex-1 flex-col">
@@ -413,6 +360,9 @@ function SettingsCard({
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="p-0">
+        {/* Horizontal padding only. The vertical rhythm comes from the child: a `SettingRow` carries
+            its own `py-3.5`, and adding padding here would double it on 外观 and 播放器. A child that
+            is not a row has to bring its own — see the 关于与更新 tab. */}
         <div className="flex flex-col px-5">{children}</div>
       </CardContent>
     </Card>

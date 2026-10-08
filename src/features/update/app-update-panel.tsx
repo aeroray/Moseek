@@ -33,7 +33,10 @@ export function AppUpdatePanel({ currentVersion }: { currentVersion: string }) {
   const busy = downloading || installing;
 
   return (
-    <div className="flex flex-col gap-4">
+    /* `py-5` is this panel's own vertical padding. It is the one tab body that is not a stack of
+       `SettingRow`s, and those carry `py-3.5` each — so without this the panel sat flush against the
+       card's header hairline and its bottom edge, which is the cramped look that was reported. */
+    <div className="flex flex-col gap-4 py-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex items-center gap-2">

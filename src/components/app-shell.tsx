@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 
 import { AppLogo } from "@/components/app-logo";
+import { WindowControls } from "@/components/window-controls";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
@@ -48,24 +49,39 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
   return (
     <TooltipProvider delayDuration={150}>
       <div className="flex h-screen min-h-[640px] min-w-[1080px] bg-background text-foreground antialiased selection:bg-primary/20 selection:text-primary">
-        {/* 54px Ultra-Slim Rail (方案一：极光黑曜微轨) */}
-        <aside
-          className="relative z-40 flex w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar/95 py-3 select-none backdrop-blur-md"
+        {/* The window's own chrome, drawn inside the content area.
+            `decorations` is off in `tauri.conf.json`, so this row is the only place the window can be
+            dragged and closed — but it carries **no text at all**. The native title bar repeated the
+            product's English name, its Chinese name and its slogan above a window that already showed
+            all three; repeating any of them here would be the same mistake in a different bar. The
+            mark alone identifies the app, and the slogan survives as its tooltip. */}
+        <div
+          className="flex h-9 shrink-0 items-center border-b border-sidebar-border bg-sidebar/95 select-none backdrop-blur-md"
           data-tauri-drag-region
         >
-          {/* Brand Mark. The wordmark is replaced by the product's own logo, so the rail shows
-              the same mark as the window and the installer rather than a stand-in glyph.
-              Not a button: the logo is an identity, not a destination, and making it navigate
-              meant a stray click on the rail's corner silently moved the user somewhere else. */}
-          <div className="mb-4 flex flex-col items-center">
+          {/* Sized to the rail below so the mark sits directly above the navigation it belongs to,
+              rather than at an arbitrary offset that would read as a stray icon. */}
+          <div
+            className="flex w-14 shrink-0 items-center justify-center"
+            data-tauri-drag-region
+          >
             <AppLogo
-              className="size-9 rounded-lg"
+              className="size-5 rounded"
               title="拾影 · 万千影视，一拾即得"
             />
           </div>
+          <div className="flex-1" data-tauri-drag-region />
+          <WindowControls className="pr-1.5" />
+        </div>
 
-          {/* Main Navigation Rail */}
-          <nav className="flex flex-1 flex-col items-center gap-1.5" aria-label="核心导航">
+        <div className="flex min-h-0 flex-1">
+          {/* 54px Ultra-Slim Rail (方案一：极光黑曜微轨) */}
+          <aside
+            className="relative z-40 flex w-14 shrink-0 flex-col items-center border-r border-sidebar-border bg-sidebar/95 py-3 select-none backdrop-blur-md"
+            data-tauri-drag-region
+          >
+            {/* Main Navigation Rail */}
+            <nav className="flex flex-1 flex-col items-center gap-1.5" aria-label="核心导航">
             {mainNavItems.map((item) => {
               const Icon = item.icon;
               const isActive = item.key === activeView;
@@ -135,12 +151,13 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
               );
             })}
           </div>
-        </aside>
+          </aside>
 
-        {/* Main Work Area */}
-        <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background">
-          <main className="relative min-h-0 flex-1 overflow-hidden">{children}</main>
-        </section>
+          {/* Main Work Area */}
+          <section className="flex min-w-0 flex-1 flex-col overflow-hidden bg-background">
+            <main className="relative min-h-0 flex-1 overflow-hidden">{children}</main>
+          </section>
+        </div>
       </div>
     </TooltipProvider>
   );

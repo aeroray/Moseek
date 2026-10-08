@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsView } from "@/features/settings/settings-view";
@@ -46,7 +46,7 @@ describe("settings page", () => {
     // Checked across every tab, so the assertion cannot be satisfied by the card merely moving.
     renderSettings();
 
-    for (const tab of ["外观", "播放器", "安全与网络", "存储"]) {
+    for (const tab of ["外观", "播放器", "存储", "关于"]) {
       openTab(tab);
       expect(screen.queryByText("界面状态"), tab).not.toBeInTheDocument();
       expect(screen.queryByText("界面字体"), tab).not.toBeInTheDocument();
@@ -59,7 +59,7 @@ describe("settings page", () => {
     // These switches had no backing state either; they were pure decoration.
     renderSettings();
 
-    for (const tab of ["外观", "播放器", "安全与网络", "存储"]) {
+    for (const tab of ["外观", "播放器", "存储", "关于"]) {
       openTab(tab);
       expect(screen.queryByText("默认跳过片头"), tab).not.toBeInTheDocument();
       expect(screen.queryByText("播放失败时自动切换线路"), tab).not.toBeInTheDocument();
@@ -70,15 +70,17 @@ describe("settings page", () => {
 
   it("does not offer local-network access as a preference", () => {
     // Those switches were inert: no state field backed them, and the addresses they named are
-    // refused by a fixed policy rule. The rule is stated as a fact instead of offered as a
-    // toggle that cannot be honoured.
+    // refused by a fixed policy rule. The tab that stated the rule as a fact is gone too — a page of
+    // settings is not where a fixed boundary belongs — so this asserts the switches never return on
+    // any remaining tab.
     renderSettings();
-    openTab("安全与网络");
 
-    expect(screen.queryByText("允许访问 127.0.0.1")).not.toBeInTheDocument();
-    expect(screen.queryByText("允许访问局域网地址")).not.toBeInTheDocument();
-    expect(screen.queryByText("允许本机服务依赖")).not.toBeInTheDocument();
-    expect(screen.getByText("本机与局域网地址默认拒绝访问")).toBeInTheDocument();
+    for (const tab of ["外观", "播放器", "存储", "关于"]) {
+      openTab(tab);
+      expect(screen.queryByText("允许访问 127.0.0.1"), tab).not.toBeInTheDocument();
+      expect(screen.queryByText("允许访问局域网地址"), tab).not.toBeInTheDocument();
+      expect(screen.queryByText("允许本机服务依赖"), tab).not.toBeInTheDocument();
+    }
   });
 
   it("keeps the one player preference that is actually persisted", () => {
@@ -199,15 +201,20 @@ describe("settings page", () => {
     // the script runtime — the feature ran CatVod JS sources from a manually imported file and had
     // never been used. Nothing about scripts belongs on this page now, so the assertions are the
     // absence of every one of those controls rather than the shape of a collapsed card.
+    //
+    // Checked across every remaining tab rather than on one, because the controls could come back on
+    // any of them and the tab this used to check no longer exists.
     renderSettings();
-    openTab("安全与网络");
 
-    expect(screen.queryByText("本地脚本档案")).not.toBeInTheDocument();
-    expect(screen.queryByText("脚本执行诊断")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "导入本地脚本" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "执行本地脚本" })).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("运行时脚本")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("脚本执行结果")).not.toBeInTheDocument();
+    for (const tab of ["外观", "播放器", "存储", "关于"]) {
+      openTab(tab);
+      expect(screen.queryByText("本地脚本档案"), tab).not.toBeInTheDocument();
+      expect(screen.queryByText("脚本执行诊断"), tab).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "导入本地脚本" }), tab).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "执行本地脚本" }), tab).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("运行时脚本"), tab).not.toBeInTheDocument();
+      expect(screen.queryByLabelText("脚本执行结果"), tab).not.toBeInTheDocument();
+    }
   });
 
   it("offers the theme as a real choice", () => {
@@ -218,23 +225,30 @@ describe("settings page", () => {
     expect(props.onThemeChange).not.toHaveBeenCalled();
   });
 
-  it("states the execution boundary as fixed rules", () => {
+  it("states the execution boundary where a source can be acted on, not as a settings tab", () => {
+    // The 安全与网络 tab held three read-only sentences and no control at all: it was named 设置 while
+    // offering nothing to set. The facts still exist, but they belong beside the source they describe
+    // — where the user can do something about them — rather than on a page of switches.
     renderSettings();
-    openTab("安全与网络");
 
-    const boundary = screen.getByText("执行边界").closest("[data-slot='card']");
-    expect(boundary).toBeTruthy();
-    expect(
-      within(boundary as HTMLElement).getByText(/远程 JavaScript、JAR 和 spider 默认阻止/),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "安全与网络" })).not.toBeInTheDocument();
+    expect(screen.queryByText("执行边界")).not.toBeInTheDocument();
+    // The remaining tabs are the ones with something to change.
+    for (const tab of ["外观", "播放器", "存储", "关于"]) {
+      expect(screen.getByRole("tab", { name: tab }), tab).toBeInTheDocument();
+    }
   });
 
-  it("names the page once, without a badge repeating the product name", () => {
-    // The header carried a "拾影 · 偏好设置" badge next to the 系统设置 heading. It named the
-    // product and the page in the same breath as the heading, which had already said both.
+  it("names the page once, with the name the navigation uses", () => {
+    // The header carried a "拾影 · 偏好设置" badge next to the heading, which named the product and
+    // the page in the same breath as the heading that had already said both.
+    //
+    // The heading is 设置中心 because that is the label on the rail button the user clicked to get
+    // here. It used to read 系统设置, so hovering the icon said one thing and the page said another.
     renderSettings();
 
-    expect(screen.getByRole("heading", { name: "系统设置" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "设置中心" })).toBeInTheDocument();
+    expect(screen.queryByText("系统设置")).not.toBeInTheDocument();
     expect(screen.queryByText("拾影 · 偏好设置")).not.toBeInTheDocument();
   });
 
@@ -275,8 +289,8 @@ describe("settings page", () => {
     for (const [label, iconClass] of [
       ["外观", "lucide-palette"],
       ["播放器", "lucide-play"],
-      ["安全与网络", "lucide-shield-check"],
       ["存储", "lucide-hard-drive"],
+      ["关于", "lucide-info"],
     ] as const) {
       const tab = screen.getByRole("tab", { name: label });
       expect(tab.querySelector(`.${iconClass}`), label).toBeTruthy();

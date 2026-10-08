@@ -82,10 +82,14 @@ Discover optional memory without loading it. Entries here are not default loads.
   - activation: path-or-explicit
   - paths: `src-tauri/**`
   - description: Tauri commands, the policy gate, storage, and parser modules.
+- `areas/app-shell.md`
+  - activation: path-or-explicit
+  - paths: `src/App.tsx`, `src/components/app-shell.tsx`, `src/components/view-pane.tsx`, `src/components/window-controls.tsx`, `src/stores/app-store.ts`, `src-tauri/tauri.conf.json`
+  - description: Window chrome, navigation rail, and view lifetime.
 - `areas/frontend.md`
   - activation: path-or-explicit
   - paths: `src/**`, `index.html`, `vite.config.ts`
-  - description: React views, components, and the store.
+  - description: React views, components, and UI primitives.
 
 ## Optional rules
 `rules/` files load only through declared canonical tasks or explicit rule input.

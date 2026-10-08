@@ -13,13 +13,14 @@
     "windows": [
       {
         "label": "main",
-        "title": "Moseek · 拾影 · 万千影视，一拾即得",
+        "title": "拾影",
         "width": 1440,
         "height": 900,
         "minWidth": 1200,
         "minHeight": 720,
         "resizable": true,
-        "fullscreen": false
+        "fullscreen": false,
+        "decorations": false
       }
     ],
     "security": {
