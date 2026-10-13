@@ -50,7 +50,10 @@ describe("XBPQ / XYQHiker sources", () => {
     expect(source.capability).toBe("supported");
     expect(source.siteProtocol).toBe("xbpq");
     expect(source.enabled).toBe(true);
-    expect(source.capabilityNote).toContain("XBPQ");
+    // The note says the source works without extra programs — the fact that makes this family
+    // supported despite shipping a JAR. It names no internal jargon, which is the point: an ordinary
+    // user reads this line in the source drawer.
+    expect(source.capabilityNote).toContain("不需要额外程序");
   });
 
   it("recognises the family when ext is a URL rather than inline JSON", () => {

@@ -76,3 +76,20 @@ Check layout, media, and worker behaviour against the built bundle in a real bro
 
 Reason:
 jsdom has no layout engine and no MediaSource, so several defects passed the full unit suite; an assertion that survives broken behaviour proves nothing.
+
+## MC-DEC-20261008-7c41d5a2 — Plain Chinese, one name per thing
+
+Status: active
+Scope: project
+Subject: MC-SUBJ-20261008-a1000001
+Facet: adoption-policy
+Evidence:
+- repo:src/lib/adapters.ts
+- user-confirmed
+
+Decision:
+User-facing text targets someone who only wants to watch: no jargon, field names, adapter ids, or paths. One
+word per concept, never two for the same thing.
+
+Reason:
+播放诊断 is exempt: opt-in and technical by design.

@@ -238,7 +238,7 @@ describe("adapter registry", () => {
     expect(broken.execution).not.toBe("enabled");
     expect(broken.id).toBe("private-protocol");
     // Its reason is the parser's own note for this state, so the row and the adapter tab agree.
-    expect(broken.reason).toContain("需要单独适配器");
+    expect(broken.reason).toContain("暂不支持");
 
     // A fetchable live address still gets the live adapter.
     const ok = getAdapterProfile(
@@ -261,8 +261,8 @@ describe("adapter registry", () => {
 
   it("names the execution states the way the interface does", () => {
     // One source, one word, whichever screen shows it.
-    expect(adapterStatusLabel("enabled")).toBe("可执行");
-    expect(adapterStatusLabel("needs-adapter")).toBe("无法适配");
+    expect(adapterStatusLabel("enabled")).toBe("支持");
+    expect(adapterStatusLabel("needs-adapter")).toBe("暂不支持");
   });
 
   it("lists only adapters that can actually run, one row per real code path", () => {

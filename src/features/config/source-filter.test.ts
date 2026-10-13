@@ -272,8 +272,8 @@ describe("the vocabulary shared with the adapter registry", () => {
     // false for every source carrying it: the implementation is compiled into the TVBox client, the
     // payload is encrypted with the key in a JAR, the config points at TVBox's own loopback server,
     // or the address is dead. The word has to describe a state the user can act on.
-    expect(adapterStatusLabel("needs-adapter")).toBe("无法适配");
-    expect(executionFacetLabels["needs-adapter"]).toBe("无法适配");
+    expect(adapterStatusLabel("needs-adapter")).toBe("暂不支持");
+    expect(executionFacetLabels["needs-adapter"]).toBe("暂不支持");
   });
 
   it("gives no two choices the same word", () => {

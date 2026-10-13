@@ -1,6 +1,6 @@
 # Frontend
 
-Shared components and UI primitives under `src/`.
+Components and UI primitives under `src/`.
 
 ## MC-DEC-20261008-a1000002 — Images are fetched by Rust and injected as data URLs
 
@@ -12,8 +12,8 @@ Evidence:
 - repo:src/components/policy-image.tsx
 
 Decision:
-An `<img>` with no `src` paints a broken-image glyph: hold its place with a transparent pixel and swallow
-its `load`.
+An `<img>` with no `src` paints a broken-image glyph: hold its place with a transparent pixel, swallowing its
+`load`.
 
 ## MC-DEC-20261008-a1000003 — Scroll roots need explicit type and min-height
 
@@ -27,7 +27,7 @@ Evidence:
 Decision:
 A scroll root needs `min-h-0`; a `ScrollArea` needs `type="auto"` — Radix defaults to `hover`.
 
-## MC-DEC-20261008-a1000004 — Size geometry must not use `data-[size]` padding variants
+## MC-DEC-20261008-a1000004 — Size geometry needs plain classes
 
 Status: active
 Scope: area:frontend
@@ -37,7 +37,7 @@ Evidence:
 - test:src/components/ui/ui-primitives.test.tsx
 
 Decision:
-`data-[size=*]:px-*` outranks a caller's `pl-8`. Emit size geometry as plain classes instead.
+`data-[size=*]:px-*` outranks a caller's `pl-8`. Emit size geometry as plain classes.
 
 ## MC-DEC-20261008-a1000005 — Overlays tint the icon, not the panel
 
@@ -50,7 +50,7 @@ Evidence:
 
 Decision:
 A toast body stays on `bg-card/95` with `shadow-xl backdrop-blur-md`; only the icon carries the status
-colour. `--status-*-bg` is a 12% badge tint, not a panel fill.
+colour. `--status-*-bg` is a 12% badge tint, never a panel fill.
 
 ## MC-DEC-20261008-a1000006 — One type scale: 14/500 names, 12px mono values
 
@@ -62,8 +62,8 @@ Evidence:
 - repo:src/features/config/config-center.tsx
 
 Decision:
-A row is 14px/500 for its name, 12px mono for a displayed value; a group heading is 14px/500. 11px is for
-*editable* mono inputs only. jsdom applies no stylesheets, so measure in a browser.
+A row is 14px/500 for its name, 12px mono for a value; a group heading is 14px/500. 11px is for *editable*
+mono inputs. jsdom has no stylesheets: measure in a browser.
 
 ## MC-DEC-20261008-a1000007 — The source drawer is the only editor
 
@@ -75,5 +75,5 @@ Evidence:
 - repo:src/features/config/config-center.tsx
 
 Decision:
-The centre is one page, not tabs: 适配器 and 原始配置 are gone. A source is edited in its drawer, addressed
-via `locateVisualEntry`, never `source.key` — the parser renames or invents it.
+The centre is one page, not tabs: 适配器 and 原始配置 are gone. A source is edited in its drawer, located via
+`locateVisualEntry` — never `source.key`. It opens read-only; 编辑, then 保存 or 取消.

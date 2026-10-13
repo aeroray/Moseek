@@ -24,6 +24,7 @@ import {
   Globe2,
   Info,
   LoaderCircle,
+  Pencil,
   Search,
   ShieldAlert,
   TestTube2,
@@ -478,6 +479,23 @@ export function ConfigCenter() {
     });
     return entry ? { section, entry } : null;
   }, [inspectedSource, editorText]);
+  /**
+   * Whether the drawer's fields are currently editable.
+   *
+   * **The drawer opens read-only, and that is the point.** It is opened far more often to look
+   * something up — is this source working, what address does it use — than to change it, and an
+   * always-live form makes every one of those visits a chance to alter a field by accident, with the
+   * change written on blur before the user has decided anything. Editing is now something the user
+   * asks for, and it is confirmed or abandoned as a whole.
+   */
+  const [isEditingSource, setIsEditingSource] = useState(false);
+  /**
+   * The in-progress field values, keyed by field name, held only while editing.
+   *
+   * A single object rather than per-row state so 取消 can discard everything at once, and so 保存
+   * can see which fields actually changed instead of writing all of them back.
+   */
+  const [fieldDrafts, setFieldDrafts] = useState<Record<string, string>>({});
   const testableSources = useMemo(
     () => sources.filter(isTestableSource),
     [sources],
@@ -668,7 +686,7 @@ export function ConfigCenter() {
         setParseState({
           type: "success",
           title: "已清理无法适配的源",
-          message: `配置里有 ${pruned.removed} 个源需要远程脚本或 JAR，Moseek 不会执行它们，已从配置中移除。`,
+          message: `已从配置中移除 ${pruned.removed} 个不能用的源。`,
         });
       })
       .catch(() => {
@@ -837,9 +855,9 @@ export function ConfigCenter() {
         type: "success",
         title: "已合并为一套配置",
         message: [
-          `原来的 ${ordered.length} 套配置已合并为「中心配置」：新增 ${mergedCount.added} 个源，去重 ${mergedCount.unchanged} 个，当前共 ${saved.sources.length} 个源。以后导入会继续合并进这一套。`,
+          `原来的 ${ordered.length} 套配置已合并：新增 ${mergedCount.added} 个源，去重 ${mergedCount.unchanged} 个，共 ${saved.sources.length} 个源。`,
           prunedMerge.removed > 0
-            ? `已丢弃 ${prunedMerge.removed} 个无法适配的源（它们需要远程脚本或 JAR，Moseek 不会执行）。`
+            ? `已丢弃 ${prunedMerge.removed} 个不能用的源。`
             : null,
         ]
           .filter(Boolean)
@@ -1121,7 +1139,7 @@ export function ConfigCenter() {
       }
       if (!result) {
         throw new Error(
-          "浏览器预览不会直接请求 CMS 或直播源，请在 Tauri 桌面应用中测试。",
+          "请在桌面应用中使用此功能。",
         );
       }
       // The backend answers a dropped request with the sentinel instead of a result. Treated the
@@ -1364,14 +1382,14 @@ export function ConfigCenter() {
     if (cancelled) {
       toast({
         variant: "info",
-        title: "测速已取消",
-        description: `已测试 ${results.length}/${targets.length} 个源，其中 ${passedCount} 个通过。其余未测试的源保持原状态。`,
+        title: "测试已取消",
+        description: `已测试 ${results.length}/${targets.length} 个源，${passedCount} 个通过。`,
       });
       return;
     }
     toast({
       variant: passedCount === targets.length ? "success" : "info",
-      title: "测速完成",
+      title: "测试完成",
       description:
         `已测试 ${results.length} 个源，${passedCount} 个通过` +
         (disabledCount > 0
@@ -1451,7 +1469,7 @@ export function ConfigCenter() {
         setParseState({
           type: "error",
           message:
-            "浏览器预览不会直接请求远程配置，请在 Tauri 桌面应用中使用此功能。",
+            "请在桌面应用中使用此功能。",
         });
         return;
       }
@@ -1740,14 +1758,14 @@ export function ConfigCenter() {
     } catch {
       setParseState({
         type: "error",
-        message: "配置基址必须是有效的 HTTP 或 HTTPS URL。",
+        message: "请填写以 http:// 或 https:// 开头的完整地址。",
       });
       return;
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       setParseState({
         type: "error",
-        message: "配置基址只允许 HTTP 或 HTTPS URL。",
+        message: "地址必须以 http:// 或 https:// 开头。",
       });
       return;
     }
@@ -1764,7 +1782,7 @@ export function ConfigCenter() {
       setParseState({
         type: "success",
         title: "相对地址已修复",
-        message: "直播源地址已按配置基址归一化，请重新测试直播源。",
+        message: "直播源地址已补全，请重新测试。",
       });
     } catch (error) {
       setParseState({
@@ -1789,36 +1807,86 @@ export function ConfigCenter() {
   };
 
   /**
-   * Applies one field edit made in the source drawer.
+   * Enters edit mode, seeding the drafts from what is stored.
+   *
+   * Seeded here rather than derived during render so 取消 has something to throw away: the drafts are
+   * the user's own uncommitted state, and the moment they exist they must not be confused with the
+   * file's contents.
+   */
+  const beginEditSource = () => {
+    if (!inspectedEntry) return;
+    const seeded: Record<string, string> = {};
+    for (const field of inspectedEntry.entry.fields) seeded[field.name] = field.value;
+    setFieldDrafts(seeded);
+    setIsEditingSource(true);
+  };
+
+  /** Leaves edit mode and discards every pending change. */
+  const cancelEditSource = () => {
+    setIsEditingSource(false);
+    setFieldDrafts({});
+  };
+
+  /**
+   * Writes every changed field, in one action.
+   *
+   * **The entry's index is taken once and reused**, and that is sound rather than lazy: updating a
+   * field rewrites `list[index]` in place, so array positions do not move. Re-locating between fields
+   * would actively break the common case — changing an address changes the very value the lookup
+   * matches on, so the second field would fail to find its own entry.
    *
    * **Goes through `handleRawTextChange` on purpose.** That is the single ingress the debounced save
-   * watches, so an edit from the drawer lands exactly the way an edit from the editor did: pruned,
+   * watches, so an edit from the drawer lands exactly the way an edit from the old editor did: pruned,
    * parsed, merged with the existing records — which is what preserves the user's own switches — and
-   * written by `replaceAllConfigDocuments`. Writing to the database directly from here would bypass
+   * written by `replaceAllConfigDocuments`. Writing to the database directly would bypass
    * `saveEditorText`'s re-entrancy guard and reintroduce the write loop it was added to stop.
    *
    * The entry is located from the *current* text rather than an index captured when the drawer opened,
    * because anything could have edited the document since. `locateVisualEntry` answers null when it
    * cannot be certain, and then this refuses rather than writing the wrong row.
    *
-   * Returns whether the edit was applied, so the field can put the stored value back when it was not.
+   * A refused field leaves the drawer OPEN with the drafts intact, so the user can correct the value
+   * instead of retyping everything into a form that silently discarded their work.
    */
-  const handleEditSourceField = (field: string, value: string): boolean => {
-    if (!inspectedEntry || !inspectedSource) return false;
-    const { text, error } = updateVisualEntryField(
-      editorText,
-      inspectedEntry.section,
-      inspectedEntry.entry.index,
-      field,
-      value,
-    );
-    if (error) {
-      toast({ variant: "error", title: "没有修改", description: error });
-      return false;
+  const saveEditedSource = () => {
+    if (!inspectedEntry || !inspectedSource) return;
+    // Re-located at save time, not read from the memo: the drawer may have been open across an
+    // autosave, and the memo is what the *rendered* form was built from.
+    const target = locateVisualEntry(editorText, inspectedEntry.section, {
+      key: inspectedSource.key,
+      api: inspectedSource.api,
+    });
+    if (!target) {
+      toast({
+        variant: "error",
+        title: "没有保存",
+        description: "这一条在配置里的位置找不到了，请关闭后重新打开。",
+      });
+      return;
     }
-    if (text === editorText) return false;
-    handleRawTextChange(text);
-    return true;
+
+    let text = editorText;
+    for (const field of target.fields) {
+      const next = fieldDrafts[field.name];
+      if (next === undefined || next === field.value) continue;
+      const result = updateVisualEntryField(
+        text,
+        inspectedEntry.section,
+        target.index,
+        field.name,
+        next,
+      );
+      if (result.error) {
+        toast({ variant: "error", title: "没有保存", description: result.error });
+        return;
+      }
+      text = result.text;
+    }
+
+    if (text !== editorText) handleRawTextChange(text);
+    setIsEditingSource(false);
+    setFieldDrafts({});
+    toast({ title: "已保存", description: "改动会立即生效。" });
   };
 
   /**
@@ -2016,13 +2084,13 @@ export function ConfigCenter() {
    */
   const saveParseError = (error: unknown) => {
     const message =
-      error instanceof Error ? error.message : "本地数据库写入失败";
+      error instanceof Error ? error.message : "保存失败";
     const isStorage = isQuotaError(error) || /quota|exceeded/i.test(message);
     setParseState({
       type: "error",
       title: isStorage ? "浏览器存储已满" : undefined,
       message: isStorage
-        ? `配置已保存到本地数据库，但浏览器的临时镜像写不进去（存储已满）。这不影响已导入的配置，可以继续使用；重启后本页的列表会从数据库重新读取。`
+        ? "配置已保存。浏览器缓存空间不足，重启后会重新读取，不影响使用。"
         : `解析成功，但保存失败：${message}`,
     });
   };
@@ -2099,7 +2167,7 @@ export function ConfigCenter() {
     // has to be stated.
     const prunedNote =
       prunedCount > 0
-        ? `已丢弃 ${prunedCount} 个无法适配的源（它们需要远程脚本或 JAR，Moseek 不会执行）。`
+        ? `已丢弃 ${prunedCount} 个不能用的源。`
         : null;
 
     // The merged text is pruned as well, and for a second reason: the document already stored may
@@ -2166,8 +2234,8 @@ export function ConfigCenter() {
       message: [
         options.successNote ??
           (mergeReport
-            ? `已合并进「${name}」：新增 ${sourceMerge.added} 个源，更新 ${sourceMerge.updated} 个，${sourceMerge.unchanged} 个原本就有；当前共 ${keptSources.length} 个源。`
-            : `解析完成：${keptSources.length} 个源，${result.liveCount} 个直播源；可用 ${countParsedCapabilities(keptSources).supported} 个，${result.issues.length} 个需要关注。`),
+            ? `已导入：新增 ${sourceMerge.added} 个，更新 ${sourceMerge.updated} 个，共 ${keptSources.length} 个源。`
+            : `已读取 ${keptSources.length} 个源，${countParsedCapabilities(keptSources).supported} 个可用。`),
         prunedNote,
       ]
         .filter(Boolean)
@@ -2329,7 +2397,7 @@ export function ConfigCenter() {
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-0.5">
-              所有导入都合并进同一份配置，重复的源会自动去重
+              导入的内容会合并到一起，重复的源自动去掉
             </p>
           </div>
           {/* The merge result lives here rather than in a banner of its own.
@@ -2339,7 +2407,7 @@ export function ConfigCenter() {
               second row of chrome between the title and the work. */}
           {lastMergeSummary && (
             <span className="shrink-0 text-xs text-muted-foreground">
-              上次合并：新增 {lastMergeSummary.added} · 更新 {lastMergeSummary.updated} · 已有{" "}
+              上次导入：新增 {lastMergeSummary.added}，更新 {lastMergeSummary.updated}，已有{" "}
               {lastMergeSummary.unchanged}
             </span>
           )}
@@ -2362,11 +2430,10 @@ export function ConfigCenter() {
         {relativeLiveSources.length > 0 && !activeDocument?.sourceBaseUrl && (
           <Alert variant="destructive">
             <CircleX data-icon="inline-start" aria-hidden="true" />
-            <AlertTitle>当前配置包含相对直播地址</AlertTitle>
+            <AlertTitle>有直播源地址不完整</AlertTitle>
             <AlertDescription>
               {relativeLiveSources.map((source) => source.name).join("、")}{" "}
-              使用了 `./` 路径。旧配置没有保存远程基址，请填入原配置 URL
-              后修复；否则直播页无法请求这些源。
+              用了简写地址。请填入原配置的网址后修复。
               <div className="mt-3 flex items-center gap-2">
                 <Input
                   value={sourceBaseUrlDraft}
@@ -2374,7 +2441,7 @@ export function ConfigCenter() {
                     setSourceBaseUrlDraft(event.target.value)
                   }
                   placeholder="https://example.com/path/config.json"
-                  aria-label="远程配置基址"
+                  aria-label="原配置网址"
                   className="min-w-0 flex-1 bg-background"
                 />
                 <Button
@@ -2383,7 +2450,7 @@ export function ConfigCenter() {
                   disabled={isApplyingBaseUrl || !sourceBaseUrlDraft.trim()}
                   onClick={() => void handleApplySourceBaseUrl()}
                 >
-                  {isApplyingBaseUrl ? "修复中..." : "修复相对地址"}
+                  {isApplyingBaseUrl ? "修复中…" : "修复地址"}
                 </Button>
               </div>
             </AlertDescription>
@@ -2434,7 +2501,7 @@ export function ConfigCenter() {
                           data-icon="inline-start"
                           aria-hidden="true"
                         />
-                        取消测速 ({testingKeys.size}/{testableSources.length})
+                        停止测试 ({testingKeys.size}/{testableSources.length})
                       </Button>
                     ) : (
                       /* Two controls, because "run the wider scope" and "let me choose a scope" are
@@ -2470,7 +2537,7 @@ export function ConfigCenter() {
                             data-icon="inline-start"
                             aria-hidden="true"
                           />
-                          {`全部测速 (${testableSources.length})`}
+                          {`全部测试 (${testableSources.length})`}
                         </Button>
                         {/* **The official `ButtonGroup` pairing, not a `Select`.** The registry's own
                             example composes this control as `Button` + `DropdownMenu` with a
@@ -2513,7 +2580,7 @@ export function ConfigCenter() {
                               type="button"
                               variant="outline"
                               size="icon-sm"
-                              aria-label="测速范围"
+                              aria-label="测试范围"
                               disabled={testableSources.length === 0 || testingKeys.size > 0}
                             >
                               <ChevronDown
@@ -2550,7 +2617,7 @@ export function ConfigCenter() {
                               }}
                             >
                               <FlaskConical className="size-3.5" aria-hidden="true" />
-                              {`全部测速（${testableSources.length}）`}
+                              {`全部测试（${testableSources.length}）`}
                             </DropdownMenuItem>
                             <DropdownMenuItem
                               disabled={untestedSources.length === 0}
@@ -2616,7 +2683,7 @@ export function ConfigCenter() {
                       <span
                         title={
                           testingKeys.size > 0
-                            ? "测速进行中，结果仍在变化；测速结束后再清理。"
+                            ? "正在测试，结束后再清理。"
                             : undefined
                         }
                       >
@@ -2653,8 +2720,8 @@ export function ConfigCenter() {
                     <SearchInput
                       value={query}
                       onValueChange={setQuery}
-                      placeholder="搜索源名称或 API"
-                      aria-label="搜索源名称或 API"
+                      placeholder="搜索源名称或地址"
+                      aria-label="搜索源名称或地址"
                     />
                     <SourceFilterTrigger
                       activeGroupCount={activeFilterGroupCount(sourceFilter)}
@@ -2757,8 +2824,7 @@ export function ConfigCenter() {
           <DialogHeader className="shrink-0">
             <DialogTitle>导入配置</DialogTitle>
             <DialogDescription>
-              从一条链接或一个文件导入资源。读到的内容会列在下面，可以只导入其中几个；需要远程脚本或
-              JAR 的条目 Moseek 不会执行，也不会带进来。
+              从链接或文件导入。读到的内容会列在下面，可以只导入一部分。
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
@@ -3054,7 +3120,7 @@ export function ConfigCenter() {
                 ? "导入中…"
                 : selectedEntryIds.size === 0
                   ? "请至少选择一个"
-                  : `导入 ${selectedEntryIds.size} 个资源`}
+                  : `导入 ${selectedEntryIds.size} 个源`}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3081,7 +3147,7 @@ export function ConfigCenter() {
                 <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
                   <li>
                     <span className="text-foreground">原始配置会被一起修改</span>
-                    ，不是只在这里隐藏。这个源会从当前配置里移除。
+                    ，不是只隐藏。
                   </li>
                   {/* This used to say "之后重新导入同一份配置，这些源不会回来", which was never true
                       after imports became a merge. Removing a source drops it from this
@@ -3091,7 +3157,7 @@ export function ConfigCenter() {
                       that legitimately carries the same source — so the sentence is corrected
                       rather than the behaviour. */}
                   <li>
-                    以后导入的文件里如果还有这个源，它会作为新源重新加回来。
+                    以后导入的文件里如果还有这个源，它会重新加回来。
                   </li>
                   <li>该配置的导出结果里也不会再包含它们。</li>
                   <li>
@@ -3148,7 +3214,7 @@ export function ConfigCenter() {
                   </span>{" "}
                   份配置文档、
                   <span className="font-semibold text-foreground">{sources.length}</span>{" "}
-                  个源，以及原始配置与归一化配置。
+                  个源，以及全部配置内容。
                 </p>
                 <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
                   <li>删除后列表和原始配置都会变空，回到首次启动的样子。</li>
@@ -3202,7 +3268,7 @@ export function ConfigCenter() {
           <DialogHeader>
             <DialogTitle>最后确认</DialogTitle>
             <DialogDescription>
-              再次确认：{sources.length} 个源与全部配置文档将被永久删除。此操作不能撤销。
+              {sources.length} 个源将被永久删除，无法撤销。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -3233,7 +3299,13 @@ export function ConfigCenter() {
       <Sheet
         open={Boolean(inspectedSource)}
         onOpenChange={(open) => {
-          if (!open) setInspectedSourceKey(null);
+          if (!open) {
+            setInspectedSourceKey(null);
+            // Closing the drawer abandons any half-finished edit. Leaving edit mode set would make the
+            // NEXT source open straight into a form, which is the behaviour this replaced.
+            setIsEditingSource(false);
+            setFieldDrafts({});
+          }
         }}
       >
         <SheetContent className="w-[460px] sm:max-w-[460px] p-0 flex flex-col h-full overflow-hidden border-l border-border/80 bg-card/95 backdrop-blur-md">
@@ -3246,10 +3318,10 @@ export function ConfigCenter() {
                   <SourceStatusBadge source={inspectedSource} />
                   <Badge variant="outline" className="text-xs">
                     {inspectedSource.sourceType === "cms"
-                      ? "普通 CMS"
+                      ? "影视源"
                       : inspectedSource.sourceType === "live"
                         ? "直播源"
-                        : "解析服务"}
+                        : "解析源"}
                   </Badge>
                 </div>
                 <SheetTitle className="mt-2 text-base font-bold tracking-tight">
@@ -3264,69 +3336,135 @@ export function ConfigCenter() {
 
               <ScrollArea className="flex-1 min-h-0 w-full overflow-hidden">
                 <div className="flex flex-col gap-5 px-6 py-5">
-                  <DetailSection title="基本信息">
-                    <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
-                      {/* No 类型 row: the header badge above the title already states it, from the
-                          same expression, so it was the same words twice in one sheet. */}
-                      <DetailRow label="标识" value={inspectedSource.key} mono />
-                      <DetailRow
-                        label="解析格式"
-                        value={describeSourceDialect(inspectedSource.sourceDialect)}
-                      />
-                      {inspectedSource.description && (
-                        <DetailRow
-                          label="说明"
-                          value={inspectedSource.description}
-                        />
-                      )}
-                      {/* Only shown when the configuration actually switched the source off.
-                          It read 是 for all 355 sources in the author's database, so the row was
-                          a constant that told the reader nothing. */}
-                      {inspectedSource.status === false && (
-                        <DetailRow label="配置声明可用" value="否" />
-                      )}
-                      <DetailRow
-                        label="支持搜索"
-                        value={inspectedSource.searchable ? "是" : "否"}
-                      />
-                      <DetailRow
-                        label="支持分类"
-                        value={inspectedSource.filterable ? "是" : "否"}
-                      />
-                    </div>
-                  </DetailSection>
+                  {/* **Read-only until the user asks to edit.** The drawer is opened far more often to
+                      check something — is this source working, what address does it use — than to change
+                      it. An always-live form makes every one of those visits a chance to alter a field
+                      by accident, and each change used to be written on blur before the user had
+                      decided anything. The 编辑 button in the footer now reveals the form, and 保存 or
+                      取消 settles the whole set.
 
-                  {/* **Where a source is edited, now that 原始配置 is gone.** The drawer is the one
-                      place a user acts on a single source, so its fields belong here rather than
-                      behind a tab holding 340 sibling entries.
+                      While editing, the form REPLACES the two read-only sections rather than sitting
+                      beside them: they describe the same fields (标识 is `key`, 地址 is `api`), so
+                      showing both would state every value twice and let the two disagree the moment a
+                      field was typed into.
 
-                      It is deliberately the *same* form the visual editor offered — same field order,
-                      same 必需/可选 labels, same commit-on-blur — because the underlying operations are
-                      the same functions. What is gone is the surrounding page editor: the search box,
-                      the section accordions, and 其他设置, none of which mean anything when the user
-                      has already said which source they are looking at.
-
-                      When the entry cannot be located the section explains why instead of showing a
-                      form. `locateVisualEntry` refuses rather than guessing, and a form that wrote to
-                      the wrong row would be worse than no form. */}
-                  {inspectedEntry ? (
+                      When the entry cannot be located the sections stay as they are and the footer
+                      offers no 编辑 — `locateVisualEntry` refuses rather than guessing, and a form that
+                      wrote to the wrong row would be worse than no form. */}
+                  {isEditingSource && inspectedEntry ? (
                     <DetailSection title="编辑">
                       <div className="flex flex-col gap-2.5">
                         {inspectedEntry.entry.fields.map((field) => (
                           <SourceFieldRow
                             key={field.name}
                             field={field}
-                            onCommit={(value) => handleEditSourceField(field.name, value)}
+                            value={fieldDrafts[field.name] ?? field.value}
+                            onChange={(next) =>
+                              setFieldDrafts((current) => ({
+                                ...current,
+                                [field.name]: next,
+                              }))
+                            }
                           />
                         ))}
                       </div>
                     </DetailSection>
                   ) : (
-                    <DetailSection title="编辑">
-                      <p className="rounded-lg border border-border/70 bg-muted/20 p-3.5 text-xs leading-5 text-muted-foreground">
-                        {describeUneditableSource(inspectedSource)}
-                      </p>
-                    </DetailSection>
+                    <>
+                      <DetailSection title="基本信息">
+                        <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+                          {/* No 类型 row: the header badge above the title already states it, from the
+                              same expression, so it was the same words twice in one sheet. */}
+                          <DetailRow
+                            label="格式"
+                            value={describeSourceDialect(inspectedSource.sourceDialect)}
+                          />
+                          {inspectedSource.description && (
+                            <DetailRow
+                              label="说明"
+                              value={inspectedSource.description}
+                            />
+                          )}
+                          {/* Only shown when the configuration actually switched the source off.
+                              It read 是 for all 355 sources in the author's database, so the row was
+                              a constant that told the reader nothing. The label is the plain one:
+                              the old 配置声明可用 described a field in the file rather than what the
+                              reader is being told. */}
+                          {inspectedSource.status === false && (
+                            <DetailRow label="配置里已关闭" value="是" />
+                          )}
+                          <DetailRow
+                            label="支持搜索"
+                            value={inspectedSource.searchable ? "是" : "否"}
+                          />
+                          <DetailRow
+                            label="支持分类"
+                            value={inspectedSource.filterable ? "是" : "否"}
+                          />
+                        </div>
+                      </DetailSection>
+
+                      <DetailSection title="接口地址">
+                        <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
+                          {/* No 接口地址 row: the section heading already says it, and a heading
+                              immediately followed by a row of the same words reads as a mistake. */}
+                          <DetailRow
+                            label="地址"
+                            value={inspectedSource.api}
+                            mono
+                          />
+                          {inspectedSource.ext && (
+                            <DetailRow
+                              label="扩展参数"
+                              value={formatExt(inspectedSource.ext)}
+                              mono
+                            />
+                          )}
+                          {inspectedSource.jar && (
+                            <DetailRow
+                              label="额外程序"
+                              value={inspectedSource.jar}
+                              mono
+                              danger
+                            />
+                          )}
+                          {/* Live sources carry these and the sheet showed neither, so a channel
+                              list's guide and logo addresses were only visible in the raw text. */}
+                          {inspectedSource.epg && (
+                            <DetailRow
+                              label="节目单"
+                              value={inspectedSource.epg}
+                              mono
+                            />
+                          )}
+                          {inspectedSource.logo && (
+                            <DetailRow
+                              label="台标"
+                              value={inspectedSource.logo}
+                              mono
+                            />
+                          )}
+                        </div>
+                        {inspectedSource.jar && (
+                          <div className="mt-2.5 flex items-start gap-2 rounded-lg border border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] p-3 text-xs leading-5 text-[color:var(--status-blocked)]">
+                            <ShieldAlert
+                              className="mt-0.5 size-4 shrink-0"
+                              data-icon="inline-start"
+                              aria-hidden="true"
+                            />
+                            需要的额外程序，拾影不会下载或运行。
+                          </div>
+                        )}
+                      </DetailSection>
+                    </>
+                  )}
+
+                  {/* The one thing to say when the fields cannot be edited at all. Stated here rather
+                      than in place of the sections, which are still worth reading. */}
+                  {!inspectedEntry && (
+                    <p className="rounded-lg border border-border/70 bg-muted/20 p-3.5 text-xs leading-5 text-muted-foreground">
+                      {describeUneditableSource(inspectedSource)}
+                    </p>
                   )}
 
                   <AdapterDetail source={inspectedSource} />
@@ -3371,10 +3509,6 @@ export function ConfigCenter() {
                           value={`${inspectedSource.testDurationMs} ms`}
                         />
                       )}
-                      <DetailRow
-                        label="累计请求"
-                        value={`${inspectedSource.requestCount} 次`}
-                      />
                     </div>
 
                     {inspectedSource.testOperations &&
@@ -3410,59 +3544,6 @@ export function ConfigCenter() {
                         </div>
                       )}
                   </DetailSection>
-
-                  <DetailSection title="接口地址">
-                    <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
-                      {/* No 接口地址 row: the section heading already says it, and a heading
-                          immediately followed by a row of the same words reads as a mistake. */}
-                      <DetailRow
-                        label="地址"
-                        value={inspectedSource.api}
-                        mono
-                      />
-                      {inspectedSource.ext && (
-                        <DetailRow
-                          label="扩展参数"
-                          value={formatExt(inspectedSource.ext)}
-                          mono
-                        />
-                      )}
-                      {inspectedSource.jar && (
-                        <DetailRow
-                          label="远程 JAR"
-                          value={inspectedSource.jar}
-                          mono
-                          danger
-                        />
-                      )}
-                      {/* Live sources carry these and the sheet showed neither, so a channel
-                          list's guide and logo addresses were only visible in the raw text. */}
-                      {inspectedSource.epg && (
-                        <DetailRow
-                          label="节目单"
-                          value={inspectedSource.epg}
-                          mono
-                        />
-                      )}
-                      {inspectedSource.logo && (
-                        <DetailRow
-                          label="台标"
-                          value={inspectedSource.logo}
-                          mono
-                        />
-                      )}
-                    </div>
-                    {inspectedSource.jar && (
-                      <div className="mt-2.5 flex items-start gap-2 rounded-lg border border-[color:var(--status-blocked-border)] bg-[color:var(--status-blocked-bg)] p-3 text-xs leading-5 text-[color:var(--status-blocked)]">
-                        <ShieldAlert
-                          className="mt-0.5 size-4 shrink-0"
-                          data-icon="inline-start"
-                          aria-hidden="true"
-                        />
-                        远程 JAR 已记录但不会下载或执行。
-                      </div>
-                    )}
-                  </DetailSection>
                 </div>
               </ScrollArea>
 
@@ -3479,64 +3560,104 @@ export function ConfigCenter() {
                     />
                     <span>{inspectedSource.enabled ? "源已启用" : "源已停用"}</span>
                   </div>
+                  {/* **The footer swaps rather than grows.** While editing, 保存 and 取消 are the only
+                      two things that mean anything — testing or disabling a source mid-edit would
+                      write a document the user is still working on, and it would put four buttons in
+                      a row the user has to read. What is replaced comes back on 取消. */}
                   <div className="flex items-center gap-2">
-                    {isTestableSource(inspectedSource) && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="gap-1.5"
-                        // The same control both starts and cancels, matching the toolbar's batch
-                        // button. It used to disable itself while running, which left the drawer
-                        // with no way out of a test that was not finishing — the case where the
-                        // user most wants one.
-                        onClick={() =>
-                          testingKeys.has(inspectedSource.key)
-                            ? handleCancelTestSource(inspectedSource.key)
-                            : void handleTestSource(inspectedSource)
-                        }
-                      >
-                        {testingKeys.has(inspectedSource.key) ? (
-                          <>
-                            <X
-                              className="size-3.5"
-                              data-icon="inline-start"
-                              aria-hidden="true"
-                            />
-                            取消测试
-                          </>
-                        ) : (
-                          <>
-                            <TestTube2
-                              className="size-3.5"
-                              data-icon="inline-start"
-                              aria-hidden="true"
-                            />
-                            测试
-                          </>
-                        )}
-                      </Button>
-                    )}
-                    {/* The switch is offered on the same condition as the list's, which draws a
-                        dash for a source that cannot run. Offering 启用此源 here flipped a flag
-                        nothing reads — `enabled` only gates the movie library, and an unrunnable
-                        source is excluded from it either way — so the two surfaces disagreed
-                        about whether the control existed. */}
-                    {isTestableSource(inspectedSource) ? (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() =>
-                          void handleToggleSource(inspectedSource.key)
-                        }
-                      >
-                        {inspectedSource.enabled ? "停用此源" : "启用此源"}
-                      </Button>
+                    {isEditingSource ? (
+                      <>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={cancelEditSource}
+                        >
+                          取消
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="gap-1.5"
+                          onClick={saveEditedSource}
+                        >
+                          <Check className="size-3.5" aria-hidden="true" />
+                          保存
+                        </Button>
+                      </>
                     ) : (
-                      <span className="text-xs text-muted-foreground/70">
-                        该源没有可用适配器，无法启用
-                      </span>
+                      <>
+                        {inspectedEntry && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            onClick={beginEditSource}
+                          >
+                            <Pencil className="size-3.5" aria-hidden="true" />
+                            编辑
+                          </Button>
+                        )}
+                        {isTestableSource(inspectedSource) && (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="gap-1.5"
+                            // The same control both starts and cancels, matching the toolbar's batch
+                            // button. It used to disable itself while running, which left the drawer
+                            // with no way out of a test that was not finishing — the case where the
+                            // user most wants one.
+                            onClick={() =>
+                              testingKeys.has(inspectedSource.key)
+                                ? handleCancelTestSource(inspectedSource.key)
+                                : void handleTestSource(inspectedSource)
+                            }
+                          >
+                            {testingKeys.has(inspectedSource.key) ? (
+                              <>
+                                <X
+                                  className="size-3.5"
+                                  data-icon="inline-start"
+                                  aria-hidden="true"
+                                />
+                                取消测试
+                              </>
+                            ) : (
+                              <>
+                                <TestTube2
+                                  className="size-3.5"
+                                  data-icon="inline-start"
+                                  aria-hidden="true"
+                                />
+                                测试
+                              </>
+                            )}
+                          </Button>
+                        )}
+                        {/* The switch is offered on the same condition as the list's, which draws a
+                            dash for a source that cannot run. Offering 启用此源 here flipped a flag
+                            nothing reads — `enabled` only gates the movie library, and an unrunnable
+                            source is excluded from it either way — so the two surfaces disagreed
+                            about whether the control existed. */}
+                        {isTestableSource(inspectedSource) ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              void handleToggleSource(inspectedSource.key)
+                            }
+                          >
+                            {inspectedSource.enabled ? "停用此源" : "启用此源"}
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground/70">
+                            该源没有可用适配器，无法启用
+                          </span>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>
@@ -3594,7 +3715,7 @@ function ImportCandidateList({
       <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs">
         <span className="text-muted-foreground">
           共 <span className="font-medium tabular-nums text-foreground">{preview.counts.total}</span>{" "}
-          个资源，
+          个源，
           <span className="font-medium tabular-nums text-foreground">
             {preview.counts.selectable}
           </span>{" "}
@@ -3617,7 +3738,7 @@ function ImportCandidateList({
               个暂时不能用
             </>
           )}
-          {preview.counts.duplicate + preview.counts.unusable > 0 && "，后两类已取消勾选"}
+          {preview.counts.duplicate + preview.counts.unusable > 0 && "，后两类未勾选"}
         </span>
         {preview.repairNote && (
           <span className="text-muted-foreground">{preview.repairNote}</span>
@@ -3817,16 +3938,22 @@ function AdapterStatusBadge({ execution }: { execution: AdapterExecution }) {
 
 function DetailSection({
   title,
+  action,
   children,
 }: {
   title: string;
+  /** A control belonging to the whole section, placed opposite its heading. */
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <section className="flex flex-col gap-2">
-      <h3 className="text-xs font-semibold tracking-wide text-muted-foreground/80">
-        {title}
-      </h3>
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-xs font-semibold tracking-wide text-muted-foreground/80">
+          {title}
+        </h3>
+        {action}
+      </div>
       {children}
     </section>
   );
@@ -3874,14 +4001,11 @@ function formatExt(ext: string): string {
 function AdapterDetail({ source }: { source: SourceRecord }) {
   const adapter = getAdapterProfile(source);
   return (
-    <DetailSection title="适配器边界">
+    <DetailSection title="支持范围">
       <div className="rounded-lg border border-border/70 bg-card/40 divide-y divide-border/40 overflow-hidden">
         <div className="flex items-center justify-between gap-3 p-3.5">
           <div>
             <p className="font-semibold text-sm text-foreground">{adapter.label}</p>
-            <p className="mt-0.5 font-mono text-xs text-muted-foreground">
-              {adapter.id}
-            </p>
           </div>
           <AdapterStatusBadge execution={adapter.execution} />
         </div>
@@ -4162,38 +4286,19 @@ function describeUneditableSource(source: SourceRecord) {
 /**
  * One editable field in the source drawer.
  *
- * A local draft committed on blur, the same shape the visual editor used, and for the same measured
- * reason: committing per keystroke re-serialises the whole configuration — on the owner's file that was
- * visible lag — and it fights the caret.
- *
- * `lastValue` rather than an effect for picking up an outside change: the field object is rebuilt from
- * the text on every save, so a successful commit comes back as a new `value`, and the draft has to
- * follow it or the box would keep showing the pre-save text.
+ * Fully controlled by the parent's draft map, so 保存 can see every change and 取消 can discard them
+ * all at once. That is the difference from the version that committed on blur: the value here is the
+ * user's intent, not a copy that has already been written.
  */
 function SourceFieldRow({
   field,
-  onCommit,
+  value,
+  onChange,
 }: {
   field: VisualField;
-  /** Returns whether the edit was applied; `false` puts the stored value back in the box. */
-  onCommit: (value: string) => boolean;
+  value: string;
+  onChange: (next: string) => void;
 }) {
-  const [draft, setDraft] = useState(field.value);
-  const [lastValue, setLastValue] = useState(field.value);
-  if (lastValue !== field.value) {
-    setLastValue(field.value);
-    setDraft(field.value);
-  }
-
-  const commit = () => {
-    if (draft === field.value) return;
-    // **A refused edit puts the stored value back.** Leaving the typed text in the box would show a
-    // value the file does not contain — the user would read "the address is empty now" from a field
-    // whose edit was rejected, and the next unrelated save would look like it lost it. The refusal is
-    // already reported by a toast; this makes the field agree with it.
-    if (!onCommit(draft)) setDraft(field.value);
-  };
-
   const label = (
     <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
       <span className="font-mono">{field.name}</span>
@@ -4215,9 +4320,9 @@ function SourceFieldRow({
         {label}
         <Switch
           size="sm"
-          checked={draft === "true"}
+          checked={value === "true"}
           aria-label={field.name}
-          onCheckedChange={(checked) => onCommit(checked ? "true" : "false")}
+          onCheckedChange={(checked) => onChange(checked ? "true" : "false")}
         />
       </label>
     );
@@ -4228,9 +4333,8 @@ function SourceFieldRow({
       {label}
       {field.kind === "json" ? (
         <textarea
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commit}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
           rows={3}
           spellCheck={false}
           aria-label={field.name}
@@ -4242,15 +4346,8 @@ function SourceFieldRow({
       ) : (
         <Input
           size="sm"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onBlur={commit}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              commit();
-            }
-          }}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
           aria-label={field.name}
           className={field.kind === "text" && field.name !== "name" ? "font-mono" : undefined}
         />
@@ -4414,10 +4511,10 @@ const SourceTable = memo(function SourceTable({
                     <p className="truncate text-xs text-muted-foreground">
                       {source.api?.trim() ||
                         (source.sourceType === "cms"
-                          ? "普通 CMS"
+                          ? "影视源"
                           : source.sourceType === "live"
                             ? "直播源"
-                            : "解析服务")}
+                            : "解析源")}
                     </p>
                   </div>
                 </div>
@@ -4583,7 +4680,7 @@ const SourceTable = memo(function SourceTable({
       <Table containerClassName="overflow-visible" className="table-fixed">
         <TableHeader className="sticky top-0 z-10 bg-card">
           <TableRow className="hover:bg-transparent">
-            <TableHead className="w-[30%] pl-6">资源名称</TableHead>
+            <TableHead className="w-[30%] pl-6">名称</TableHead>
             <TableHead className="w-[13%]">状态</TableHead>
             <TableHead className="w-[22%]">适配器</TableHead>
             <TableHead className="w-[15%]">连接测试</TableHead>

@@ -155,14 +155,14 @@ export function parseConfigText(
     ...duplicateKeyIssues.map((duplicate) => ({
       severity: "warning" as const,
       path: `${duplicate.section}.${duplicate.index}`,
-      message: `检测到重复 key「${duplicate.originalKey}」，已自动改为唯一标识「${duplicate.uniqueKey}」，避免测试和启停状态互相影响。`,
+      message: `有两条源用了同一个标识「${duplicate.originalKey}」，已自动区分开。`,
       line: null,
       column: null,
     })),
     ...blockedRootFields.map((field) => ({
       severity: "warning" as const,
       path: field,
-      message: "检测到未执行字段，Moseek 只记录和展示，不会运行远程代码。",
+      message: "配置里有拾影不运行的内容，只会记录下来。",
       line: null,
       column: null,
     })),
@@ -475,13 +475,13 @@ export function repairConfigText(rawText: string): ConfigTextTransformResult {
 
   if (repairedText.startsWith("\uFEFF")) {
     repairedText = repairedText.slice(1);
-    changes.push("移除文件 BOM");
+    changes.push("去掉文件开头的隐藏字符");
   }
 
   const trimmedText = repairedText.trim();
   if (trimmedText !== repairedText) {
     repairedText = trimmedText;
-    changes.push("清理首尾空白");
+    changes.push("去掉首尾多余的空行");
   }
 
   const fencedText = repairedText.match(
@@ -489,12 +489,12 @@ export function repairConfigText(rawText: string): ConfigTextTransformResult {
   )?.[1];
   if (fencedText !== undefined) {
     repairedText = fencedText.trim();
-    changes.push("移除 Markdown 代码围栏");
+    changes.push("去掉多余的代码标记");
   }
 
   if (repairedText.endsWith(";")) {
     repairedText = repairedText.slice(0, -1).trimEnd();
-    changes.push("移除根配置末尾分号");
+    changes.push("去掉末尾多余的分号");
   }
 
   // A key that lost its opening quote.
@@ -520,13 +520,13 @@ export function repairConfigText(rawText: string): ConfigTextTransformResult {
   if (quotedText !== repairedText) {
     const count = (repairedText.match(/^(\s*)([A-Za-z_][A-Za-z0-9_]*)"(\s*:)/gm) ?? []).length;
     repairedText = quotedText;
-    changes.push(`补上 ${count} 处缺少左引号的字段名`);
+    changes.push(`补上 ${count} 处缺失的引号`);
   }
 
   const escapedText = escapeNewlinesInsideStrings(repairedText);
   if (escapedText !== repairedText) {
     repairedText = escapedText;
-    changes.push("转义字符串中的换行");
+    changes.push("修正多余的换行");
   }
 
   try {
@@ -536,7 +536,7 @@ export function repairConfigText(rawText: string): ConfigTextTransformResult {
     const coerced = coerceStringFlags(parsed);
     if (coerced > 0) {
       repairedText = JSON.stringify(parsed, null, 2);
-      changes.push(`把 ${coerced} 处写成了字符串的开关改回 true/false`);
+      changes.push(`修正 ${coerced} 处开关写法`);
     }
     return {
       ok: true,
@@ -571,7 +571,7 @@ function createSizeIssue(rawText: string): ParseIssue | null {
   return {
     severity: "error",
     path: "$",
-    message: `配置文本超过 ${MAX_CONFIG_TEXT_BYTES / 1024 / 1024} MiB 限制。`,
+    message: `配置文件太大（超过 ${MAX_CONFIG_TEXT_BYTES / 1024 / 1024} MB），无法导入。`,
     line: null,
     column: null,
   };
@@ -661,19 +661,16 @@ function classifySource(
 
   if (!hasRequiredFields) {
     capability = "invalid";
-    capabilityNote =
-      "缺少 key、name 或 api 必填字段，无法建立安全的源记录。";
+    capabilityNote = "这条源缺少必要信息，无法使用。";
   } else if (hasXbpqConfig) {
     // Checked before the spider/JAR branch: these sources are `type: 3` and ship a JAR, but the
     // configuration Moseek reads is declarative, so they are supported without executing
     // anything. The JAR is still never downloaded or run.
     capability = "supported";
-    capabilityNote =
-      "识别到 XBPQ/XYQHiker 声明式配置，按 URL 模板与文本标记读取页面，不执行脚本或 JAR。";
+    capabilityNote = "这种源可以直接读取，不需要额外程序。";
   } else if (hasHtmlSource && !hasHtmlMapping) {
     capability = "needs-adapter";
-    capabilityNote =
-      "声明式 HTML 源缺少有效的 itemSelector 或 fields 映射，当前只记录配置。";
+    capabilityNote = "这条源缺少读取规则，暂时无法使用。";
   } else if (
     siteType === 3 ||
     hasJar ||
@@ -682,19 +679,17 @@ function classifySource(
     hasRemoteScript
   ) {
     capability = "blocked";
-    capabilityNote = hasJsExtension
-      ? "检测到小猫/CatVod JS 扩展源，Moseek 当前只保留契约和元数据，不执行远程脚本。"
-      : siteType === 3
-        ? "检测到 TVBox type=3 Spider 运行时，Moseek 只记录和展示，不会执行。"
-        : hasJar
-          ? "检测到远程 JAR 依赖，Moseek 只记录和展示，不会下载或执行。"
-          : "检测到远程脚本或危险协议，Moseek 默认阻止执行。";
+    capabilityNote = hasJsExtension || siteType === 3
+      ? "这种源需要额外程序，拾影只记录，不会运行。"
+      : hasJar
+        ? "这种源需要下载额外程序，拾影不会下载或运行。"
+        : "这种源不安全，拾影不会运行。";
   } else if (apiLower.startsWith("proxy://") || hasPrivateProtocol) {
     capability = "needs-adapter";
-    capabilityNote = "检测到私有或非 HTTP 协议，需要单独适配器，当前不执行。";
+    capabilityNote = "这种源的地址格式暂不支持。";
   } else {
     capability = "supported";
-    capabilityNote = "普通 HTTP API，可进入搜索、分类、详情和播放地址流程。";
+    capabilityNote = "可以正常使用，支持搜索、分类和播放。";
   }
 
   return {
@@ -987,16 +982,16 @@ function classifyLiveSource(
   let capabilityNote: string;
   if (!hasRequiredFields) {
     capability = "invalid";
-    capabilityNote = "直播源缺少 name 或 url/api 字段。";
+    capabilityNote = "这个直播源缺少必要信息。";
   } else if (hasDangerousProtocol) {
     capability = "blocked";
-    capabilityNote = "直播源使用危险协议，Moseek 默认阻止执行。";
+    capabilityNote = "这个直播源的地址不安全，拾影不会使用。";
   } else if (hasPrivateProtocol || normalizedApi.startsWith("proxy://")) {
     capability = "needs-adapter";
-    capabilityNote = "直播源使用非 HTTP 协议，需要单独适配器，当前不执行。";
+    capabilityNote = "这个直播源的地址格式暂不支持。";
   } else {
     capability = "supported";
-    capabilityNote = "支持通过 Rust 网络层解析 M3U、TXT 或 JSON 直播频道。";
+    capabilityNote = "支持常见的直播源格式。";
   }
 
   return {
@@ -1213,7 +1208,7 @@ function normalizeParseServices(values: unknown): ParseServiceRecord[] {
         : textValue(object, ["url", "api", "parse", "jiexiUrl", "serviceUrl"]);
     const key = textValue(object, ["key", "id"]) || `parse-${index + 1}`;
     const name =
-      textValue(object, ["name", "title"]) || `解析服务 ${index + 1}`;
+      textValue(object, ["name", "title"]) || `解析源 ${index + 1}`;
     const method = (textValue(object, ["method"]) || "GET").toUpperCase();
     const supportsMethod = method === "GET" || method === "POST";
     const capability = !url
@@ -1224,14 +1219,12 @@ function normalizeParseServices(values: unknown): ParseServiceRecord[] {
           ? "needs-adapter"
           : "supported";
     const capabilityNote = !url
-      ? "解析服务缺少 HTTP URL。"
+      ? "解析源缺少地址。"
       : !/^https?:\/\//i.test(url)
-        ? "解析服务使用非 HTTP 协议，Moseek 默认阻止执行。"
+        ? "解析源的地址格式暂不支持。"
         : !supportsMethod
-          ? "当前只执行 GET 或 POST 解析服务，其他方法只记录配置。"
-          : method === "POST"
-            ? "允许通过受限 JSON POST 请求提交待解析地址。"
-            : "允许通过受限 GET 请求提交待解析地址。";
+          ? "这种解析方式暂不支持。"
+          : "可以正常使用。";
     return {
       key,
       name,

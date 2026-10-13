@@ -380,7 +380,7 @@ describe("Moseek config parser", () => {
     expect(formatted.text).toContain('"sites": []');
     expect(parseConfigText(formatted.text).ok).toBe(true);
     expect(repaired.ok).toBe(true);
-    expect(repaired.changes).toContain("转义字符串中的换行");
+    expect(repaired.changes).toContain("修正多余的换行");
     expect(parseConfigText(repaired.text).ok).toBe(true);
   });
 
@@ -452,7 +452,7 @@ ext": {
 
     const repaired = repairConfigText(text);
     expect(repaired.ok).toBe(true);
-    expect(repaired.changes.join("")).toContain("缺少左引号");
+    expect(repaired.changes.join("")).toContain("缺失的引号");
     expect(parseConfigText(repaired.text).ok).toBe(true);
     // The value is preserved, not just the syntax.
     const after = JSON.parse(repaired.text) as { sites: { ext?: { host?: string } }[] };
@@ -504,7 +504,7 @@ ext": {
     });
     const repaired = repairConfigText(text);
     expect(repaired.ok).toBe(true);
-    expect(repaired.changes.join("")).not.toContain("缺少左引号");
+    expect(repaired.changes.join("")).not.toContain("缺失的引号");
     expect(JSON.parse(repaired.text)).toEqual(JSON.parse(text));
   });
 
@@ -520,9 +520,11 @@ ext": {
   it("rejects oversized config text before parsing or formatting", () => {
     const oversized = " ".repeat(MAX_CONFIG_TEXT_BYTES + 1);
 
-    expect(parseConfigText(oversized).issues[0]?.message).toContain("10 MiB");
-    expect(formatConfigText(oversized).issue?.message).toContain("10 MiB");
-    expect(repairConfigText(oversized).issue?.message).toContain("10 MiB");
+    // The limit is stated in MB rather than MiB: this is a sentence a user reads, and MB is the unit
+    // they already know.
+    expect(parseConfigText(oversized).issues[0]?.message).toContain("10 MB");
+    expect(formatConfigText(oversized).issue?.message).toContain("10 MB");
+    expect(repairConfigText(oversized).issue?.message).toContain("10 MB");
   });
 
   it("accepts an object ext on a live source", () => {

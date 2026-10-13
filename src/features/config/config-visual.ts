@@ -4,18 +4,17 @@ import { EXPORT_EXTRAS_KEY } from "@/features/config/config-extras";
 import { rawFlagFields } from "@/features/config/config-schema";
 
 /**
- * The visual editor's model of a configuration.
+ * Reading a configuration into a model, and editing one entry of it in place.
  *
  * The raw text stays the source of truth — it is what is stored, exported and parsed — so every
- * operation here is a pure function from text to text. That keeps the visual editor and the code
- * editor looking at the same document, and means a user can switch between them without either one
- * owning the content.
+ * operation here is a pure function from text to text. That keeps whatever reads the file and
+ * whatever writes it looking at the same document, and means no caller owns the content.
  *
- * A configuration is a handful of arrays of entries plus a set of scalar settings. The arrays are
- * what a user manages one item at a time; the settings are things like the wallpaper address or the
- * ad-blocking rules, which are values rather than collections. Treating those two shapes differently
- * is the whole reason a visual editor is easier than text: 340 entries in a JSON array are
- * unreadable, while the same 340 as a list of named rows are not.
+ * The 原始配置 tab is gone: a source is edited from the drawer it is opened in, which locates the
+ * entry behind the parsed source (`locateVisualEntry`) and writes one field back into the text
+ * (`updateVisualEntryField`). `readVisualConfig` is what makes that possible — it names each entry
+ * so a row can be recognised, because 340 entries in a JSON array are unreadable while the same 340
+ * as a list of named rows are not.
  */
 
 /**
@@ -320,9 +319,9 @@ function serialize(config: Record<string, unknown>): string {
  * Applies a change to one entry.
  *
  * Every operation parses, edits and re-serialises. Re-serialising normalises formatting, which is a
- * real side effect: comments and the original layout are not preserved. That is why the visual mode
- * says so once, and why the code editor exists — a user who cares about the exact text is the user
- * the advanced mode is for.
+ * real side effect: comments and the original layout are not preserved. That is what the note beside
+ * an edited source is for, and why the file is still readable and editable as text for anyone who
+ * cares about its exact spelling.
  */
 function editEntry(
   rawText: string,
@@ -382,27 +381,6 @@ export function locateVisualEntry(
   // matching it would pick the wrong row of a duplicate pair.
   const byKey = candidates.find((entry) => entry.sourceKey === source.key);
   return byKey ?? null;
-}
-
-/**
- * Removes one entry.
- *
- * Deleting here and deleting from the source list are different operations on purpose: the list
- * removes a *parsed source*, which also rewrites the normalised snapshot and the stored record,
- * while this edits the configuration text. A user who wants the source gone from the application
- * uses the list; a user tidying the file uses this.
- */
-export function removeVisualEntry(
-  rawText: string,
-  section: VisualSectionKey,
-  index: number,
-): string {
-  const parsed = JSON5.parse(rawText) as Record<string, unknown>;
-  const list = parsed[section];
-  if (!Array.isArray(list) || index < 0 || index >= list.length) return rawText;
-  list.splice(index, 1);
-  parsed[section] = list;
-  return serialize(parsed);
 }
 
 /**
@@ -471,240 +449,4 @@ export function updateVisualEntryField(
     entry[field] = trimmed;
   });
   return { text, error: null };
-}
-
-/**
- * Adds a new entry to a section.
- *
- * Writes the required fields **and** the identifying ones, all empty. Only the required field is
- * strictly needed for the entry to work, but a new row that carries just an address renders as
- * `invalid-N` named `未命名源 N` the moment it is created — which reads as a broken entry rather than
- * an unfinished one, and gives the user nothing to click on to fix it. Pre-filling `key` and `name`
- * keeps the row visibly unfinished and self-explanatory, which is the state a user is about to edit.
- */
-export function addVisualEntry(
-  rawText: string,
-  section: VisualSectionKey,
-): string {
-  const parsed = JSON5.parse(rawText) as Record<string, unknown>;
-  const list = Array.isArray(parsed[section]) ? (parsed[section] as unknown[]) : [];
-  const entry: Record<string, unknown> = {};
-  for (const field of sectionFields[section]) {
-    if (!field.required && !IDENTIFYING_FIELDS.has(field.name)) continue;
-    // A placeholder rather than an empty string: the entry is visibly unfinished in the list, and
-    // the required-field rule means it cannot be saved blank either.
-    entry[field.name] = "";
-  }
-  list.push(entry);
-  parsed[section] = list;
-  return serialize(parsed);
-}
-
-/**
- * The fields that name an entry, so a freshly added row is identifiable while it is being filled in.
- *
- * Not "required" — the parser supplies fallbacks for both — but leaving them out is what made a new
- * row look broken instead of blank.
- */
-const IDENTIFYING_FIELDS = new Set(["key", "name"]);
-
-/** Sets one top-level setting. */
-export function updateVisualSetting(
-  rawText: string,
-  key: string,
-  value: string,
-): { text: string; error: string | null } {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON5.parse(rawText) as Record<string, unknown>;
-  } catch (error) {
-    return {
-      text: rawText,
-      error: error instanceof Error ? error.message : "配置无法解析。",
-    };
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    delete parsed[key];
-    return { text: serialize(parsed), error: null };
-  }
-  const previous = parsed[key];
-  if (isPlainObject(previous) || Array.isArray(previous)) {
-    try {
-      parsed[key] = JSON5.parse(trimmed);
-    } catch {
-      return { text: rawText, error: `${key} 需要是有效的 JSON。` };
-    }
-    return { text: serialize(parsed), error: null };
-  }
-  parsed[key] = previous !== undefined && typeof previous === "number" && Number.isFinite(Number(trimmed))
-    ? Number(trimmed)
-    : trimmed;
-  return { text: serialize(parsed), error: null };
-}
-
-/**
- * Removes one top-level setting.
- *
- * Clearing a setting's box already removes it (see `updateVisualSetting`), but that fact is
- * invisible: an empty field reads as "no value" rather than "this key is gone". A row-level delete
- * says what it does.
- */
-export function removeVisualSetting(rawText: string, key: string): string {
-  return removeVisualSettings(rawText, [key]);
-}
-
-/**
- * Removes several top-level settings at once.
- *
- * One parse and one serialisation for the whole set, so clearing eleven keys cannot reorder or
- * reformat the document eleven times over. A key that is not present is skipped rather than treated
- * as an error, so the caller can pass whatever the section is showing.
- */
-export function removeVisualSettings(rawText: string, keys: readonly string[]): string {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON5.parse(rawText) as Record<string, unknown>;
-  } catch {
-    return rawText;
-  }
-  let removed = false;
-  for (const key of keys) {
-    if (!Object.prototype.hasOwnProperty.call(parsed, key)) continue;
-    delete parsed[key];
-    removed = true;
-  }
-  return removed ? serialize(parsed) : rawText;
-}
-
-/**
- * The parser services that repeat an address already listed.
- *
- * The resolver attempts at most `MAX_PARSE_SERVICES` (12) services per playback, in the
- * configuration's own order, so a duplicate occupies one of those places with an attempt that has
- * already been made. Measured on the author's configuration: 75 entries, 57 distinct addresses, and
- * the twelfth usable one sits at position 14 — the later entries are never reached at all.
- *
- * Only the address is compared, because that is what an attempt is: the resolver builds its request
- * from the URL and the method, and across every duplicate group in the real configuration the
- * method, headers and body are identical.
- */
-export function findDuplicateParseServices(rawText: string): number[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON5.parse(rawText);
-  } catch {
-    return [];
-  }
-  if (!isPlainObject(parsed)) return [];
-  const list = parsed.parses;
-  if (!Array.isArray(list)) return [];
-
-  const seen = new Set<string>();
-  const duplicates: number[] = [];
-  list.forEach((item, index) => {
-    const record = isPlainObject(item) ? item : {};
-    const url = foldAddress(record.url);
-    if (!url) return;
-    if (seen.has(url)) {
-      duplicates.push(index);
-      return;
-    }
-    seen.add(url);
-  });
-  return duplicates;
-}
-
-/** The first entry of each address, dropping the repeats. */
-export function dedupeParseServices(rawText: string): string {
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON5.parse(rawText) as Record<string, unknown>;
-  } catch {
-    return rawText;
-  }
-  const list = parsed.parses;
-  if (!Array.isArray(list)) return rawText;
-
-  const seen = new Set<string>();
-  const kept = list.filter((item) => {
-    const record = isPlainObject(item) ? item : {};
-    const url = foldAddress(record.url);
-    // An entry with no address is kept: it is already its own problem, and dropping it here would
-    // make this button quietly delete something the user cannot see a duplicate of.
-    if (!url) return true;
-    if (seen.has(url)) return false;
-    seen.add(url);
-    return true;
-  });
-  if (kept.length === list.length) return rawText;
-  parsed.parses = kept;
-  return serialize(parsed);
-}
-
-/** An address folded for comparison: padded and cased differences are the same address. */
-function foldAddress(value: unknown): string {
-  return fieldText(value).trim().toLowerCase().replace(/\/+$/, "");
-}
-
-/**
- * Whether the text holds comments or a layout the visual editor would not preserve.
- *
- * JSON5 allows both, and re-serialising drops them. Telling the user before they edit is the
- * difference between a considered choice and silent loss.
- */
-export function hasUnpreservedSyntax(rawText: string): boolean {
-  // A comment marker outside a string. Good enough for a warning: the cost of a false positive is
-  // one sentence, and the cost of a false negative is lost text.
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < rawText.length; index += 1) {
-    const char = rawText[index];
-    if (escaped) {
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (char === '"' || char === "'") {
-      inString = !inString;
-      continue;
-    }
-    if (inString) continue;
-    if (char === "/" && (rawText[index + 1] === "/" || rawText[index + 1] === "*")) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Decides whether the edited text may replace the stored configuration.
- *
- * Extracted from the page so the rule is testable on its own. The editor that can produce invalid
- * text is CodeMirror, which a jsdom test cannot type into, so a guard living only in the component
- * would have no coverage — and this is the guard that stops an unreadable file from replacing a
- * working configuration, which is the worst outcome this screen can produce.
- *
- * There is no separate empty-text branch: `JSON5.parse("")` throws, so the empty case is already
- * covered and a second check would be a line no test could tell from its absence. Measured, not
- * assumed — the mutation that deleted such a check changed no behaviour.
- */
-export function canSaveVisualConfig(
-  rawText: string,
-): { ok: true } | { ok: false; message: string } {
-  try {
-    JSON5.parse(rawText);
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : "配置无法解析。";
-    return {
-      ok: false,
-      // Naming the syntax error is what makes the refusal actionable: the user is looking at a text
-      // editor, and "invalid" alone leaves them to find it.
-      message: `配置无法保存，请先修正语法：${detail}`,
-    };
-  }
-  return { ok: true };
 }

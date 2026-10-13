@@ -37,47 +37,46 @@ export interface AdapterProfile {
 
 const profiles: Record<AdapterId, Omit<AdapterProfile, "id" | "sourceType">> = {
   "builtin-cms": {
-    label: "内置 CMS 适配器",
+    label: "影视源",
     execution: "enabled",
     operations: ["搜索", "分类", "详情", "播放线路", "选集"],
-    reason: "普通 HTTP CMS API 使用 Moseek 统一数据模型。",
+    reason: "支持最常见的影视源接口。",
   },
   "builtin-live": {
-    label: "内置直播适配器",
+    label: "直播源",
     execution: "enabled",
     operations: ["频道", "分组", "节目单", "播放"],
-    reason: "M3U、TXT、JSON 直播源通过 Rust 解析器处理。",
+    reason: "支持常见的直播源文件。",
   },
   "http-extension": {
-    label: "HTTP 扩展适配器",
+    label: "影视源（扩展）",
     execution: "enabled",
     operations: ["搜索", "分类", "详情", "播放线路", "选集"],
-    reason: "使用受限的 HTTP 字段映射，不执行远程代码。",
+    reason: "按配置里的规则读取，不运行额外程序。",
   },
   "html-http": {
-    label: "声明式 HTML 适配器",
+    label: "网页源",
     execution: "enabled",
     operations: ["列表", "搜索", "详情", "播放链接"],
-    reason: "只请求 HTML 并按 CSS 选择器读取字段，不执行页面 JavaScript。",
+    reason: "直接读取网页内容，不运行网页里的程序。",
   },
   xbpq: {
-    label: "XBPQ / XYQHiker / Panda 适配器",
+    label: "网页源（兼容）",
     execution: "enabled",
     operations: ["列表", "搜索", "详情", "播放链接"],
-    reason:
-      "按 URL 模板与文本标记读取页面，不执行脚本或 JAR；这三种写法是同一套词汇的不同拼法。",
+    reason: "按配置里的规则读取网页，不运行额外程序。",
   },
   "private-protocol": {
-    label: "私有协议适配器",
+    label: "暂不支持",
     execution: "needs-adapter",
     operations: [],
-    reason: "proxy:// 等 TVBox 私有协议需要单独适配器，当前不执行。",
+    reason: "这种地址格式拾影暂不支持。",
   },
   unknown: {
-    label: "未知适配器",
+    label: "未知类型",
     execution: "needs-adapter",
     operations: [],
-    reason: "无法确认安全的执行边界，默认不执行。",
+    reason: "无法确认是否安全，暂不使用。",
   },
 };
 
@@ -384,8 +383,8 @@ export function adapterStatusLabel(execution: AdapterExecution) {
   // There is no third word any more. 已阻止 named which plugin a source was written for, and that
   // is a fact about somebody else's client, not about anything the reader can do.
   return {
-    enabled: "可执行",
-    "needs-adapter": "无法适配",
+    enabled: "支持",
+    "needs-adapter": "暂不支持",
   }[execution];
 }
 

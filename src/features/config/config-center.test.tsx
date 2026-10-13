@@ -100,7 +100,7 @@ const blocked = source({
   key: "no",
   name: "不可用的源",
   capability: "blocked",
-  capabilityNote: "检测到远程 JAR 依赖，Moseek 只记录和展示，不会下载或执行。",
+  capabilityNote: "检测到额外程序 依赖，Moseek 只记录和展示，不会下载或执行。",
   enabled: false,
   api: "https://blocked.example/spider",
   siteProtocol: "spider",
@@ -108,7 +108,7 @@ const blocked = source({
 });
 const needsAdapter = source({
   key: "wait",
-  name: "无法适配的源",
+  name: "暂不支持的源",
   capability: "needs-adapter",
   capabilityNote: "需要单独适配器。",
   enabled: false,
@@ -175,18 +175,18 @@ function renderCenter(
  * Sets the source list's filter from the old vocabulary.
  *
  * The panel replaced a single dropdown, so the tests keep their words: the old filter was binary —
- * 已适配 / 未适配. 未适配 used to mean two choices, 已阻止 and 无法适配; the blocked families are no
+ * 已适配 / 未适配. 未适配 used to mean two choices, 已阻止 and 暂不支持; the blocked families are no
  * longer offered at all (their entries are removed from the configuration), so 未适配 is now just
- * 无法适配.
+ * 暂不支持.
  */
 function chooseFilter(label: string) {
   openFilterPanel();
   const reset = screen.getByRole("button", { name: "重置" });
   if (!(reset as HTMLButtonElement).disabled) fireEvent.click(reset);
   if (label === "已适配") {
-    fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "支持" }));
   } else if (label === "未适配") {
-    fireEvent.click(screen.getByRole("checkbox", { name: "无法适配" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "暂不支持" }));
   }
   // 全部 is the reset on its own: every group cleared.
 }
@@ -209,10 +209,10 @@ function closeFilterPanel() {
 }
 
 /**
- * Starts a batch test through the 测速 control.
+ * Starts a batch test through the 测试 control.
  *
- * The toolbar used to have one 全部测速 button and clicking it started the run. It is now that button
- * plus a caret that opens a scope menu, so 全部测速 is still one click and the narrower scope is
+ * The toolbar used to have one 全部测试 button and clicking it started the run. It is now that button
+ * plus a caret that opens a scope menu, so 全部测试 is still one click and the narrower scope is
  * reachable. Tests name the scope rather than just clicking, which is the point of the change.
  *
  * **Every query here is synchronous, and that is deliberate.** The menu is a Radix `DropdownMenu`,
@@ -221,13 +221,13 @@ function closeFilterPanel() {
  * after the key press — an act-wrapped `findByRole` on that same node did not return for 19.5 s — so
  * an async query here would both waste seconds and risk starving `waitFor`.
  */
-function startBatchTest(scope: "全部测速" | "只测未测过的" = "全部测速") {
-  if (scope === "全部测速") {
+function startBatchTest(scope: "全部测试" | "只测未测过的" = "全部测试") {
+  if (scope === "全部测试") {
     // The main button, which is the common case and stays a single click.
-    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    fireEvent.click(screen.getByRole("button", { name: /全部测试/ }));
     return;
   }
-  fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
+  fireEvent.keyDown(screen.getByLabelText("测试范围"), { key: "ArrowDown" });
   const item = screen
     .getAllByRole("menuitem")
     .find((node) => new RegExp(scope).test(node.textContent ?? ""));
@@ -259,7 +259,7 @@ async function importConfigText(text: string, baseUrl = "https://imported.exampl
   fireEvent.change(input, { target: { value: baseUrl } });
   fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
   // The preview is built asynchronously, and the button reads 请至少选择一个 until it exists.
-  const confirm = await screen.findByRole("button", { name: /^导入 \d+ 个资源$/ });
+  const confirm = await screen.findByRole("button", { name: /^导入 \d+ 个源$/ });
   fireEvent.click(confirm);
   await waitFor(() => {
     expect(replaceAllConfigDocuments).toHaveBeenCalled();
@@ -358,7 +358,7 @@ describe("config center", () => {
     const rows = [...document.querySelectorAll("tr")];
     const row = rows.find((item) => item.textContent?.includes("可用的源"));
     expect(row, "the source row must be rendered").toBeTruthy();
-    expect(row?.textContent).toContain("普通 CMS");
+    expect(row?.textContent).toContain("影视源");
     // And the raw key is gone from this row too.
     expect(row?.textContent).not.toContain("ok ·");
   });
@@ -374,7 +374,7 @@ describe("config center", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText(/已合并进/)).toBeInTheDocument();
+      expect(screen.getByText(/已导入/)).toBeInTheDocument();
     });
     // It is a toast, and no page-level alert is left behind.
     expect(document.querySelector("[data-slot='toast']")).toBeTruthy();
@@ -412,7 +412,7 @@ describe("config center", () => {
     expect(screen.queryByText("当前使用")).not.toBeInTheDocument();
     // The sentence that said the same thing is still in the header, exactly once.
     expect(
-      screen.getAllByText(/所有导入都合并进同一份配置/),
+      screen.getAllByText(/导入的内容会合并到一起/),
     ).toHaveLength(1);
     expect(screen.queryByText(/每次导入都会合并进来/)).not.toBeInTheDocument();
   });
@@ -435,7 +435,7 @@ describe("config center", () => {
 
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
-    expect(screen.queryByText("无法适配的源")).not.toBeInTheDocument();
+    expect(screen.queryByText("暂不支持的源")).not.toBeInTheDocument();
   });
 
   it("offers four named groups rather than five parser states", () => {
@@ -450,8 +450,8 @@ describe("config center", () => {
       expect(within(panel).getByText(group)).toBeInTheDocument();
     }
     // The states the parser produces are offered, and the removed ones are not.
-    expect(within(panel).getByRole("checkbox", { name: "可执行" })).toBeInTheDocument();
-    expect(within(panel).getByRole("checkbox", { name: "无法适配" })).toBeInTheDocument();
+    expect(within(panel).getByRole("checkbox", { name: "支持" })).toBeInTheDocument();
+    expect(within(panel).getByRole("checkbox", { name: "暂不支持" })).toBeInTheDocument();
     expect(within(panel).getByRole("checkbox", { name: "配置无效" })).toBeInTheDocument();
     expect(within(panel).queryByRole("checkbox", { name: "部分支持" })).not.toBeInTheDocument();
     // 已阻止 is gone with the five adapters that produced it. The sources it described are removed
@@ -483,17 +483,17 @@ describe("config center", () => {
     fireEvent.click(screen.getByRole("button", { name: "重置" }));
 
     // The adapter group alone excludes the two sources with no runnable adapter.
-    fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "支持" }));
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
-    expect(screen.queryByText("无法适配的源")).not.toBeInTheDocument();
+    expect(screen.queryByText("暂不支持的源")).not.toBeInTheDocument();
 
     // Adding the enabled group keeps it, because 可用的源 is enabled.
     fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
     expect(screen.getByText("可用的源")).toBeInTheDocument();
 
     // Removing the adapter group leaves the enabled group doing the work: still just 可用的源.
-    fireEvent.click(screen.getByRole("checkbox", { name: "可执行" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "支持" }));
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
 
@@ -501,7 +501,7 @@ describe("config center", () => {
     // the filter's doing rather than an accident of the fixture.
     fireEvent.click(screen.getByRole("checkbox", { name: "已启用" }));
     expect(screen.getByText("不可用的源")).toBeInTheDocument();
-    expect(screen.getByText("无法适配的源")).toBeInTheDocument();
+    expect(screen.getByText("暂不支持的源")).toBeInTheDocument();
   });
 
   it("disables a choice that would leave nothing, instead of hiding it", () => {
@@ -526,7 +526,7 @@ describe("config center", () => {
     openFilterPanel();
     fireEvent.click(screen.getByRole("button", { name: "重置" }));
 
-    const box = screen.getByRole("checkbox", { name: "可执行" });
+    const box = screen.getByRole("checkbox", { name: "支持" });
     fireEvent.click(box);
     expect(box).toBeChecked();
     expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
@@ -547,7 +547,7 @@ describe("config center", () => {
 
     const panel = screen.getByLabelText("筛选条件");
     const runnable = within(panel)
-      .getByRole("checkbox", { name: "可执行" })
+      .getByRole("checkbox", { name: "支持" })
       .closest("div");
     // One source in the fixture is runnable, so the count beside it is 1.
     expect(runnable?.textContent).toContain("1");
@@ -562,7 +562,7 @@ describe("config center", () => {
     // Nothing is selected, so every source is listed — including the ones the page does not open on.
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.getByText("不可用的源")).toBeInTheDocument();
-    expect(screen.getByText("无法适配的源")).toBeInTheDocument();
+    expect(screen.getByText("暂不支持的源")).toBeInTheDocument();
   });
 
   it("reports how many groups are narrowing, on the toolbar", () => {
@@ -586,7 +586,7 @@ describe("config center", () => {
     const reset = screen.getByRole("button", { name: "重置" });
     fireEvent.click(reset);
 
-    toggleFilterFacet("内置 CMS 适配器");
+    toggleFilterFacet("影视源");
 
     expect(screen.getByText("可用的源")).toBeInTheDocument();
     expect(screen.queryByText("不可用的源")).not.toBeInTheDocument();
@@ -598,12 +598,12 @@ describe("config center", () => {
     chooseFilter("未适配");
 
     expect(screen.getByText("不可用的源")).toBeInTheDocument();
-    expect(screen.getByText("无法适配的源")).toBeInTheDocument();
+    expect(screen.getByText("暂不支持的源")).toBeInTheDocument();
     expect(screen.queryByText("可用的源")).not.toBeInTheDocument();
   });
 
   it("leads the adapter cell with an icon saying whether an adapter exists", () => {
-    // The words 可执行 / 未适配 wrapped onto a second line and read as a status report. An icon
+    // The words 支持 / 未适配 wrapped onto a second line and read as a status report. An icon
     // badge in front answers "is this handled at all?" first, which is the question that matters
     // before the adapter's name. Its accessible name is the full explanation, since the icon itself
     // carries no text.
@@ -627,7 +627,7 @@ describe("config center", () => {
       .find((row) => row.textContent?.includes("可用的源"));
     expect(okRow?.textContent).toContain("已有适配器，可以测试");
     expect(
-      within(okRow as HTMLElement).queryByText("可执行"),
+      within(okRow as HTMLElement).queryByText("支持"),
     ).not.toBeInTheDocument();
   });
 
@@ -729,7 +729,7 @@ describe("config center", () => {
       screen.queryByRole("switch", { name: "启用 不可用的源" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", { name: "启用 无法适配的源" }),
+      screen.queryByRole("switch", { name: "启用 暂不支持的源" }),
     ).not.toBeInTheDocument();
   });
 
@@ -760,7 +760,7 @@ describe("config center", () => {
       .find((row) => row.textContent?.includes("不可用的源"));
     fireEvent.click(okRow as HTMLElement);
 
-    expect(screen.getByText(/适配器边界/)).toBeInTheDocument();
+    expect(screen.getByText(/支持范围/)).toBeInTheDocument();
   });
 
   it("names the parse dialect in Chinese rather than printing the raw value", () => {
@@ -791,7 +791,7 @@ describe("config center", () => {
       fireEvent.click(row as HTMLElement);
 
       const sheet = screen.getByRole("dialog");
-      expect(within(sheet).getByText("解析格式")).toBeInTheDocument();
+      expect(within(sheet).getByText("格式")).toBeInTheDocument();
       // The internal identifier is not what a user should read.
       expect(within(sheet).queryByText("kitty")).not.toBeInTheDocument();
       expect(within(sheet).queryByText("mixed")).not.toBeInTheDocument();
@@ -801,7 +801,7 @@ describe("config center", () => {
   });
 
   it("does not repeat the source type inside the sheet", () => {
-    // The header badge already states it, from the same expression, so the sheet said 普通 CMS
+    // The header badge already states it, from the same expression, so the sheet said 影视源
     // twice — once as a badge and once as a 基本信息 row.
     renderCenter();
     chooseFilter("未适配");
@@ -814,7 +814,7 @@ describe("config center", () => {
     const sheet = screen.getByRole("dialog");
     expect(within(sheet).queryByText("类型")).not.toBeInTheDocument();
     // The badge that legitimately carries it is still there.
-    expect(within(sheet).getAllByText("普通 CMS")).toHaveLength(1);
+    expect(within(sheet).getAllByText("影视源")).toHaveLength(1);
   });
 
   it("does not repeat the API label as both a heading and a row", () => {
@@ -925,7 +925,7 @@ describe("config center", () => {
       key: "stale",
       name: "状态过期的源",
       capability: "blocked",
-      capabilityNote: "API 部分可用；存在远程 JAR 依赖，Moseek 不会下载或执行。",
+      capabilityNote: "API 部分可用；存在额外程序 依赖，Moseek 不会下载或执行。",
       api: "csp_XBPQ",
       siteProtocol: "xbpq",
     });
@@ -943,10 +943,10 @@ describe("config center", () => {
     expect(
       within(sheet).queryByText(/API 部分可用/),
     ).not.toBeInTheDocument();
-    // The adapter's own explanation still appears, in 适配器边界 — and only once, since printing it
+    // The adapter's own explanation still appears, in 支持范围 — and only once, since printing it
     // under the title as well said the same paragraph twice in one sheet.
     expect(
-      within(sheet).getAllByText(/按 URL 模板与文本标记读取页面/),
+      within(sheet).getAllByText(/按配置里的规则读取网页/),
     ).toHaveLength(1);
   });
 
@@ -957,7 +957,7 @@ describe("config center", () => {
       key: "broken",
       name: "无效源",
       capability: "invalid",
-      capabilityNote: "缺少 key、name 或 api 必填字段，无法建立安全的源记录。",
+      capabilityNote: "这条源缺少必要信息，无法使用。",
       api: "",
     });
     renderCenter();
@@ -972,7 +972,7 @@ describe("config center", () => {
     fireEvent.click(row as HTMLElement);
 
     const sheet = screen.getByRole("dialog");
-    expect(within(sheet).getByText(/缺少 key、name 或 api/)).toBeInTheDocument();
+    expect(within(sheet).getByText(/缺少必要信息/)).toBeInTheDocument();
   });
 
   it("does not blame a missing adapter for a test that was blocked", () => {
@@ -1076,41 +1076,22 @@ describe("config center", () => {
     ).toContain("pl-6");
   });
 
-  it("saves an edit on its own, without a save button", async () => {
-    // The user asked for edits to land by themselves: needing to press 保存 turns a typo they are
-    // about to fix into a decision about whether their work is stored yet. The drawer's fields go
-    // through the same debounced save the 原始配置 editor used, so this is that promise kept after
-    // the tab was removed: the field is in the drawer, the write still happens on its own.
-    vi.useFakeTimers();
-    try {
-      renderCenter();
-      const row = screen
-        .getAllByRole("row")
-        .find((r) => r.textContent?.includes("可用的源"));
-      fireEvent.click(row as HTMLElement);
-      const sheet = screen.getByRole("dialog");
-
-      const nameField = within(sheet).getByLabelText("name");
-      fireEvent.change(nameField, { target: { value: "改名后的源" } });
-      fireEvent.blur(nameField);
-
-      // No save button exists at all any more.
-      expect(screen.queryByRole("button", { name: /保存改动/ })).not.toBeInTheDocument();
-
-      vi.mocked(replaceAllConfigDocuments).mockClear();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
-      });
-
-      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
-      const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
-      expect(written.rawConfig).toContain("改名后的源");
-      // The sibling entry is untouched.
-      expect(written.rawConfig).toContain("不可用的源");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  /**
+   * The write path behind an explicit save.
+   *
+   * **These used to be about auto-save, and the user inverted that.** The drawer's fields committed on
+   * blur, which meant a change landed before the user had decided anything; they asked for 编辑/保存/取消
+   * instead. The debounced write is still what carries the result, so every one of these guards is still
+   * load-bearing — they now press 保存 rather than blurring a field.
+   */
+  async function saveDrawerEdit(
+    sheet: HTMLElement,
+    field: string,
+    value: string,
+  ) {
+    fireEvent.change(within(sheet).getByLabelText(field), { target: { value } });
+    fireEvent.click(within(sheet).getByRole("button", { name: "保存" }));
+  }
 
   it("keeps edits made during a pending save and writes them next", async () => {
     vi.useFakeTimers();
@@ -1125,23 +1106,22 @@ describe("config center", () => {
         .find((r) => r.textContent?.includes("可用的源"));
       fireEvent.click(row as HTMLElement);
       const sheet = screen.getByRole("dialog");
+      fireEvent.click(within(sheet).getByRole("button", { name: "编辑" }));
 
-      fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "第一份编辑" } });
-      fireEvent.blur(within(sheet).getByLabelText("name"));
+      await saveDrawerEdit(sheet, "name", "第一份编辑");
       await act(async () => { await vi.advanceTimersByTimeAsync(700); });
       expect(release).toBeTypeOf("function");
       // A second edit while the first write is still in flight, which must not be lost.
-      fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "写入期间的新编辑" } });
-      fireEvent.blur(within(sheet).getByLabelText("name"));
+      fireEvent.click(within(sheet).getByRole("button", { name: "编辑" }));
+      await saveDrawerEdit(sheet, "name", "写入期间的新编辑");
       await act(async () => { release!(); });
-      expect(within(sheet).getByLabelText("name")).toHaveValue("写入期间的新编辑");
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0].rawConfig).toContain("写入期间的新编辑");
       expect(useAppStore.getState().configDocuments).toHaveLength(1);
     } finally { vi.useRealTimers(); }
   });
 
-  it("writes exactly once for one edit, and settles", async () => {
+  it("writes exactly once for one save, and settles", async () => {
     // The loop that a real browser caught and jsdom did not: one field edit produced FIVE writes.
     // A successful save merges the sources, which changes `sources`, which the debounce effect
     // depended on, which restarted the timer — so an idle page kept writing. Worse than the manual
@@ -1149,8 +1129,7 @@ describe("config center", () => {
     // duplicate entries.
     //
     // The count is the assertion: "an edit is saved" is satisfied by a loop, so it has to be
-    // "exactly once". The drawer's fields go through the same `saveEditorText` guard, so the same
-    // count is what keeps them from reintroducing it.
+    // "exactly once".
     vi.useFakeTimers();
     try {
       renderCenter();
@@ -1159,16 +1138,14 @@ describe("config center", () => {
         .find((r) => r.textContent?.includes("可用的源"));
       fireEvent.click(row as HTMLElement);
       const sheet = screen.getByRole("dialog");
-
-      const nameField = within(sheet).getByLabelText("name");
-      fireEvent.change(nameField, { target: { value: "只写一次" } });
-      fireEvent.blur(nameField);
+      fireEvent.click(within(sheet).getByRole("button", { name: "编辑" }));
 
       vi.mocked(replaceAllConfigDocuments).mockClear();
+      await saveDrawerEdit(sheet, "name", "只写一次");
+
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5000);
       });
-
       expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
       // And the page settles rather than still writing on an idle page.
       await act(async () => {
@@ -1191,11 +1168,9 @@ describe("config center", () => {
         .find((r) => r.textContent?.includes("可用的源"));
       fireEvent.click(row as HTMLElement);
       const sheet = screen.getByRole("dialog");
+      fireEvent.click(within(sheet).getByRole("button", { name: "编辑" }));
 
-      const nameField = within(sheet).getByLabelText("name");
-      fireEvent.change(nameField, { target: { value: "改一次" } });
-      fireEvent.blur(nameField);
-
+      await saveDrawerEdit(sheet, "name", "改一次");
       await act(async () => {
         await vi.advanceTimersByTimeAsync(2000);
       });
@@ -1230,12 +1205,10 @@ describe("config center", () => {
         .find((r) => r.textContent?.includes("可用的源"));
       fireEvent.click(row as HTMLElement);
       const sheet = screen.getByRole("dialog");
-
-      const nameField = within(sheet).getByLabelText("name");
-      fireEvent.change(nameField, { target: { value: "改名的源" } });
-      fireEvent.blur(nameField);
+      fireEvent.click(within(sheet).getByRole("button", { name: "编辑" }));
 
       vi.mocked(replaceAllConfigDocuments).mockClear();
+      await saveDrawerEdit(sheet, "name", "改名的源");
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1000);
       });
@@ -1259,7 +1232,7 @@ describe("config center", () => {
    * typo in it can only be deleted and re-imported.
    */
   describe("editing a source from its drawer", () => {
-    /** Opens the drawer for the named source. */
+    /** Opens the drawer for the named source, and enters edit mode. */
     function openDrawerFor(name: string) {
       const row = screen
         .getAllByRole("row")
@@ -1268,30 +1241,81 @@ describe("config center", () => {
       return screen.getByRole("dialog");
     }
 
-    it("shows the source's editable fields", () => {
+    function startEditing(name: string) {
+      const sheet = openDrawerFor(name);
+      fireEvent.click(within(sheet).getByRole("button", { name: "编辑" }));
+      return sheet;
+    }
+
+    it("opens read-only, with an 编辑 button and no form", () => {
+      // **The reported problem.** The drawer used to be a live form the moment it opened, so every
+      // visit to check a source was a chance to change one by accident — and each change was written
+      // on blur before the user had decided anything.
       renderCenter();
       const sheet = openDrawerFor("可用的源");
 
-      // The same fields the visual editor offered, in the same order, labelled with the file's own
-      // key names because those are what the configuration contains.
-      expect(within(sheet).getByText("编辑")).toBeInTheDocument();
-      expect(within(sheet).getByLabelText("name")).toHaveValue("可用的源");
-      expect(within(sheet).getByLabelText("api")).toHaveValue(
-        "https://example.com/api.php/provide/vod/",
-      );
+      expect(within(sheet).getByRole("button", { name: "编辑" })).toBeInTheDocument();
+      // No inputs at all until 编辑 is pressed.
+      expect(within(sheet).queryByLabelText("name")).not.toBeInTheDocument();
+      expect(within(sheet).queryByLabelText("api")).not.toBeInTheDocument();
+      // The values are still readable — that is what the drawer is for.
+      expect(within(sheet).getAllByText("可用的源").length).toBeGreaterThan(0);
+      expect(
+        within(sheet).getByText("https://example.com/api.php/provide/vod/"),
+      ).toBeInTheDocument();
     });
 
-    it("writes an edit back to the configuration", async () => {
+    it("keeps the read-only sections while viewing, and swaps them for the form on 编辑", () => {
+      // **The two views describe the same fields**, so showing both at once would state every value
+      // twice and let the pair disagree the moment a field was typed into. The form replaces the
+      // sections rather than sitting beside them.
+      renderCenter();
+      const sheet = openDrawerFor("可用的源");
+
+      expect(within(sheet).getByText("基本信息")).toBeInTheDocument();
+      expect(within(sheet).getByText("接口地址")).toBeInTheDocument();
+      // The heading only exists while editing; the button that opens it says the same word, so the
+      // assertion is on the heading role rather than on the text.
+      expect(within(sheet).queryByRole("heading", { name: "编辑" })).not.toBeInTheDocument();
+
+      fireEvent.click(within(sheet).getByRole("button", { name: "编辑" }));
+
+      expect(within(sheet).getByRole("heading", { name: "编辑" })).toBeInTheDocument();
+      expect(within(sheet).queryByText("基本信息")).not.toBeInTheDocument();
+      expect(within(sheet).queryByText("接口地址")).not.toBeInTheDocument();
+    });
+
+    it("opens the form on 编辑, and writes nothing until 保存", async () => {
+      // The whole point of the change: typing is not a commit.
+      vi.useFakeTimers();
+      try {
+        renderCenter();
+        const sheet = await Promise.resolve(startEditing("可用的源"));
+
+        const nameField = within(sheet).getByLabelText("name");
+        fireEvent.change(nameField, { target: { value: "改过的名字" } });
+
+        // Nothing has been written, even after the debounce would have fired.
+        vi.mocked(replaceAllConfigDocuments).mockClear();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2000);
+        });
+        expect(replaceAllConfigDocuments).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("writes the change on 保存", async () => {
       // Asserted through the write: a form that only relabelled the header would pass any check made
       // against the screen.
       vi.useFakeTimers();
       try {
         renderCenter();
-        const sheet = openDrawerFor("可用的源");
+        const sheet = startEditing("可用的源");
 
-        const nameField = within(sheet).getByLabelText("name");
-        fireEvent.change(nameField, { target: { value: "改过的名字" } });
-        fireEvent.blur(nameField);
+        fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "改过的名字" } });
+        fireEvent.click(within(sheet).getByRole("button", { name: "保存" }));
 
         vi.mocked(replaceAllConfigDocuments).mockClear();
         await act(async () => {
@@ -1308,27 +1332,98 @@ describe("config center", () => {
       }
     });
 
-    it("refuses to empty a required field, and says why", () => {
-      // The same refusal the visual editor made, for the same reason: an entry whose address is gone
-      // cannot work, and the reason would be invisible in the list.
+    it("writes every changed field in one save, not one write each", async () => {
+      // Each field update re-serialises the whole document, so applying them one at a time to the same
+      // starting text would let the second clobber the first.
+      vi.useFakeTimers();
+      try {
+        renderCenter();
+        const sheet = startEditing("可用的源");
+
+        fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "新名字" } });
+        fireEvent.change(within(sheet).getByLabelText("api"), {
+          target: { value: "https://changed.example/api" },
+        });
+        fireEvent.click(within(sheet).getByRole("button", { name: "保存" }));
+
+        vi.mocked(replaceAllConfigDocuments).mockClear();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+
+        expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+        const raw = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0].rawConfig;
+        // Both edits are present — neither overwrote the other.
+        expect(raw).toContain("新名字");
+        expect(raw).toContain("https://changed.example/api");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("discards every pending change on 取消, and writes nothing", async () => {
+      vi.useFakeTimers();
+      try {
+        renderCenter();
+        const sheet = startEditing("可用的源");
+
+        fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "不要保存" } });
+        fireEvent.click(within(sheet).getByRole("button", { name: "取消" }));
+
+        // Back to read-only, showing the stored value rather than the typed one.
+        expect(within(sheet).getByRole("button", { name: "编辑" })).toBeInTheDocument();
+        expect(within(sheet).queryByLabelText("name")).not.toBeInTheDocument();
+        expect(within(sheet).getByText("可用的源")).toBeInTheDocument();
+        expect(within(sheet).queryByText("不要保存")).not.toBeInTheDocument();
+
+        vi.mocked(replaceAllConfigDocuments).mockClear();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(2000);
+        });
+        expect(replaceAllConfigDocuments).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("re-opens read-only after a save, so the next look cannot change anything", async () => {
+      vi.useFakeTimers();
+      try {
+        renderCenter();
+        const sheet = startEditing("可用的源");
+
+        fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "保存后的名字" } });
+        fireEvent.click(within(sheet).getByRole("button", { name: "保存" }));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+
+        expect(within(sheet).getByRole("button", { name: "编辑" })).toBeInTheDocument();
+        expect(within(sheet).queryByLabelText("name")).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("leaves the form open when the configuration refuses the change", () => {
+      // A refused field leaves the drawer open with the drafts intact, so the user can correct the
+      // value instead of retyping everything into a form that silently discarded their work.
       renderCenter();
-      const sheet = openDrawerFor("可用的源");
+      const sheet = startEditing("可用的源");
 
-      const apiField = within(sheet).getByLabelText("api");
-      fireEvent.change(apiField, { target: { value: "" } });
-      fireEvent.blur(apiField);
+      fireEvent.change(within(sheet).getByLabelText("api"), { target: { value: "" } });
+      fireEvent.click(within(sheet).getByRole("button", { name: "保存" }));
 
-      expect(screen.getByText("没有修改")).toBeInTheDocument();
+      expect(screen.getByText("没有保存")).toBeInTheDocument();
       expect(screen.getByText(/必填/)).toBeInTheDocument();
-      // Nothing was half-applied: the field still holds the stored address.
-      expect(within(sheet).getByLabelText("api")).toHaveValue(
-        "https://example.com/api.php/provide/vod/",
-      );
+      // Still editable: the form was not thrown away.
+      expect(within(sheet).getByLabelText("api")).toBeInTheDocument();
+      expect(within(sheet).getByRole("button", { name: "保存" })).toBeInTheDocument();
     });
 
     it("marks a required field, and only the required ones", () => {
       renderCenter();
-      const sheet = openDrawerFor("可用的源");
+      const sheet = startEditing("可用的源");
 
       // `api` is required; `name` is not, because the parser names an unnamed entry itself.
       expect(within(sheet).getAllByText("必需").length).toBeGreaterThan(0);
@@ -1341,7 +1436,7 @@ describe("config center", () => {
     it("says why it offers no form when the entry cannot be located", () => {
       // The address is what the entry is found by, so a source claiming an address the file does not
       // contain cannot be edited. Guessing would write another entry's fields, so the drawer refuses
-      // and explains instead of showing a form that would corrupt the file.
+      // and explains instead of offering a form that would corrupt the file.
       renderCenter();
       act(() => {
         useAppStore.setState({
@@ -1353,9 +1448,11 @@ describe("config center", () => {
 
       const sheet = openDrawerFor("可用的源");
 
-      expect(within(sheet).getByText("编辑")).toBeInTheDocument();
+      // The explanation replaces the 编辑 button, since there is nothing one could open. The
+      // read-only sections stay — they are still worth reading.
       expect(within(sheet).getByText(/无法在配置文本里确定这一条的位置/)).toBeInTheDocument();
-      expect(within(sheet).queryByLabelText("api")).not.toBeInTheDocument();
+      expect(within(sheet).queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
+      expect(within(sheet).getByText("基本信息")).toBeInTheDocument();
     });
 
     it("edits a live source through the lives section, not sites", () => {
@@ -1383,7 +1480,7 @@ describe("config center", () => {
         });
       });
 
-      const sheet = openDrawerFor("直播源一");
+      const sheet = startEditing("直播源一");
       expect(within(sheet).getByLabelText("url")).toHaveValue("https://live.example/a.m3u");
       expect(within(sheet).queryByLabelText("api")).not.toBeInTheDocument();
     });
@@ -1414,16 +1511,16 @@ describe("config center", () => {
 
     expect(screen.queryByText("部分支持")).not.toBeInTheDocument();
     // It falls back to the adapter's verdict, which is a word the model still has. Read from the
-    // row rather than the page: the filter panel also offers 无法适配 as a choice.
+    // row rather than the page: the filter panel also offers 暂不支持 as a choice.
     const row = screen
       .getAllByRole("row")
       .find((r) => r.textContent?.includes("旧状态源"));
-    expect(row?.textContent).toContain("无法适配");
+    expect(row?.textContent).toContain("暂不支持");
   });
 
   it("lets the adapter, not a stale capability, word the status column", () => {
     // A source whose stored capability claims more than its adapter can do. The status column used
-    // to render the capability, so this row read 可执行 next to an adapter badge naming a family it
+    // to render the capability, so this row read 支持 next to an adapter badge naming a family it
     // could not run. The fixture is deliberately contradictory: that is the whole point.
     renderCenter();
     act(() => {
@@ -1447,9 +1544,10 @@ describe("config center", () => {
       .find((r) => r.textContent?.includes("状态虚高的源"));
     expect(row).toBeTruthy();
     const text = (row as HTMLElement).textContent ?? "";
-    // Both columns agree the adapter cannot run it.
-    expect(text).toContain("无法适配");
-    expect(text).not.toContain("可执行");
+    // Both columns agree the adapter cannot run it. Asserted as "the row never claims it is
+    // supported" rather than by the absence of a substring: 暂不支持 contains 支持.
+    expect(text).toContain("暂不支持");
+    expect(text).not.toMatch(/(^|[^暂不])支持/);
   });
 
   it("says the same thing in the status and adapter columns", () => {
@@ -1467,12 +1565,12 @@ describe("config center", () => {
       return (cell as HTMLElement).textContent ?? "";
     };
 
-    // A source with no runnable adapter reads 无法适配 in both columns. It said 已阻止 until the five
+    // A source with no runnable adapter reads 暂不支持 in both columns. It said 已阻止 until the five
     // blocked families were removed; the word went with them, and every one of those sources now
     // reads this instead — when it is in the list at all, which for the file-backed ones is never.
     const blockedRow = rowFor("不可用的源");
-    expect(blockedRow).toContain("无法适配");
-    expect(blockedRow).not.toContain("可执行");
+    expect(blockedRow).toContain("暂不支持");
+    expect(blockedRow).not.toMatch(/(^|[^暂不])支持/);
     // And the state that used to appear here is gone for good.
     expect(blockedRow).not.toContain("部分支持");
     // The 连接测试 column says why there is no result rather than claiming a pending test. It used to
@@ -1538,16 +1636,16 @@ describe("config center", () => {
   });
 
   it("uses one word for an execution state, whichever surface shows it", () => {
-    // The count said 可执行 while the rows it revealed were badged 已启用, so clicking "3 个源" left
+    // The count said 支持 while the rows it revealed were badged 已启用, so clicking "3 个源" left
     // the reader hunting for three rows that did not appear to exist. The vocabulary now comes from
     // `adapterStatusLabel` everywhere, and this checks the two surfaces that still render it: the
-    // source list's filter panel and the detail sheet's 适配器边界 block. (The adapter tab's own
+    // source list's filter panel and the detail sheet's 支持范围 block. (The adapter tab's own
     // column and filter are gone — every registered adapter runs, so both were constants.)
     renderCenter();
     openFilterPanel();
 
     const panel = screen.getByLabelText("筛选条件");
-    expect(within(panel).getByRole("checkbox", { name: "可执行" })).toBeInTheDocument();
+    expect(within(panel).getByRole("checkbox", { name: "支持" })).toBeInTheDocument();
     // The 启用 group says 已启用 — a different question, so that word belongs there and is not a
     // second spelling of this one. What must not exist is the third: no adapter is named by the
     // plugin family of another client any more.
@@ -1561,7 +1659,7 @@ describe("config center", () => {
       .find((r) => r.textContent?.includes("可用的源"));
     fireEvent.click(row as HTMLElement);
     const sheet = screen.getByRole("dialog");
-    expect(within(sheet).getByText("适配器边界")).toBeInTheDocument();
+    expect(within(sheet).getByText("支持范围")).toBeInTheDocument();
     expect(within(sheet).getByText(adapterStatusLabel("enabled"))).toBeInTheDocument();
     expect(within(sheet).queryByText("已阻止")).not.toBeInTheDocument();
   });
@@ -1584,11 +1682,11 @@ describe("config center", () => {
     expect(
       screen.getByRole("button", { name: /导入配置/ }),
     ).toBeInTheDocument();
-    // The 测速 control is now the button plus a scope caret. The button keeps its old label, and the
+    // The 测试 control is now the button plus a scope caret. The button keeps its old label, and the
     // caret carries a label of its own because a `SelectValue` would otherwise name it after the
     // chosen scope, which changes as the user picks.
-    expect(screen.getByRole("button", { name: /全部测速/ })).toBeInTheDocument();
-    expect(screen.getByLabelText("测速范围")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /全部测试/ })).toBeInTheDocument();
+    expect(screen.getByLabelText("测试范围")).toBeInTheDocument();
   });
 
   it("writes the export through the native dialog and names where it went", async () => {
@@ -1652,7 +1750,7 @@ describe("config center", () => {
   it("keeps the list searchable", () => {
     renderCenter();
 
-    fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
+    fireEvent.change(screen.getByPlaceholderText("搜索源名称或地址"), {
       target: { value: "可用" },
     });
 
@@ -1674,7 +1772,7 @@ describe("config center", () => {
     // for the same thing only raised the question of what else it might reset.
     renderCenter();
 
-    fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
+    fireEvent.change(screen.getByPlaceholderText("搜索源名称或地址"), {
       target: { value: "不存在的关键词" },
     });
 
@@ -1715,7 +1813,7 @@ describe("config center", () => {
     // measure the gap, but it can confirm the wrapper that creates it.
     renderCenter();
 
-    fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
+    fireEvent.change(screen.getByPlaceholderText("搜索源名称或地址"), {
       target: { value: "不存在的关键词" },
     });
 
@@ -1767,7 +1865,7 @@ describe("config center", () => {
     // this configuration, so a later import containing that source adds it back — which is what the
     // user wants when the source legitimately exists in another file.
     expect(screen.queryByText(/这些源不会回来/)).not.toBeInTheDocument();
-    expect(screen.getByText(/会作为新源重新加回来/)).toBeInTheDocument();
+    expect(screen.getByText(/会重新加回来/)).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
 
@@ -1816,9 +1914,9 @@ describe("config center", () => {
     useAppStore.setState({ removeSources });
     renderCenter();
     chooseFilter("未适配");
-    // "无法适配的源" is the needs-adapter fixture; "不可用的源" is the blocked one.
-    fireEvent.change(screen.getByPlaceholderText("搜索源名称或 API"), {
-      target: { value: "无法适配" },
+    // "暂不支持的源" is the needs-adapter fixture; "不可用的源" is the blocked one.
+    fireEvent.change(screen.getByPlaceholderText("搜索源名称或地址"), {
+      target: { value: "暂不支持" },
     });
 
     const bulk = screen.getByRole("button", { name: /清理不可用/ });
@@ -1897,10 +1995,10 @@ describe("config center", () => {
     renderCenter();
 
     startBatchTest();
-    fireEvent.click(await screen.findByRole("button", { name: /取消测速/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /取消测试/ }));
 
     await waitFor(() => {
-      expect(screen.getByText("测速已取消")).toBeInTheDocument();
+      expect(screen.getByText("测试已取消")).toBeInTheDocument();
     });
     expect(screen.queryByText("需要修正配置")).not.toBeInTheDocument();
   });
@@ -1998,7 +2096,7 @@ describe("config center", () => {
     // Let every outstanding request finish so the run can settle.
     for (const resolve of pending) resolve(testResult());
     await waitFor(() => {
-      expect(screen.queryByRole("button", { name: /取消测速/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /取消测试/ })).not.toBeInTheDocument();
     });
   });
 
@@ -2072,7 +2170,7 @@ describe("config center", () => {
   });
 
   it("offers a way to stop a batch that is running", async () => {
-    // A batch used to be unstoppable: the button became a disabled "测速中" label and the only
+    // A batch used to be unstoppable: the button became a disabled "测试中" label and the only
     // way out was to wait for every source, including the ones that hang.
     vi.mocked(testSourceCommand).mockImplementation(
       () => new Promise<SourceTestResult>(() => {}),
@@ -2081,17 +2179,18 @@ describe("config center", () => {
 
     startBatchTest();
 
-    const cancel = await screen.findByRole("button", { name: /取消测速/ });
+    const cancel = await screen.findByRole("button", { name: /停止测试/ });
     expect(cancel).toBeInTheDocument();
 
     fireEvent.click(cancel);
 
-    // Cancelling ends the run and reports what was and was not covered, as a toast rather than a
-    // banner left on the page.
+    // Cancelling ends the run and reports what was covered, as a toast rather than a banner left on
+    // the page. The count of what actually ran is the useful part; the old message also explained
+    // that the rest "keeps its previous state", which is what the user already assumes.
     await waitFor(() => {
-      expect(screen.getByText("测速已取消")).toBeInTheDocument();
+      expect(screen.getByText("测试已取消")).toBeInTheDocument();
     });
-    expect(screen.getByText(/其余未测试的源保持原状态/)).toBeInTheDocument();
+    expect(screen.getByText(/已测试/)).toBeInTheDocument();
     expect(document.querySelector("[data-slot='toast']")).toBeTruthy();
   });
 
@@ -2221,8 +2320,8 @@ describe("config center", () => {
     vi.mocked(testSourceCommand).mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
     renderCenter();
     startBatchTest();
-    fireEvent.click(await screen.findByRole("button", { name: /取消测速/ }));
-    await screen.findByRole("button", { name: /全部测速/ });
+    fireEvent.click(await screen.findByRole("button", { name: /取消测试/ }));
+    await screen.findByRole("button", { name: /全部测试/ });
     startBatchTest();
     expect(pending).toHaveLength(2);
     const before = vi.mocked(updateSourceTestCommand).mock.calls.length;
@@ -2450,7 +2549,7 @@ describe("config center", () => {
       const input = await screen.findByPlaceholderText("https://example.com/config.json5");
       fireEvent.change(input, { target: { value: "https://imported.example/config.json" } });
       fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
-      await screen.findByRole("button", { name: /^导入 \d+ 个资源$/ });
+      await screen.findByRole("button", { name: /^导入 \d+ 个源$/ });
     }
 
     const MIXED = JSON.stringify({
@@ -2462,7 +2561,7 @@ describe("config center", () => {
     });
 
     it("folds a group away and back, and says what is inside while folded", async () => {
-      // The request: a configuration with 130 解析服务 puts the group you came for a scroll away.
+      // The request: a configuration with 130 解析源 puts the group you came for a scroll away.
       renderCenter();
       await openWith(MIXED);
 
@@ -2498,7 +2597,7 @@ describe("config center", () => {
       renderCenter();
       await openWith(MIXED);
 
-      expect(screen.getByRole("button", { name: "导入 2 个资源" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "导入 2 个源" })).toBeInTheDocument();
     });
 
     it("does not let a group control tick what a row refuses to tick", async () => {
@@ -2515,7 +2614,7 @@ describe("config center", () => {
 
       // Unticking it takes the usable entry with it and leaves the live source.
       fireEvent.click(groupBox);
-      expect(screen.getByRole("button", { name: "导入 1 个资源" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "导入 1 个源" })).toBeInTheDocument();
       expect(screen.getByRole("checkbox", { name: "坏源（不可用）" })).toHaveAttribute(
         "aria-checked",
         "false",
@@ -2523,7 +2622,7 @@ describe("config center", () => {
 
       // Ticking it back does NOT reach the unusable entry: it stays unticked.
       fireEvent.click(screen.getByRole("checkbox", { name: "全选影视源" }));
-      expect(screen.getByRole("button", { name: "导入 2 个资源" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "导入 2 个源" })).toBeInTheDocument();
       expect(screen.getByRole("checkbox", { name: "坏源（不可用）" })).toHaveAttribute(
         "aria-checked",
         "false",
@@ -2583,7 +2682,7 @@ describe("config center", () => {
       expect(address.className).not.toContain("text-[11px]");
 
       // The reason under an unusable entry: body-copy size, not a footnote.
-      const note = screen.getByText("缺少 key、name 或 api 必填字段，无法建立安全的源记录。");
+      const note = screen.getByText("这条源缺少必要信息，无法使用。");
       expect(note.className).toContain("text-xs");
       expect(note.className).not.toContain("text-[11px]");
     });
@@ -2710,8 +2809,9 @@ describe("config center", () => {
       }),
     );
 
-    expect(await screen.findByText(/已合并进/)).toBeInTheDocument();
-    expect(screen.getByText(/新增 1 个源/)).toBeInTheDocument();
+    // The header states what the last import did, in the counts a user cares about. Matched on the
+    // whole line rather than 新增 alone, which appears in more than one summary.
+    expect(await screen.findByText(/上次导入：新增 1/)).toBeInTheDocument();
   });
 
   it("deduplicates a source the import repeats under a different key", async () => {
@@ -3176,7 +3276,7 @@ describe("config center", () => {
 
     // The caret opens the scope menu, and the item carries its own count so the user can see whether
     // the narrower scope is worth choosing. Synchronous on purpose — see `startBatchTest`.
-    fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByLabelText("测试范围"), { key: "ArrowDown" });
     const item = screen.getByRole("menuitem", { name: /只测未测过的（1）/ });
 
     fireEvent.click(item);
@@ -3208,7 +3308,7 @@ describe("config center", () => {
     });
     renderPage(<ConfigCenter />);
 
-    fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
+    fireEvent.keyDown(screen.getByLabelText("测试范围"), { key: "ArrowDown" });
 
     // Radix marks a disabled item with `data-disabled`; `aria-disabled` is not applied, so the
     // attribute is the contract here.
@@ -3220,12 +3320,12 @@ describe("config center", () => {
   it("keeps both scopes reachable as repeatable actions, which a Select could not do", async () => {
     // The user's report: the menu did not behave like the official ButtonGroup example. It was a
     // `Select`, and a Radix `Select` does NOT fire `onValueChange` when the already-selected option
-    // is chosen again — correct for a picker, but it made 全部测速 unreachable from the menu as a
+    // is chosen again — correct for a picker, but it made 全部测试 unreachable from the menu as a
     // repeat action. The official example pairs `ButtonGroup` with a `DropdownMenu`, where every
     // item fires every time, so the menu can offer both scopes as plain actions.
     //
     // Asserted by running each scope THROUGH THE MENU. The narrower scope goes first: it needs a
-    // source that has never been tested, and running 全部测速 first would leave nothing untested and
+    // source that has never been tested, and running 全部测试 first would leave nothing untested and
     // disable that item. A `Select` would fire the first and silently ignore the second.
     const runs: string[] = [];
     vi.mocked(testSourceCommand).mockImplementation(async (source: { key: string }) => {
@@ -3234,15 +3334,15 @@ describe("config center", () => {
     });
     renderCenter();
 
-    for (const scope of ["只测未测过的", "全部测速"]) {
-      fireEvent.keyDown(screen.getByLabelText("测速范围"), { key: "ArrowDown" });
+    for (const scope of ["只测未测过的", "全部测试"]) {
+      fireEvent.keyDown(screen.getByLabelText("测试范围"), { key: "ArrowDown" });
       fireEvent.click(screen.getByRole("menuitem", { name: new RegExp(scope) }));
       await waitFor(() => {
         expect(runs.length, `${scope} should have started a run`).toBeGreaterThan(0);
       });
       // Let the run finish so the toolbar returns to the scope control.
       await waitFor(() => {
-        expect(screen.getByLabelText("测速范围")).toBeInTheDocument();
+        expect(screen.getByLabelText("测试范围")).toBeInTheDocument();
       });
       runs.length = 0;
     }
@@ -3260,7 +3360,7 @@ describe("config center", () => {
     // text at all, so the sliver cannot come back through some other route.
     renderCenter();
 
-    const caret = screen.getByLabelText("测速范围");
+    const caret = screen.getByLabelText("测试范围");
     expect(caret.querySelectorAll("svg")).toHaveLength(1);
     expect(caret.textContent).toBe("");
   });
@@ -3272,12 +3372,12 @@ describe("config center", () => {
     // `ButtonGroup` needs: no leftover `Select` surface, and the same variant as its neighbour.
     renderCenter();
 
-    const caret = screen.getByLabelText("测速范围");
+    const caret = screen.getByLabelText("测试范围");
     expect(caret.className).not.toContain("bg-input/20");
     expect(caret.className).not.toContain("border-input/80");
-    // Same border and background tokens as the 全部测速 button beside it, which is what makes the two
+    // Same border and background tokens as the 全部测试 button beside it, which is what makes the two
     // halves read as one control.
-    const main = screen.getByRole("button", { name: /全部测速/ });
+    const main = screen.getByRole("button", { name: /全部测试/ });
     for (const token of ["border-border/80", "bg-background/60"]) {
       expect(caret.className).toContain(token);
       expect(main.className).toContain(token);
@@ -3285,9 +3385,9 @@ describe("config center", () => {
   });
 
   it("asks the backend to drop the in-flight requests when a batch is cancelled", async () => {
-    // The reported bug: "我明明点击了取消测速，但是它还在后台测，根本没有立刻停下来". Cancelling used to
+    // The reported bug: "我明明点击了取消测试，但是它还在后台测，根本没有立刻停下来". Cancelling used to
     // only stop the frontend from WAITING — the requests stayed open until their own 25 s bound and
-    // each still persisted its result, so the list kept changing after "测速已取消" was shown.
+    // each still persisted its result, so the list kept changing after "测试已取消" was shown.
     // Reaching the backend is the fix, and it is what this asserts: the UI stopping is not evidence.
     vi.mocked(testSourceCommand).mockImplementation(
       () => new Promise<SourceTestResult>(() => {}),
@@ -3295,7 +3395,7 @@ describe("config center", () => {
     renderCenter();
 
     startBatchTest();
-    const cancel = await screen.findByRole("button", { name: /取消测速/ });
+    const cancel = await screen.findByRole("button", { name: /取消测试/ });
     fireEvent.click(cancel);
 
     await waitFor(() => {
@@ -3360,7 +3460,7 @@ describe("config center", () => {
     });
   });
 
-  it("keeps 全部测速 a single click, so the commonest action needs no menu", () => {
+  it("keeps 全部测试 a single click, so the commonest action needs no menu", () => {
     // The main button is the action; the caret only offers the narrower scope. This mattered more
     // when the caret was a `Select` (which cannot re-fire its own value, making the commonest action
     // unreachable from the menu), but it stays true now that the caret is a `DropdownMenu`: opening a
@@ -3368,9 +3468,9 @@ describe("config center", () => {
     vi.mocked(testSourceCommand).mockImplementation(() => new Promise(() => {}));
     renderCenter();
 
-    fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
+    fireEvent.click(screen.getByRole("button", { name: /全部测试/ }));
 
-    expect(screen.getByRole("button", { name: /取消测速/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /取消测试/ })).toBeInTheDocument();
   });
 
   /**
@@ -3560,7 +3660,7 @@ describe("config center", () => {
         });
       });
 
-      fireEvent.change(screen.getByLabelText("搜索源名称或 API"), {
+      fireEvent.change(screen.getByLabelText("搜索源名称或地址"), {
         target: { value: "绝对不存在的关键字" },
       });
 

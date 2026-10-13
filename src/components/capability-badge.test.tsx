@@ -31,9 +31,9 @@ describe("the capability badge", () => {
     expect(screen.queryByText("已阻止")).not.toBeInTheDocument();
   });
 
-  it("says 无法适配 for a source that cannot be adapted", () => {
+  it("says 暂不支持 for a source that cannot be adapted", () => {
     render(<CapabilityBadge status="needs-adapter" />);
-    expect(screen.getByText("无法适配")).toBeInTheDocument();
+    expect(screen.getByText("暂不支持")).toBeInTheDocument();
     expect(screen.queryByText("需要适配")).not.toBeInTheDocument();
     expect(screen.queryByText("待适配")).not.toBeInTheDocument();
   });
