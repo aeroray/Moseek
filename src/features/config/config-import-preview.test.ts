@@ -93,6 +93,121 @@ describe("buildImportPreview", () => {
   });
 });
 
+/**
+ * Repeats inside one file.
+ *
+ * **A repeat is not a second resource.** Importing it creates nothing — the merge collapses it into the
+ * first — so the row exists only to explain why the count differs from the file's. Measured on the
+ * user's own export: 185 entries of which 1 is a repeat, and the duplicates they expected in 解析服务
+ * turned out not to be duplicates at all (see the last test here, which is the reason this is careful).
+ */
+describe("duplicate entries", () => {
+  it("marks the later of two identical sites, keeping the first", () => {
+    const preview = buildImportPreview(
+      JSON.stringify({
+        sites: [
+          { key: "先", name: "极速｜资源", api: "https://jszyapi.com/api.php/provide/vod/" },
+          { key: "后", name: "极速｜采集", api: "https://jszyapi.com/api.php/provide/vod/" },
+        ],
+      }),
+    );
+
+    const [first, second] = preview.candidates;
+    expect(first.duplicate).toBe(false);
+    expect(second.duplicate).toBe(true);
+    expect(preview.counts.duplicate).toBe(1);
+    expect(preview.counts.selectable).toBe(1);
+  });
+
+  it("ignores casing, padding and a trailing slash", () => {
+    // The same address typed two ways is one address. `normalizeText` in the merge module already folds
+    // these, and this reuses it rather than restating the rule.
+    const preview = buildImportPreview(
+      JSON.stringify({
+        parses: [
+          { key: "a", name: "甲", type: 1, url: "https://p.example/Jx?URL=" },
+          { key: "b", name: "乙", type: 1, url: "  https://p.example/Jx?URL=  " },
+        ],
+      }),
+    );
+
+    expect(preview.candidates[1]?.duplicate).toBe(true);
+  });
+
+  it("keeps two sites that share an address but differ by ext", () => {
+    // **The case that makes address-only comparison wrong.** A published configuration routes many
+    // separate sites through one `csp_XBPQ` address and distinguishes them by `ext` — measured at 58
+    // different sites on that single address. The user's own export has two, 欧洲 and 哆啦, pointing at
+    // different provider sites; calling them duplicates would delete a working source.
+    //
+    // Asserted on `duplicate`, not on `selectable`: these fixtures use a placeholder host, so the parser
+    // correctly refuses to call them runnable. Whether they RUN is a different question from whether
+    // they are the same entry, and this test is about the second.
+    const preview = buildImportPreview(
+      JSON.stringify({
+        sites: [
+          {
+            key: "csp_XBPQ_欧洲",
+            name: "欧洲",
+            api: "http://xmbjm.fh4u.org/csp_XBPQ",
+            ext: { 主页url: "https://euvod.tv/" },
+          },
+          {
+            key: "csp_XBPQ_哆啦",
+            name: "哆啦",
+            api: "http://xmbjm.fh4u.org/csp_XBPQ",
+            ext: { 主页url: "https://dora.xiaoxinbk.com/" },
+          },
+        ],
+      }),
+    );
+
+    expect(preview.candidates.every((c) => !c.duplicate)).toBe(true);
+    expect(preview.counts.duplicate).toBe(0);
+  });
+
+  it("does not call two services duplicates just because they share a name", () => {
+    // 解析服务 in the real file repeat names — 盘古 appears three times, 8090 three times — with different
+    // addresses. A name is a label, not an identity, and hiding these would remove real services.
+    const preview = buildImportPreview(
+      JSON.stringify({
+        parses: [
+          { key: "p1", name: "盘古", type: 1, url: "https://a.example/?url=" },
+          { key: "p2", name: "盘古", type: 1, url: "https://b.example/?url=" },
+          { key: "p3", name: "盘古", type: 1, url: "https://c.example/?url=" },
+        ],
+      }),
+    );
+
+    expect(preview.counts.duplicate).toBe(0);
+    expect(preview.counts.selectable).toBe(3);
+  });
+
+  it("does not compare across kinds", () => {
+    // A site and a live entry can share an address without being the same resource: one is a catalogue
+    // API, the other a playlist, and the merge keeps them in separate collections.
+    const preview = buildImportPreview(
+      JSON.stringify({
+        sites: [{ key: "s", name: "站点", api: "https://same.example/list" }],
+        lives: [{ key: "l", name: "直播", url: "https://same.example/list" }],
+      }),
+    );
+
+    expect(preview.counts.duplicate).toBe(0);
+  });
+
+  it("leaves an entry with no address out of the comparison", () => {
+    // Nothing to compare against, and marking it would remove a row the user cannot see a twin of.
+    const preview = buildImportPreview(
+      JSON.stringify({ sites: [{ key: "a", name: "无地址甲" }, { key: "b", name: "无地址乙" }] }),
+    );
+
+    expect(preview.counts.duplicate).toBe(0);
+    // Both are unusable for a different reason, which is what the row says.
+    expect(preview.counts.unusable).toBe(2);
+  });
+});
+
 describe("keepSelectedEntries", () => {
   const preview = buildImportPreview(CONFIG);
   const idsOf = (...keys: string[]) =>

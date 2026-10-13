@@ -66,5 +66,5 @@ Evidence:
 
 Decision:
 The import dialog lists the file's entries — name, address, tick box, grouped by kind — and imports the
-ticked subset. An unusable entry stays listed, unticked, its box disabled. Build the preview where the
-text is set, never in a separate effect.
+ticked subset. An unusable entry and a repeat stay listed, unticked, boxes disabled. Repeats reuse the
+merge's `sourceIdentity`, never the address alone.

@@ -568,13 +568,14 @@ export function ConfigCenter() {
     setImportText(text);
     const preview = text.trim() ? buildImportPreview(text, baseUrl) : null;
     setImportPreview(preview);
-    // **Unusable entries start unticked**, and cannot be ticked — see the list component. Seeding the
-    // deselected set here rather than filtering at commit time means the count on the button, the
-    // number in each group heading, and the file that gets written are all derived from one fact.
+    // **Neither an unusable entry nor a repeat starts ticked**, and neither can be ticked — see the
+    // list component. Seeding the deselected set here rather than filtering at commit time means the
+    // count on the button, the number in each group heading, and the file that gets written are all
+    // derived from one fact.
     setDeselectedEntryIds(
       new Set(
         (preview?.candidates ?? [])
-          .filter((candidate) => !candidate.usable)
+          .filter((candidate) => !candidate.usable || candidate.duplicate)
           .map((candidate) => candidate.id),
       ),
     );
@@ -603,15 +604,16 @@ export function ConfigCenter() {
   /**
    * Ticks or unticks a whole group.
    *
-   * **Unusable entries are skipped in both directions.** They start unticked and the row's box is
-   * disabled, so a group-level control that ticked them anyway would contradict the row it sits above.
+   * **Only the entries this control can act on are touched.** An unusable entry and a repeat both start
+   * unticked with a disabled box, so a group control that ticked them anyway would contradict the rows
+   * directly below it.
    */
   const setKindSelected = useCallback(
     (kind: ImportCandidate["kind"], next: boolean) => {
       setDeselectedEntryIds((current) => {
         const updated = new Set(current);
         for (const candidate of importPreview?.candidates ?? []) {
-          if (candidate.kind !== kind || !candidate.usable) continue;
+          if (candidate.kind !== kind || !candidate.usable || candidate.duplicate) continue;
           if (next) updated.delete(candidate.id);
           else updated.add(candidate.id);
         }
@@ -3908,10 +3910,15 @@ export function ConfigCenter() {
  * Grouped by 影视源 / 直播源 / 解析服务 — the words 原始配置 uses and the words the file is organised
  * into, so a user who has looked at their own configuration once already knows them.
  *
- * **An unusable entry is listed but cannot be ticked.** It is in the file the user chose, so hiding it
- * would make the import silently smaller than what was loaded — the complaint this page has already
- * produced once. But it cannot run, so offering a switch implies it could be made to work by importing
- * it. It starts unticked, its box is disabled, and the group control skips it in both directions.
+ * **An entry that cannot be imported is listed but cannot be ticked**, for two distinct reasons:
+ *
+ *  - *Unusable* — it cannot run. Importing it would add a row that only ever reads 配置无效, and a
+ *    switch that can be turned on implies it would work.
+ *  - *Duplicate* — an earlier entry already carries its identity, so importing it would create nothing:
+ *    the merge collapses the two and the second silently disappears. It is shown because the user is
+ *    looking at a file whose count differs from their list, and "why" is the useful answer.
+ *
+ * Both start unticked, their boxes are disabled, and the group control skips them in both directions.
  */
 function ImportCandidateList({
   preview,
@@ -3929,21 +3936,38 @@ function ImportCandidateList({
   onToggleKind: (kind: ImportCandidate["kind"]) => void;
 }) {
   const kinds = ["site", "live", "parser"] as const;
+  /** Whether a row can be ticked at all: runnable, and not something the merge will collapse away. */
+  const isSelectable = (entry: ImportCandidate) => entry.usable && !entry.duplicate;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs">
         <span className="text-muted-foreground">
           共 <span className="font-medium tabular-nums text-foreground">{preview.counts.total}</span>{" "}
-          个资源，其中{" "}
-          <span className="font-medium tabular-nums text-foreground">{preview.counts.usable}</span>{" "}
-          个可用
-          {preview.counts.unusable > 0 && (
+          个资源，
+          <span className="font-medium tabular-nums text-foreground">
+            {preview.counts.selectable}
+          </span>{" "}
+          个可导入
+          {preview.counts.duplicate > 0 && (
             <>
-              ，<span className="font-medium tabular-nums text-foreground">{preview.counts.unusable}</span>{" "}
-              个暂时不能用（已取消勾选）
+              ，
+              <span className="font-medium tabular-nums text-foreground">
+                {preview.counts.duplicate}
+              </span>{" "}
+              个重复
             </>
           )}
+          {preview.counts.unusable > 0 && (
+            <>
+              ，
+              <span className="font-medium tabular-nums text-foreground">
+                {preview.counts.unusable}
+              </span>{" "}
+              个暂时不能用
+            </>
+          )}
+          {preview.counts.duplicate + preview.counts.unusable > 0 && "，后两类已取消勾选"}
         </span>
         {preview.repairNote && (
           <span className="text-muted-foreground">{preview.repairNote}</span>
@@ -3955,11 +3979,12 @@ function ImportCandidateList({
           {kinds.map((kind) => {
             const entries = preview.candidates.filter((candidate) => candidate.kind === kind);
             if (entries.length === 0) return null;
-            const usable = entries.filter((entry) => entry.usable);
-            const selectedCount = entries.filter((entry) => !deselectedIds.has(entry.id)).length;
-            const allSelected = usable.length > 0 && usable.every((e) => !deselectedIds.has(e.id));
-            const someSelected = usable.some((e) => !deselectedIds.has(e.id));
+            const selectable = entries.filter(isSelectable);
+            const selectedCount = selectable.filter((entry) => !deselectedIds.has(entry.id)).length;
+            const allSelected = selectable.length > 0 && selectedCount === selectable.length;
+            const someSelected = selectedCount > 0;
             const isOpen = !collapsedKinds.has(kind);
+            const duplicateCount = entries.filter((entry) => entry.duplicate).length;
 
             return (
               <section
@@ -3972,7 +3997,7 @@ function ImportCandidateList({
                 <div className="flex items-center gap-2 px-2 py-2.5">
                   <Checkbox
                     checked={allSelected ? true : someSelected ? "indeterminate" : false}
-                    disabled={usable.length === 0}
+                    disabled={selectable.length === 0}
                     onCheckedChange={() => onSetKind(kind, !allSelected)}
                     aria-label={`全选${IMPORT_KIND_LABELS[kind]}`}
                   />
@@ -3991,8 +4016,15 @@ function ImportCandidateList({
                       {IMPORT_KIND_LABELS[kind]}
                     </span>
                     <Badge variant="secondary" className="tabular-nums">
-                      {selectedCount} / {entries.length}
+                      {selectedCount} / {selectable.length}
                     </Badge>
+                    {/* The repeats are named in the heading rather than left as a silent difference
+                        between this count and the file's own. */}
+                    {duplicateCount > 0 && (
+                      <span className="shrink-0 text-xs text-muted-foreground">
+                        {duplicateCount} 个重复
+                      </span>
+                    )}
                     {!isOpen && (
                       <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
                         {entries
@@ -4009,17 +4041,18 @@ function ImportCandidateList({
                   <ul className="flex flex-col border-t border-border/60 py-1">
                     {entries.map((entry) => (
                       <li key={entry.id}>
-                        {/* A tickable row is a label, so the whole row is the target. An unusable one is
-                            not: the box is disabled, and wrapping it in a label would make the row look
-                            clickable while nothing happened. */}
-                        {entry.usable ? (
+                        {/* A tickable row is a label, so the whole row is the target. One that cannot
+                            be ticked is not: the box is disabled, and wrapping it in a label would make
+                            the row look clickable while nothing happened. */}
+                        {isSelectable(entry) ? (
                           <label className="flex cursor-pointer items-start gap-2.5 rounded px-2 py-1.5 transition-colors hover:bg-accent/40">
                             <Checkbox
                               checked={!deselectedIds.has(entry.id)}
                               onCheckedChange={(checked) => onToggle(entry.id, checked === true)}
                               className="mt-0.5"
                               aria-label={entry.name}
-                            />                            <ImportEntryText entry={entry} />
+                            />
+                            <ImportEntryText entry={entry} />
                           </label>
                         ) : (
                           <div className="flex items-start gap-2.5 px-2 py-1.5 opacity-70">
@@ -4027,7 +4060,7 @@ function ImportCandidateList({
                               checked={false}
                               disabled
                               className="mt-0.5 cursor-not-allowed"
-                              aria-label={`${entry.name}（不可用）`}
+                              aria-label={`${entry.name}（${entry.duplicate ? "重复" : "不可用"}）`}
                             />
                             <ImportEntryText entry={entry} />
                           </div>
@@ -4045,34 +4078,49 @@ function ImportCandidateList({
   );
 }
 
-/** The name, address and — when it cannot run — the reason, shared by both row shapes. */
+/**
+ * The name, address and — when it cannot be imported — the reason, shared by both row shapes.
+ *
+ * A repeat is reported **before** usability: an entry can be perfectly usable and still be a duplicate,
+ * and "an earlier entry already carries this" is the fact that explains why the count differs from the
+ * file's own. Reporting it as 不可用 would be wrong — nothing is wrong with it.
+ */
 function ImportEntryText({ entry }: { entry: ImportCandidate }) {
+  const badge = entry.duplicate
+    ? { label: "重复", className: "border-border bg-muted text-muted-foreground" }
+    : entry.usable
+      ? null
+      : { label: "不可用", className: "border-destructive/30 bg-destructive/10 text-destructive" };
+  const note = entry.duplicate
+    ? "与上面某一条完全相同，导入后会被自动合并。"
+    : entry.usable
+      ? ""
+      : entry.note;
+
   return (
     <span className="flex min-w-0 flex-1 flex-col gap-0.5">
       <span className="flex flex-wrap items-center gap-2">
         <span
           className={cn(
             "truncate text-sm",
-            entry.usable ? "text-foreground" : "text-muted-foreground",
+            badge ? "text-muted-foreground" : "text-foreground",
           )}
         >
           {entry.name}
         </span>
-        {!entry.usable && (
+        {badge && (
           <Badge
             variant="outline"
-            className="shrink-0 border-destructive/30 bg-destructive/10 px-1 py-0 text-[10px] font-normal leading-4 text-destructive"
+            className={cn("shrink-0 px-1 py-0 text-[10px] font-normal leading-4", badge.className)}
           >
-            不可用
+            {badge.label}
           </Badge>
         )}
       </span>
       <span className="truncate font-mono text-[11px] text-muted-foreground">
         {entry.address || "没有地址"}
       </span>
-      {!entry.usable && entry.note && (
-        <span className="text-[11px] leading-4 text-muted-foreground">{entry.note}</span>
-      )}
+      {note && <span className="text-[11px] leading-4 text-muted-foreground">{note}</span>}
     </span>
   );
 }
@@ -4081,7 +4129,8 @@ function isRelativeConfiguredUrl(value: string) {
   const trimmed = value.trim();
   if (!trimmed || /^[a-z][a-z\d+.-]*:/i.test(trimmed)) return false;
   return (
-    trimmed.startsWith("/") ||    trimmed.startsWith("./") ||
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("./") ||
     trimmed.startsWith("../") ||
     trimmed.includes("/")
   );

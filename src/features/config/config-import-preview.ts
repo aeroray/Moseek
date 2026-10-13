@@ -1,5 +1,6 @@
 import { parseConfigText, pruneUnsupportedConfigText } from "@/features/config/config-parser";
 import type { ParseIssue, ParseResult } from "@/features/config/config-parser";
+import { sourceIdentity } from "@/features/config/config-merge";
 import type { ParseServiceRecord, SourceRecord } from "@/types/moseek";
 
 /**
@@ -23,10 +24,29 @@ export interface ImportCandidate {
   name: string;
   /** The address, shown under the name because two sources can share a name. */
   address: string;
+  /**
+   * The site's `ext`, used only to tell two sources behind one API apart.
+   *
+   * A published configuration routes many sites through the same `csp_XBPQ` address and distinguishes
+   * them by this field — measured at 58 different sites sharing that one address. Comparing addresses
+   * alone would call them all duplicates of the first.
+   */
+  ext?: string;
   /** Whether this entry can run once imported. Unusable entries are still listed, never hidden. */
   usable: boolean;
   /** Why it cannot run, when it cannot. */
   note: string;
+  /**
+   * True when an earlier entry in the same collection already carries this one's identity.
+   *
+   * **A repeat is not a second resource.** Importing it would create nothing — the merge collapses it
+   * into the first — so the row exists only to explain why the count differs from the file's. It is
+   * listed for that reason and cannot be ticked, exactly like an unusable entry.
+   *
+   * Kept separate from `usable` because the two mean different things and are worth saying separately:
+   * an entry can be perfectly usable and still a duplicate. The row shows 重复 rather than 不可用.
+   */
+  duplicate: boolean;
 }
 
 export interface ImportPreview {
@@ -42,7 +62,17 @@ export interface ImportPreview {
   candidates: ImportCandidate[];
   /** True when every candidate is usable, so the dialog can say so plainly. */
   allUsable: boolean;
-  counts: { total: number; usable: number; unusable: number };
+  counts: {
+    /** Everything the file holds, including repeats and entries that cannot run. */
+    total: number;
+    /** Entries that could run if imported. */
+    usable: number;
+    unusable: number;
+    /** Entries an earlier sibling already carries. */
+    duplicate: number;
+    /** What pressing the button would actually bring in: usable and not a repeat. */
+    selectable: number;
+  };
 }
 
 /** Field paths that identify a parse failure, for a message the user can act on. */
@@ -70,7 +100,7 @@ export function buildImportPreview(rawText: string, baseUrl?: string | null): Im
     repairNote: "",
     candidates: [],
     allUsable: false,
-    counts: { total: 0, usable: 0, unusable: 0 },
+    counts: { total: 0, usable: 0, unusable: 0, duplicate: 0, selectable: 0 },
   };
 
   if (!rawText.trim()) {
@@ -96,6 +126,13 @@ export function buildImportPreview(rawText: string, baseUrl?: string | null): Im
     ...parsed.parseServices.map((service, index) => parserCandidate(service, index)),
   ];
 
+  markDuplicates(candidates);
+
+  // **A duplicate is not part of what will be imported**, so it is not counted. The two totals answer
+  // different questions: `total` is what the file contains — which is what the user needs to
+  // understand the difference between the file and their list — and `selectable` is what pressing the
+  // button would bring in.
+  const selectable = candidates.filter((candidate) => candidate.usable && !candidate.duplicate);
   const usable = candidates.filter((candidate) => candidate.usable).length;
   return {
     ok: true,
@@ -108,8 +145,66 @@ export function buildImportPreview(rawText: string, baseUrl?: string | null): Im
         : "",
     candidates,
     allUsable: usable === candidates.length,
-    counts: { total: candidates.length, usable, unusable: candidates.length - usable },
+    counts: {
+      total: candidates.length,
+      usable,
+      unusable: candidates.length - usable,
+      duplicate: candidates.filter((candidate) => candidate.duplicate).length,
+      selectable: selectable.length,
+    },
   };
+}
+
+/**
+ * Marks each entry whose identity an earlier sibling already carries.
+ *
+ * **Reuses the merge's own identity rules rather than inventing a second set.** The import runs through
+ * `mergeRawConfigs`, so whatever that collapse treats as one entry must be what this list calls a
+ * repeat — a preview that used its own rule would mark rows the merge then keeps, or miss rows it
+ * silently drops, and either way the number on the button would be a lie. `sourceIdentity` for sites
+ * (address plus `ext`) and name-plus-address for live entries are the same two the merge uses.
+ *
+ * Only within a kind. A site and a live entry can share an address without being the same resource —
+ * one is a catalogue API and the other a playlist — and the merge keeps them in separate collections.
+ */
+function markDuplicates(candidates: ImportCandidate[]): void {
+  // The address alone is what an attempt costs for a parser service, which is the same reasoning
+  // `findDuplicateParseServices` records: the resolver builds its request from the URL and the method,
+  // and comparing the pair across the real configuration found the method always identical.
+  const seen: Record<ImportCandidate["kind"], Set<string>> = {
+    site: new Set(),
+    live: new Set(),
+    parser: new Set(),
+  };
+
+  for (const candidate of candidates) {
+    const identity = duplicateIdentity(candidate);
+    // An entry with no identity at all cannot be a repeat of anything: there is nothing to compare, and
+    // marking it would remove a row the user cannot see a twin of.
+    if (!identity) continue;
+    if (seen[candidate.kind].has(identity)) {
+      candidate.duplicate = true;
+      continue;
+    }
+    seen[candidate.kind].add(identity);
+  }
+}
+
+/** The string two entries of the same kind must share to count as one, or `""` when uncomparable. */
+function duplicateIdentity(candidate: ImportCandidate): string {
+  // **No address means no identity.** `sourceIdentity` joins the address and `ext` with a separator, so
+  // two entries that have neither both produce the same bare `"|"` — and a file with two addressless
+  // entries would report the second as a repeat of the first. They are not repeats of anything: there
+  // is nothing to compare, and the row already explains itself as 没有地址.
+  if (!candidate.address.trim()) return "";
+
+  if (candidate.kind === "parser") {
+    // Folded the way `foldAddress` does: padding, casing and a trailing slash do not make a new address.
+    return candidate.address.trim().toLowerCase().replace(/\/+$/, "");
+  }
+  // `address` is what the parser resolved, and for a site it is the whole identity unless `ext`
+  // distinguishes two sources behind one API — which is exactly what `sourceIdentity` accounts for.
+  return sourceIdentity({ api: candidate.address, ext: candidate.ext });
 }
 
 function toCandidate(
@@ -125,8 +220,10 @@ function toCandidate(
     key: source.key,
     name: source.name,
     address: source.api,
+    ext: source.ext,
     usable: source.capability === "supported",
     note: source.capability === "supported" ? "" : source.capabilityNote,
+    duplicate: false,
   };
 }
 
@@ -139,6 +236,7 @@ function parserCandidate(service: ParseServiceRecord, index: number): ImportCand
     address: service.url,
     usable: service.capability === "supported",
     note: service.capability === "supported" ? "" : service.capabilityNote,
+    duplicate: false,
   };
 }
 
