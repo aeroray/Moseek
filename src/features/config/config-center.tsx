@@ -3325,8 +3325,10 @@ export function ConfigCenter() {
                         onClick={() => void handlePickMultiRepo(entry.url)}
                         className="flex flex-col gap-0.5 border-b border-border/60 px-3 py-2 text-left transition-colors last:border-b-0 hover:bg-accent/40"
                       >
-                        <span className="text-sm text-foreground">{entry.name}</span>
-                        <span className="break-all font-mono text-[11px] text-muted-foreground">
+                        {/* Same scale as every other list in this dialog: 14px/500 for the name,
+                            12px mono for the address. See `ImportEntryText` for why. */}
+                        <span className="text-sm font-medium text-foreground">{entry.name}</span>
+                        <span className="break-all font-mono text-xs text-muted-foreground">
                           {entry.url}
                         </span>
                       </button>
@@ -3994,7 +3996,12 @@ function ImportCandidateList({
                 {/* The heading is a button, exactly as in 原始配置: the chevron, the name, the counts.
                     The checkbox sits outside it — a box inside a button is two controls in one hit
                     target, and clicking the row to select would conflict with clicking it to fold. */}
-                <div className="flex items-center gap-2 px-2 py-2.5">
+                {/* **The heading's own padding, with the checkbox outside it**, mirroring 原始配置.
+                    There the chevron sits at the box's 8px inset; here the checkbox occupies that spot,
+                    so the heading starts after it. `pl-2` on the wrapper plus `gap-2` keeps the same
+                    8px rhythm between the box and the chevron, and `py-2.5` matches the entry rows
+                    above and below — measured, both are 40px tall. */}
+                <div className="flex items-center gap-2 py-2.5 pl-2 pr-2">
                   <Checkbox
                     checked={allSelected ? true : someSelected ? "indeterminate" : false}
                     disabled={selectable.length === 0}
@@ -4012,6 +4019,8 @@ function ImportCandidateList({
                     ) : (
                       <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
                     )}
+                    {/* `text-sm font-medium`, the same as 原始配置的区块标题 and 源列表的行名 —
+                        measured 14px/500 in all three places. */}
                     <span className="text-sm font-medium text-foreground">
                       {IMPORT_KIND_LABELS[kind]}
                     </span>
@@ -4102,7 +4111,10 @@ function ImportEntryText({ entry }: { entry: ImportCandidate }) {
       <span className="flex flex-wrap items-center gap-2">
         <span
           className={cn(
-            "truncate text-sm",
+            // `font-medium` and `text-sm`, the same as a row in 源列表 and an entry in 原始配置 —
+            // measured: both render 14px/500. Without the weight the name read lighter here than the
+            // same name one click away, which is the kind of difference that is felt before it is seen.
+            "truncate text-sm font-medium",
             badge ? "text-muted-foreground" : "text-foreground",
           )}
         >
@@ -4111,16 +4123,21 @@ function ImportEntryText({ entry }: { entry: ImportCandidate }) {
         {badge && (
           <Badge
             variant="outline"
+            // `text-[10px]` matches the 必需 and 重复 badges in 原始配置: a small badge is 10px across
+            // this page, and the shared Badge's own 12px would make these read as content.
             className={cn("shrink-0 px-1 py-0 text-[10px] font-normal leading-4", badge.className)}
           >
             {badge.label}
           </Badge>
         )}
       </span>
-      <span className="truncate font-mono text-[11px] text-muted-foreground">
+      {/* `text-xs` (12px), not 11px. The configuration centre renders every displayed monospace value
+          — a source address, an adapter id — at `font-mono text-xs`, and 11px is reserved for the
+          editable mono inputs in 原始配置. A read-only address is the former. */}
+      <span className="truncate font-mono text-xs text-muted-foreground">
         {entry.address || "没有地址"}
       </span>
-      {note && <span className="text-[11px] leading-4 text-muted-foreground">{note}</span>}
+      {note && <span className="text-xs leading-5 text-muted-foreground">{note}</span>}
     </span>
   );
 }

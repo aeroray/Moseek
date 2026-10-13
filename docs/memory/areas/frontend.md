@@ -54,3 +54,17 @@ Evidence:
 Decision:
 A toast body stays on `bg-card/95` with `shadow-xl backdrop-blur-md`; only the icon carries the status
 colour. `--status-*-bg` is a badge tint — a 12% fill across a 24rem panel reads as another application.
+
+## MC-DEC-20261008-a1000006 — One type scale: 14/500 names, 12px mono values
+
+Status: active
+Scope: area:frontend
+Subject: MC-SUBJ-20261008-a1000008
+Facet: data-model
+Evidence:
+- repo:src/features/config/config-center.tsx
+
+Decision:
+A row reads 14px/500 for its name and 12px mono for a displayed value; a group heading is 14px/500. 11px
+is for *editable* mono inputs only. Measured in a real browser — jsdom applies no stylesheets, so pin the
+classes and measure the rendering.

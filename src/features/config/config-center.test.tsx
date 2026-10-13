@@ -3215,6 +3215,68 @@ describe("config center", () => {
         );
       }
     });
+
+    /**
+     * The dialog's type scale, pinned to the page's own.
+     *
+     * **This is a class contract, and that is deliberate.** jsdom applies no stylesheets, so the rendered
+     * size cannot be read here — it was measured in a real browser instead, and these assertions lock the
+     * classes those measurements came from. The three that were wrong:
+     *
+     *  - the address was `text-[11px]` where every displayed monospace value on this page is `text-xs`
+     *    (12px). 11px is reserved for the *editable* mono inputs in 原始配置.
+     *  - the entry name had no weight, so it rendered 400 while the same kind of name one click away in
+     *    源列表 renders 500.
+     *  - the note under an unusable entry was 11px for the same reason as the address.
+     */
+    it("uses the page's type scale for names, addresses and notes", async () => {
+      renderCenter();
+      await openWith(MIXED);
+
+      // The row's name: 14px/500, as in 源列表 and 原始配置.
+      const name = screen.getByText("好源");
+      expect(name.className).toContain("text-sm");
+      expect(name.className).toContain("font-medium");
+
+      // The address: 12px mono, matching every other displayed address on this page.
+      const address = screen.getByText("https://ok.example/api.php/provide/vod");
+      expect(address.className).toContain("font-mono");
+      expect(address.className).toContain("text-xs");
+      expect(address.className).not.toContain("text-[11px]");
+
+      // The reason under an unusable entry: body-copy size, not a footnote.
+      const note = screen.getByText("缺少 key、name 或 api 必填字段，无法建立安全的源记录。");
+      expect(note.className).toContain("text-xs");
+      expect(note.className).not.toContain("text-[11px]");
+    });
+
+    it("uses the page's own tab component rather than buttons styled as tabs", async () => {
+      // Two Buttons with a `bg-muted/50` wrapper were a second implementation of something the app
+      // already has, so their metrics and focus ring did not match the tabs two clicks away.
+      renderCenter();
+      await openWith(MIXED);
+
+      const tablist = screen.getByRole("tablist");
+      expect(tablist).toHaveAttribute("data-slot", "tabs-list");
+      expect(screen.getAllByRole("tab")).toHaveLength(2);
+      // The group headings are buttons, not tabs — a distinction that matters for both semantics and
+      // for what a screen reader announces.
+      expect(screen.queryAllByRole("tab")).toHaveLength(2);
+    });
+
+    it("puts the chevron and the group name at the same inset as 原始配置", async () => {
+      // The checkbox occupies the spot the chevron has in 原始配置, so the heading starts after it.
+      // Asserted as a class contract because jsdom performs no layout.
+      renderCenter();
+      await openWith(MIXED);
+
+      const heading = screen.getByRole("button", { name: /影视源/ });
+      expect(heading.className).toContain("items-center");
+      // The group box carries its own padding, so the pair reads as one row rather than two.
+      const row = heading.closest("div");
+      expect(row?.className).toContain("pl-2");
+      expect(row?.className).toContain("py-2.5");
+    });
   });
 
   it("cleans a document that was stored before the rule existed", async () => {
