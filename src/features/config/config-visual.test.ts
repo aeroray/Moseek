@@ -7,6 +7,7 @@ import {
   dedupeParseServices,
   findDuplicateParseServices,
   hasUnpreservedSyntax,
+  locateVisualEntry,
   readVisualConfig,
   removeVisualEntry,
   removeVisualSetting,
@@ -517,5 +518,87 @@ describe("syntax the visual editor would not preserve", () => {
     // A `//` inside a string is content, not a comment.
     expect(hasUnpreservedSyntax('{ wallpaper: "https://a.example/x" }')).toBe(false);
     expect(hasUnpreservedSyntax('{ name: "a // b" }')).toBe(false);
+  });
+});
+
+/**
+ * Finding the entry in the file that a parsed source came from.
+ *
+ * **The reason this needs its own function rather than a key lookup.** The parser renames duplicate
+ * keys and invents one where the file states none, so the `key` on a `SourceRecord` may appear nowhere
+ * in the text. Measured on a two-site fixture with a repeated key: the parsed keys were `同一个-2` and
+ * `live-1`, and neither string occurs in the file. Matching on the key alone finds nothing — or, when
+ * another entry happens to hold that name, the wrong entry.
+ *
+ * This is what lets the source drawer edit a source without the raw-config tab, so a wrong answer here
+ * writes one source's fields into another's row.
+ */
+describe("locating the raw entry behind a parsed source", () => {
+  const config = JSON.stringify({
+    sites: [
+      { key: "a", name: "甲源", api: "https://a.example/api", type: 1 },
+      { key: "b", name: "乙源", api: "https://b.example/api", type: 1 },
+      { key: "dup", name: "重名甲", api: "https://same.example/api" },
+      { key: "dup", name: "重名乙", api: "https://same.example/api" },
+    ],
+    lives: [{ name: "没有 key 的直播", url: "https://live.example/tv.txt" }],
+    parses: [{ name: "解析", type: 1, url: "https://parse.example/jx" }],
+  });
+
+  it("finds a site by its address", () => {
+    const found = locateVisualEntry(config, "sites", {
+      key: "a",
+      api: "https://a.example/api",
+    });
+    expect(found?.index).toBe(0);
+    expect(found?.label).toBe("甲源");
+  });
+
+  it("finds an entry whose parsed key the file does not contain", () => {
+    // The parser names a keyless live entry from its position, so `live-1` is a name that exists only
+    // in memory. The address is what the file has, so the address is what is searched.
+    const found = locateVisualEntry(config, "lives", {
+      key: "live-1",
+      api: "https://live.example/tv.txt",
+    });
+    expect(found?.index).toBe(0);
+    expect(found?.label).toBe("没有 key 的直播");
+  });
+
+  it("uses the key to separate two entries behind one address", () => {
+    // A published configuration runs many sites through one `csp_XBPQ` address, so the address alone
+    // is ambiguous. `sourceKey` is the key the FILE states, which is what makes this decidable.
+    const first = locateVisualEntry(config, "sites", {
+      key: "dup",
+      api: "https://same.example/api",
+    });
+    expect(first?.label).toBe("重名甲");
+
+    // A parsed key that is renamed (`dup-2`) belongs to the second entry, but the file says `dup` for
+    // both — so the lookup cannot pick between them and must say so rather than write the wrong row.
+    const renamed = locateVisualEntry(config, "sites", {
+      key: "dup-2",
+      api: "https://same.example/api",
+    });
+    expect(renamed).toBeNull();
+  });
+
+  it("returns null rather than guessing when the address is not in the file", () => {
+    // The drawer offers no edit for this source. Guessing would write another entry's fields.
+    expect(
+      locateVisualEntry(config, "sites", { key: "ghost", api: "https://ghost.example/api" }),
+    ).toBeNull();
+  });
+
+  it("returns null for an address-less source, and for unreadable text", () => {
+    expect(locateVisualEntry(config, "sites", { key: "a", api: "" })).toBeNull();
+    expect(locateVisualEntry("{ sites: [ }", "sites", { key: "a", api: "https://a.example" })).toBeNull();
+  });
+
+  it("only searches the section it was given", () => {
+    // A site and a live entry can share an address without being the same resource.
+    expect(
+      locateVisualEntry(config, "lives", { key: "a", api: "https://a.example/api" }),
+    ).toBeNull();
   });
 });

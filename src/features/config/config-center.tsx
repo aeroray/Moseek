@@ -11,14 +11,10 @@ import {
 } from "react";
 import {
   AlertTriangle,
-  AlignLeft,
-  Blocks,
-  Braces,
   Check,
   CircleAlert,
   ChevronDown,
   ChevronRight,
-  Code2,
   CircleCheck,
   CircleX,
   Download,
@@ -27,23 +23,19 @@ import {
   FlaskConical,
   Globe2,
   Info,
-  List,
-  ListTree,
   LoaderCircle,
   Search,
-  Save,
   ShieldAlert,
   TestTube2,
   Trash2,
   Upload,
-  WandSparkles,
   X,
 } from "lucide-react";
 
 import { CapabilityBadge } from "@/components/capability-badge";
 import { useToast } from "@/components/toast-host";
-import { JsonEditor } from "@/components/json-editor";
-import { ConfigVisualEditor } from "@/features/config/config-visual-editor";
+import { locateVisualEntry, updateVisualEntryField } from "@/features/config/config-visual";
+import type { VisualField, VisualSectionKey } from "@/features/config/config-visual";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -97,7 +89,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   readExportExtras,
   stripExportExtras,
@@ -118,12 +110,10 @@ import {
 } from "@/features/config/config-merge";
 import {
   countParsedCapabilities,
-  formatConfigText,
   parseConfigText,
   parseRawObject,
   pruneUnsupportedConfigText,
   repairConfigText,
-  type ParseIssue,
   type ParseResult,
 } from "@/features/config/config-parser";
 import {
@@ -151,7 +141,6 @@ import {
   SourceFilterTrigger,
 } from "@/features/config/source-filter-panel";
 import {
-  adapterRegistry,
   adapterStatusLabel,
   getAdapterProfile,
   isPermanentlyUnsupportedSource,
@@ -196,19 +185,16 @@ import type {
  */
 type ImportMode = "remote" | "local";
 
-/** The page's three tabs. */
-type ConfigTab = "sources" | "adapters" | "raw";
-
 /**
  * How long the editor waits after the last keystroke before writing.
  *
  * Long enough that typing a key does not trigger a write, short enough that a pause reads as
  * "saved". The status line updates the moment it lands, so the value is not load-bearing.
+ *
+ * The editor itself is gone — 原始配置 was removed — but this delay is still what the drawer's field
+ * edits are written on, through the same debounced save they always used.
  */
 const AUTO_SAVE_DELAY_MS = 600;
-
-/** The two views of the configuration document. */
-type RawMode = "visual" | "code";
 
 /**
  * How many sources a batch test probes at once.
@@ -317,7 +303,6 @@ export function ConfigCenter() {
   // exported before the split gets their favourites back.
   const setTheme = useAppStore((state) => state.setTheme);
   const restoreFavorites = useAppStore((state) => state.restoreFavorites);
-  const [adapterQuery, setAdapterQuery] = useState("");
   const [inspectedSourceKey, setInspectedSourceKey] = useState<string | null>(
     null,
   );
@@ -367,19 +352,12 @@ export function ConfigCenter() {
   importOpenRef.current = importOpen;
   const [rawDraft, setRawDraft] = useState<string | null>(null);
   /**
-   * Which view the 原始配置 tab is in.
+   * Whether a write is in flight, so the debounce cannot start a second one over the top of it.
    *
-   * Visual by default: most of what a user does to a configuration — rename a source, fix an
-   * address, drop one — does not need a text editor, and opening on 340 lines of JSON presents the
-   * hardest possible surface for the easiest task. The code view is one click away for the work that
-   * genuinely needs it.
+   * No visible control reads this any more — the status line it used to drive lived in 原始配置 —
+   * but it is still load-bearing: it is the first of the two guards that keep one edit from becoming
+   * five writes.
    */
-  const [rawMode, setRawMode] = useState<RawMode>("visual");
-  /** The result of the last format, validate or repair, shown under the editor. */
-  const [rawStatus, setRawStatus] = useState<{
-    tone: "success" | "error" | "info";
-    message: string;
-  } | null>(null);
   const [isSavingRaw, setIsSavingRaw] = useState(false);
   const [parseState, setParseState] = useState<{
     type: "idle" | "success" | "error";
@@ -411,14 +389,6 @@ export function ConfigCenter() {
     total: number;
     current: string;
   } | null>(null);
-  /**
-   * Which tab is open.
-   *
-   * Controlled rather than left to Radix's `defaultValue`, because the health rows navigate: a row
-   * that says "12 个测试失败" has to be able to open the source list filtered to those twelve, and
-   * that needs the page to be able to change its own tab.
-   */
-  const [activeTab, setActiveTab] = useState<ConfigTab>("sources");
   const [importMode, setImportMode] = useState<ImportMode>("remote");
   const [sourceInput, setSourceInput] = useState("");
   const [configBaseUrl, setConfigBaseUrl] = useState<string | undefined>();
@@ -479,6 +449,35 @@ export function ConfigCenter() {
   );
   const inspectedSource =
     sources.find((source) => source.key === inspectedSourceKey) ?? null;
+  /**
+   * The entry in the configuration text that the inspected source came from, and the section it is in.
+   *
+   * **Computed from the text, not remembered from an index.** An index would go stale the moment
+   * anything else edited the document, and a stale index writes one source's fields into another's
+   * row. `locateVisualEntry` returns null when it cannot be certain — a duplicate address with no key
+   * to separate them, a Kitty-shaped document whose entries live under `data`, or an address the file
+   * does not contain — and the drawer then offers no fields rather than a form that would corrupt the
+   * file.
+   *
+   * **Only `sites` and `lives` are reachable, and that is not an omission.** The parser emits nothing
+   * else: `classifySource` writes `"cms"` and `classifyLiveSource` writes `"live"`, and 解析服务 are
+   * parsed into a separate `parseServices` list that never enters `sources`. `adapters.ts` records the
+   * same fact — its `"parser"` branch has had no producer since `da8f565`.
+   *
+   * This is what replaced the 原始配置 tab: the drawer is where a user acts on one source, so this is
+   * where its fields belong.
+   */
+  const inspectedEntry = useMemo(() => {
+    if (!inspectedSource || !editorText.trim()) return null;
+    // Narrowed to the two the parser can emit, so the type is what the code can actually be handed.
+    const section: VisualSectionKey =
+      inspectedSource.sourceType === "live" ? "lives" : "sites";
+    const entry = locateVisualEntry(editorText, section, {
+      key: inspectedSource.key,
+      api: inspectedSource.api,
+    });
+    return entry ? { section, entry } : null;
+  }, [inspectedSource, editorText]);
   const testableSources = useMemo(
     () => sources.filter(isTestableSource),
     [sources],
@@ -515,37 +514,6 @@ export function ConfigCenter() {
     () => new Set(removableSources.map((source) => source.key)),
     [removableSources],
   );
-  const adapterRows = useMemo(
-    () =>
-      adapterRegistry.map((adapter) => ({
-        adapter,
-        sources: sources.filter(
-          (source) => getAdapterProfile(source).id === adapter.id,
-        ),
-      })),
-    [sources],
-  );
-  /**
-   * The table lists adapters, and every registered adapter can run.
-   *
-   * That is why there is no 状态 column and no 状态 filter here any more: each row would say
-   * 可执行 and every filter option would lead to the same eight rows. Both controls existed because
-   * five registry entries could not run, so both went with them — the same rule this page has
-   * applied twice before (部分支持, and the `blocked` facet in the source filter): **a control whose
-   * every option leads to the same place is not a control.** What is left is the question a reader
-   * actually has — which of these is this file using — and 当前源 answers it.
-   */
-  const visibleAdapterRows = useMemo(() => {
-    const keyword = adapterQuery.trim().toLowerCase();
-    if (!keyword) return adapterRows;
-    // The same fields the row shows, so anything a reader can see is something they can search.
-    return adapterRows.filter(({ adapter }) =>
-      [adapter.label, adapter.id, adapter.reason]
-        .join(" ")
-        .toLowerCase()
-        .includes(keyword),
-    );
-  }, [adapterQuery, adapterRows]);
 
   useEffect(() => {
     const sourceBaseUrl = activeDocument?.sourceBaseUrl ?? undefined;
@@ -1089,7 +1057,6 @@ export function ConfigCenter() {
       setLastMergeSummary(null);
       loadImportText("", null);
       setRawDraft(null);
-      setRawStatus(null);
       setInspectedSourceKey(null);
       setMultiRepo(null);
       setClearStep(null);
@@ -1821,88 +1788,37 @@ export function ConfigCenter() {
     setRawDraft(value);
   };
 
-  /** Turns a parse issue into a message that names where it is. */
-  const describeRawIssue = (prefix: string, issue: ParseIssue | null | undefined) => {
-    const position = issue?.line
-      ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
-      : "";
-    return `${prefix}${position}：${issue?.message ?? "未知解析错误"}`;
-  };
-
   /**
-   * Re-indents the configuration.
+   * Applies one field edit made in the source drawer.
    *
-   * The same operation the import dialog offers, applied to the open document rather than to text
-   * being imported. It is the first thing to try on a file that has been pasted together by hand,
-   * and it is also what makes the code view readable again after a visual edit.
+   * **Goes through `handleRawTextChange` on purpose.** That is the single ingress the debounced save
+   * watches, so an edit from the drawer lands exactly the way an edit from the editor did: pruned,
+   * parsed, merged with the existing records — which is what preserves the user's own switches — and
+   * written by `replaceAllConfigDocuments`. Writing to the database directly from here would bypass
+   * `saveEditorText`'s re-entrancy guard and reintroduce the write loop it was added to stop.
+   *
+   * The entry is located from the *current* text rather than an index captured when the drawer opened,
+   * because anything could have edited the document since. `locateVisualEntry` answers null when it
+   * cannot be certain, and then this refuses rather than writing the wrong row.
+   *
+   * Returns whether the edit was applied, so the field can put the stored value back when it was not.
    */
-  const handleFormatRaw = () => {
-    const result = formatConfigText(editorText);
-    if (!result.ok) {
-      setRawStatus({ tone: "error", message: describeRawIssue("格式化失败", result.issue) });
-      return;
+  const handleEditSourceField = (field: string, value: string): boolean => {
+    if (!inspectedEntry || !inspectedSource) return false;
+    const { text, error } = updateVisualEntryField(
+      editorText,
+      inspectedEntry.section,
+      inspectedEntry.entry.index,
+      field,
+      value,
+    );
+    if (error) {
+      toast({ variant: "error", title: "没有修改", description: error });
+      return false;
     }
-    handleRawTextChange(result.text);
-    setRawStatus({ tone: "success", message: "已重新排版。" });
-  };
-
-  /**
-   * Checks the configuration and repairs what it can, in one action.
-   *
-   * 校验 and 自动修正 were two buttons over the same text, and the pair was backwards: 校验 only
-   * reported what 自动修正 could then fix, so the user had to read the diagnosis and press a second
-   * button for the obvious next step. Worse, neither touched a type problem — the button named 自动修正
-   * reported "未发现可自动修正的问题" over a document that could not be saved at all, which is the
-   * behaviour the user reported and was right to doubt.
-   *
-   * So this repairs first and then reports. `repairConfigText` now coerces string spellings of the
-   * flag fields back to booleans as well as handling syntax, so the common "cannot be saved" causes
-   * are actually fixed rather than merely described.
-   */
-  const handleCheckAndFixRaw = () => {
-    const repaired = repairConfigText(editorText);
-
-    if (!repaired.ok) {
-      // The text is not even readable, so there is nothing to repair. Say where the problem is and
-      // leave the text alone — the user is looking at the editor and has to find it themselves.
-      setRawStatus({
-        tone: "error",
-        message: describeRawIssue("检查未通过，需要手动修正", repaired.issue),
-      });
-      return;
-    }
-
-    const changed = repaired.text !== editorText;
-    if (changed) {
-      // The edit goes through the normal change path, so the debounced auto-save picks it up and the
-      // repair lands without a second action.
-      handleRawTextChange(repaired.text);
-    }
-
-    // Report on the text that will now be saved, so the message describes the state the user is left
-    // in rather than the one they were in a moment ago.
-    const after = parseConfigText(repaired.text, configBaseUrl);
-    const issues = after.issues.length;
-    const unusable = after.ok
-      ? after.sources.filter((source) => !isTestableSource(source)).length
-      : 0;
-    const parts: string[] = [];
-    parts.push(changed ? `已修正：${repaired.changes.join("、")}` : "没有可自动修正的问题");
-    if (after.ok) {
-      parts.push(
-        `识别到 ${after.sources.length} 个源` +
-          (after.liveCount > 0 ? `（其中直播源 ${after.liveCount} 个）` : "") +
-          (unusable > 0 ? `，${unusable} 个没有可用适配器` : "，全部有可用适配器"),
-      );
-      if (issues > 0) parts.push(`另有 ${issues} 处需要留意`);
-    } else {
-      parts.push(`仍有无法解析的问题：${after.issues[0]?.message ?? "未知错误"}`);
-    }
-
-    setRawStatus({
-      tone: !after.ok ? "error" : changed ? "success" : "info",
-      message: `${parts.join("；")}。`,
-    });
+    if (text === editorText) return false;
+    handleRawTextChange(text);
+    return true;
   };
 
   /**
@@ -1922,13 +1838,12 @@ export function ConfigCenter() {
    * because it is the same source by identity, while a deleted one has no counterpart and drops out.
    * Taking the parse directly would reset every switch each time a name was corrected.
    *
-   * `options.silent` is for the debounced background save: it must not replace the status line the
-   * user is currently reading with a "已保存" message on every keystroke.
+   * **Every save is a background save now.** The old `options.silent` distinguished the debounced
+   * write from a caller that wanted a "已保存" confirmation, and that confirmation was the status line
+   * under the 原始配置 editor. With the editor gone there is no such caller, so a successful write
+   * says nothing and only a warning or a failure is reported.
    */
-  const saveEditorText = async (
-    text: string,
-    options: { silent?: boolean } = {},
-  ) => {
+  const saveEditorText = async (text: string) => {
     // A save that already ran for this exact text must not run again.
     //
     // Without this the debounce re-fired after every write: a successful save merges the sources,
@@ -2001,21 +1916,23 @@ export function ConfigCenter() {
       // The draft is dropped so the editors read the saved document again; keeping it would leave
       // the page showing text that no longer matches what is stored.
       setRawDraft((current) => latestEditorText.current === text ? null : current);
-      setRawStatus(
-        payload.warning
-          ? { tone: "error", message: payload.warning }
-          : options.silent
-            ? rawStatus
-            : { tone: "success", message: `已自动保存：${payload.sourceCount} 个源。` },
-      );
+      // **A toast, not a status line.** The line it used to write lived under the 原始配置 editor,
+      // and that editor is gone. A successful background save stays silent — it is the ordinary
+      // outcome and the list already shows the result — but a warning is something the user has to
+      // act on, so it is said out loud.
+      if (payload.warning) {
+        toast({ variant: "error", title: "配置已保存，但有需要留意的地方", description: payload.warning });
+      }
     } catch (error) {
       // The text did NOT land, so a retry must still be possible. Leaving the marker set would make
       // the guard skip every later attempt at the same text, turning one transient database error
       // into permanently unsaveable edits.
       lastSavedText.current = null;
-      setRawStatus({
-        tone: "error",
-        message: `保存失败：${error instanceof Error ? error.message : "未知错误"}`,
+      // A failed save is never silent, whatever the caller asked for: the user's edit is not stored.
+      toast({
+        variant: "error",
+        title: "保存失败",
+        description: error instanceof Error ? error.message : "未知错误",
       });
     } finally {
       setIsSavingRaw(false);
@@ -2070,7 +1987,7 @@ export function ConfigCenter() {
   useEffect(() => {
     if (!hasRawChanges || isSavingRaw) return;
     const timer = window.setTimeout(() => {
-      void saveEditorText(rawDraft ?? "", { silent: true });
+      void saveEditorText(rawDraft ?? "");
     }, AUTO_SAVE_DELAY_MS);
     return () => window.clearTimeout(timer);
     // `saveEditorText` is recreated each render, so depending on it would restart the timer on every
@@ -2478,47 +2395,24 @@ export function ConfigCenter() {
             nothing to switch between, and the card that replaced it only repeated the header's
             count and its own sentence. */}
 
-        <Tabs
-          value={activeTab}
-          onValueChange={(value) => setActiveTab(value as ConfigTab)}
-          className="flex min-h-0 flex-1 flex-col gap-5"
-        >
-          {/* The tab row holds only the tabs. A "最后解析：<time>" line used to sit at its right end,
-              reporting when the document was imported — an audit fact rather than something the
-              reader acts on. Nothing on this page behaves differently because the configuration is
-              an hour or a month old, and where the timestamp does mean something it is already
-              shown: the document list. Dropping it also leaves the row with a single child, so it
-              no longer needs to be a two-ended layout. */}
-          <div className="flex shrink-0 items-center gap-4">
-            <TabsList>
-              <TabsTrigger value="sources" className="gap-1.5">
-                <List className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                源列表
-              </TabsTrigger>
-              <TabsTrigger value="adapters" className="gap-1.5">
-                <Blocks className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                适配器
-              </TabsTrigger>
-              <TabsTrigger value="raw" className="gap-1.5">
-                <Code2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                原始配置
-              </TabsTrigger>
-            </TabsList>
-          </div>
+        {/* **No tab row.** The page had three tabs — 源列表, 适配器 and 原始配置 — and the user
+            removed two of them: 适配器 because they could not read an adapter table, and 原始配置
+            because an editor over the raw file is not something a user of this app should have to
+            open. What is left is the list, and a control with one destination is not a control:
+            this project's own `do-not-use.md` rejects exactly that.
 
-          <TabsContent
-            value="sources"
-            className="flex min-h-0 flex-1 flex-col gap-4"
-          >
-            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
-              <CardHeader className="shrink-0 border-b pb-4 pt-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <CardTitle className="text-base">源列表</CardTitle>
-                    <CardDescription>
-                      启用后即可在影视库或直播中使用；测试失败或无内容的源会自动关闭。
-                    </CardDescription>
-                  </div>
+            The wrapper stays an unconditioned `div` rather than a bare fragment because it is what
+            gives the card the page's remaining height. */}
+        <div className="flex min-h-0 flex-1 flex-col gap-5">
+          <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
+            <CardHeader className="shrink-0 border-b pb-4 pt-5">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <CardTitle className="text-base">源列表</CardTitle>
+                  <CardDescription>
+                    启用后即可在影视库或直播中使用；测试失败或无内容的源会自动关闭。
+                  </CardDescription>
+                </div>
                   {/* Import, export and the bulk test live here rather than in the page header:
                       all three act on the configuration this list is showing, and a page-level
                       "导出" gave no clue what was being exported. */}
@@ -2842,286 +2736,7 @@ export function ConfigCenter() {
                 )}
               </CardContent>
             </Card>
-          </TabsContent>
-
-          <TabsContent
-            value="adapters"
-            className="flex min-h-0 flex-1 flex-col gap-4"
-          >
-            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
-              <CardHeader className="shrink-0 border-b pb-4 pt-5">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <CardTitle className="flex items-center gap-2 text-base">
-                      <Blocks
-                        className="size-4 text-primary"
-                        data-icon="inline-start"
-                        aria-hidden="true"
-                      />
-                      适配器
-                    </CardTitle>
-                    <CardDescription>
-                      适配器决定一个源能不能被读取；能运行不代表源一定可用，测试通过后才能确认内容能取到。
-                    </CardDescription>
-                  </div>
-                </div>
-
-                {/* Search and a count, the same shape 源列表 uses so the two lists are read the same
-                    way. There is no filter dropdown here any more: every adapter in the registry can
-                    run, so a 状态 filter would offer options that all lead to the same eight rows. */}
-                <div className="mt-4 flex items-center gap-2">
-                  <SearchInput
-                    value={adapterQuery}
-                    onValueChange={setAdapterQuery}
-                    placeholder="搜索适配器名称或说明"
-                    aria-label="搜索适配器名称或说明"
-                  />
-                  <span className="shrink-0 text-xs text-muted-foreground">
-                    共 {visibleAdapterRows.length} 类
-                  </span>
-                </div>
-              </CardHeader>
-
-              <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-                {visibleAdapterRows.length > 0 ? (
-                  /* The list is the only scrolling region, matching 源列表: it takes whatever
-                     height is left after the fixed header, so the page never scrolls and the
-                     controls stay put. Without this the table ran past the bottom of the card. */
-                  <ScrollArea className="min-h-0 flex-1">
-                    <Table containerClassName="overflow-visible">
-                      <TableHeader className="sticky top-0 z-10 bg-card">
-                        <TableRow className="hover:bg-transparent">
-                          <TableHead className="pl-6">适配器</TableHead>
-                          <TableHead>支持操作</TableHead>
-                          <TableHead>当前源</TableHead>
-                          <TableHead className="pr-6">说明</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {visibleAdapterRows.map(
-                          ({ adapter, sources: matchedSources }) => (
-                            <TableRow key={adapter.id}>
-                              <TableCell className="pl-6">
-                                <div>
-                                  <p className="font-medium">{adapter.label}</p>
-                                  <p className="mt-1 font-mono text-xs text-muted-foreground">
-                                    {adapter.id}
-                                  </p>
-                                </div>
-                              </TableCell>
-                              {/* No 状态 column. Every adapter listed can run, so it would say
-                                  可执行 on all eight rows — a column that carries one value is not
-                                  reporting anything. What a reader needs is which entries of this
-                                  file use each adapter, and that is 当前源. */}
-                              <TableCell>
-                                {adapter.operations.length > 0 ? (
-                                  <div className="flex flex-wrap gap-1.5">
-                                    {adapter.operations.map((operation) => (
-                                      <Badge
-                                        key={operation}
-                                        variant="secondary"
-                                        className="px-2 py-0.5 text-xs"
-                                      >
-                                        {operation}
-                                      </Badge>
-                                    ))}
-                                  </div>
-                                ) : (
-                                  <span className="text-xs text-muted-foreground">
-                                    无执行操作
-                                  </span>
-                                )}
-                              </TableCell>
-                              <TableCell className="text-sm text-muted-foreground">
-                                {matchedSources.length > 0
-                                  ? `${matchedSources.length} 个`
-                                  : "未使用"}
-                              </TableCell>
-                              <TableCell className="max-w-[360px] whitespace-normal pr-6 text-xs leading-5 text-muted-foreground">
-                                {adapter.reason}
-                              </TableCell>
-                            </TableRow>
-                          ),
-                        )}
-                      </TableBody>
-                    </Table>
-                    <ScrollBar />
-                  </ScrollArea>
-                ) : (
-                  <div className="p-4">
-                    <Empty className="min-h-72">
-                      <EmptyHeader>
-                        <EmptyMedia variant="icon">
-                          <Blocks
-                            className="size-4"
-                            data-icon="inline-start"
-                            aria-hidden="true"
-                          />
-                        </EmptyMedia>
-                        <EmptyTitle>没有匹配的适配器</EmptyTitle>
-                        <EmptyDescription>
-                          {adapterQuery.trim()
-                            ? "换个关键词，或把筛选切回「全部适配器」。"
-                            : "切换筛选条件即可查看全部适配器。"}
-                        </EmptyDescription>
-                      </EmptyHeader>
-                    </Empty>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </TabsContent>
-
-          <TabsContent
-            value="raw"
-            className="flex min-h-0 flex-1 flex-col gap-4"
-          >
-            <Card className="flex min-h-0 flex-1 flex-col gap-0 py-0">
-              <CardHeader className="shrink-0 border-b pb-4 pt-5">
-                <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
-                    <CardTitle className="flex items-center gap-2 text-base">
-                      <Code2 className="size-4 text-primary" data-icon="inline-start" aria-hidden="true" />
-                      原始配置
-                    </CardTitle>
-                    <CardDescription>
-                      {rawMode === "visual"
-                        ? "以列表方式管理配置里的源与设置，改动会立刻写回配置文本。"
-                        : "直接编辑配置文本；改动会写回配置，切回可视化模式即可查看。"}
-                    </CardDescription>
-                  </div>
-                  {/* Two modes over one document rather than two editors: the text stays the
-                      source of truth, and switching views never copies or converts anything. */}
-                  <div className="flex shrink-0 items-center gap-2">
-                    <Tabs
-                      value={rawMode}
-                      onValueChange={(value) => setRawMode(value as RawMode)}
-                    >
-                      <TabsList>
-                        <TabsTrigger value="visual" className="gap-1.5">
-                          <ListTree className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                          可视化
-                        </TabsTrigger>
-                        <TabsTrigger value="code" className="gap-1.5">
-                          <Braces className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                          代码
-                        </TabsTrigger>
-                      </TabsList>
-                    </Tabs>
-                    {rawMode === "code" && (
-                      <>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5"
-                          disabled={!editorText.trim()}
-                          onClick={handleFormatRaw}
-                        >
-                          <AlignLeft className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                          格式化
-                        </Button>
-                        {/* One button, not two.
-                            校验 and 自动修正 were separate actions over the same text, and 校验 only
-                            ever reported what 自动修正 could then have fixed — so the pair made the
-                            user do the diagnosis themselves and press twice for one outcome. The
-                            merged action repairs what it can and then reports what is left, which is
-                            both halves in the order they are useful. */}
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="gap-1.5"
-                          disabled={!editorText.trim()}
-                          onClick={handleCheckAndFixRaw}
-                        >
-                          <WandSparkles className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-                          检查并修正
-                        </Button>
-                      </>
-                    )}
-                    {/* No save button: edits save themselves. What the user needs from this corner is
-                        not an action but the state — whether their text has landed, and whether the
-                        app could read it. It is a status, not a control, which is also why it can no
-                        longer be pressed at the wrong moment. */}
-                    <span
-                      role="status"
-                      aria-label="自动保存状态"
-                      className="flex items-center gap-1.5 text-xs text-muted-foreground"
-                    >
-                      {isSavingRaw ? (
-                        <>
-                          <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
-                          正在保存…
-                        </>
-                      ) : hasRawChanges ? (
-                        <>
-                          <Save className="size-3.5" aria-hidden="true" />
-                          等待自动保存…
-                        </>
-                      ) : (
-                        <>
-                          <Check className="size-3.5" aria-hidden="true" />
-                          已自动保存
-                        </>
-                      )}
-                    </span>
-                  </div>
-                </div>
-              </CardHeader>
-              {/* The editor takes the remaining height instead of a fixed 680px. A fixed height
-                  made the card 938px tall in an 805px window, and since the page itself is
-                  overflow-hidden the bottom of the editor — and the last lines of the
-                  configuration — could not be reached at all. */}
-              {/* No padding of its own. Every tab's content is inset by the element that owns the
-                  inset, so the four tabs agree: controls and block edges at 16px (the card header's
-                  own `px-4`), and the text inside a bordered list row at 24px, which is where the
-                  table tabs' `pl-6` puts theirs. The arbitrary 12px here and 20px in 解析报告 were
-                  the whole of the inconsistency — measured, not guessed. */}
-              <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-                {rawMode === "visual" ? (
-                  <ConfigVisualEditor
-                    value={editorText}
-                    onChange={handleRawTextChange}
-                    sources={sources}
-                  />
-                ) : (
-                  <JsonEditor
-                    value={editorText}
-                    onChange={handleRawTextChange}
-                    aria-label="原始配置文本"
-                    className="min-h-0 flex-1"
-                  />
-                )}
-              </CardContent>
-              {/* One report, shared by both modes: a parse failure is a property of the document,
-                  not of the view it was found in. */}
-              {rawStatus && (
-                <div className="shrink-0 border-t border-border/60 px-3 py-2.5">
-                  <div
-                    role="status"
-                    aria-label="配置检查结果"
-                    className={cn(
-                      "flex items-start gap-2 rounded-md p-2.5 text-xs leading-5",
-                      rawStatus.tone === "error"
-                        ? "border border-destructive/40 bg-destructive/10 text-destructive"
-                        : rawStatus.tone === "success"
-                          ? "border border-[color:var(--status-supported-border)] bg-[color:var(--status-supported-bg)] text-[color:var(--status-supported)]"
-                          : "border border-border/60 bg-muted/30 text-muted-foreground",
-                    )}
-                  >
-                    {rawStatus.tone === "error" ? (
-                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
-                    ) : (
-                      <Check className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
-                    )}
-                    <span>{rawStatus.message}</span>
-                  </div>
-                </div>
-              )}
-            </Card>
-          </TabsContent>
-        </Tabs>
+          </div>
 
         {/* The page-level banner is gone: every message it carried is now a toast.
             
@@ -3680,6 +3295,39 @@ export function ConfigCenter() {
                       />
                     </div>
                   </DetailSection>
+
+                  {/* **Where a source is edited, now that 原始配置 is gone.** The drawer is the one
+                      place a user acts on a single source, so its fields belong here rather than
+                      behind a tab holding 340 sibling entries.
+
+                      It is deliberately the *same* form the visual editor offered — same field order,
+                      same 必需/可选 labels, same commit-on-blur — because the underlying operations are
+                      the same functions. What is gone is the surrounding page editor: the search box,
+                      the section accordions, and 其他设置, none of which mean anything when the user
+                      has already said which source they are looking at.
+
+                      When the entry cannot be located the section explains why instead of showing a
+                      form. `locateVisualEntry` refuses rather than guessing, and a form that wrote to
+                      the wrong row would be worse than no form. */}
+                  {inspectedEntry ? (
+                    <DetailSection title="编辑">
+                      <div className="flex flex-col gap-2.5">
+                        {inspectedEntry.entry.fields.map((field) => (
+                          <SourceFieldRow
+                            key={field.name}
+                            field={field}
+                            onCommit={(value) => handleEditSourceField(field.name, value)}
+                          />
+                        ))}
+                      </div>
+                    </DetailSection>
+                  ) : (
+                    <DetailSection title="编辑">
+                      <p className="rounded-lg border border-border/70 bg-muted/20 p-3.5 text-xs leading-5 text-muted-foreground">
+                        {describeUneditableSource(inspectedSource)}
+                      </p>
+                    </DetailSection>
+                  )}
 
                   <AdapterDetail source={inspectedSource} />
 
@@ -4493,6 +4141,122 @@ function operationStatusClass(status: SourceOperationStatus) {
       "border-[color:var(--status-blocked-border)] text-[color:var(--status-blocked)]",
     skipped: "text-muted-foreground",
   }[status];
+}
+
+/**
+ * Why the drawer cannot offer an edit form for this source.
+ *
+ * **Saying which of the reasons it is.** "无法编辑" on its own reads as a defect; each of these is a
+ * situation the user can understand, and two of them suggest what to do instead.
+ */
+function describeUneditableSource(source: SourceRecord) {
+  if (source.sourceType === "live" && !source.api.trim()) {
+    return "这一条在配置里没有地址，所以没有可以修改的字段。重新导入一份带地址的配置即可。";
+  }
+  if (!source.api.trim()) {
+    return "这一条在配置里没有地址，所以没有可以修改的字段。";
+  }
+  return "Moseek 无法在配置文本里确定这一条的位置（可能有多条完全相同的地址），因此不提供编辑。删除后重新导入可以替代。";
+}
+
+/**
+ * One editable field in the source drawer.
+ *
+ * A local draft committed on blur, the same shape the visual editor used, and for the same measured
+ * reason: committing per keystroke re-serialises the whole configuration — on the owner's file that was
+ * visible lag — and it fights the caret.
+ *
+ * `lastValue` rather than an effect for picking up an outside change: the field object is rebuilt from
+ * the text on every save, so a successful commit comes back as a new `value`, and the draft has to
+ * follow it or the box would keep showing the pre-save text.
+ */
+function SourceFieldRow({
+  field,
+  onCommit,
+}: {
+  field: VisualField;
+  /** Returns whether the edit was applied; `false` puts the stored value back in the box. */
+  onCommit: (value: string) => boolean;
+}) {
+  const [draft, setDraft] = useState(field.value);
+  const [lastValue, setLastValue] = useState(field.value);
+  if (lastValue !== field.value) {
+    setLastValue(field.value);
+    setDraft(field.value);
+  }
+
+  const commit = () => {
+    if (draft === field.value) return;
+    // **A refused edit puts the stored value back.** Leaving the typed text in the box would show a
+    // value the file does not contain — the user would read "the address is empty now" from a field
+    // whose edit was rejected, and the next unrelated save would look like it lost it. The refusal is
+    // already reported by a toast; this makes the field agree with it.
+    if (!onCommit(draft)) setDraft(field.value);
+  };
+
+  const label = (
+    <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <span className="font-mono">{field.name}</span>
+      {field.required && (
+        <Badge
+          variant="destructive"
+          className="px-1 py-0 text-[10px] font-normal leading-4"
+          title="必需：缺少它这个条目无法工作。"
+        >
+          必需
+        </Badge>
+      )}
+    </span>
+  );
+
+  if (field.kind === "flag") {
+    return (
+      <label className="flex items-center justify-between gap-2 rounded-md border border-border/60 bg-background/40 px-2.5 py-1.5">
+        {label}
+        <Switch
+          size="sm"
+          checked={draft === "true"}
+          aria-label={field.name}
+          onCheckedChange={(checked) => onCommit(checked ? "true" : "false")}
+        />
+      </label>
+    );
+  }
+
+  return (
+    <label className="flex flex-col gap-1">
+      {label}
+      {field.kind === "json" ? (
+        <textarea
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          rows={3}
+          spellCheck={false}
+          aria-label={field.name}
+          className={cn(
+            "w-full rounded-md border border-input/80 bg-input/20 px-2.5 py-1.5 font-mono text-[11px] leading-5 shadow-2xs outline-none",
+            "focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20",
+          )}
+        />
+      ) : (
+        <Input
+          size="sm"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commit();
+            }
+          }}
+          aria-label={field.name}
+          className={field.kind === "text" && field.name !== "name" ? "font-mono" : undefined}
+        />
+      )}
+    </label>
+  );
 }
 
 function DetailRow({

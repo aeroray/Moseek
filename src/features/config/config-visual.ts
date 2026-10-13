@@ -341,6 +341,50 @@ function editEntry(
 }
 
 /**
+ * Finds the entry in the raw text that a parsed source came from.
+ *
+ * **A parsed `source.key` is not enough on its own, and that is the whole reason this exists.** The
+ * parser renames duplicate keys (`极速资源` → `极速资源-2`) and invents one for an entry that states
+ * none (`live-1` from its position) — measured on a two-site fixture with a repeated key: the keys
+ * `同一个-2` and `live-1` appear nowhere in the file. Matching on the key alone would either fail to
+ * find the entry or, worse, find a *different* one that happens to hold the renamed key.
+ *
+ * So the address is the primary identity, because it is what the file really contains and what makes
+ * two entries different. The key is a tie-breaker for the case the address cannot separate: two live
+ * entries behind one playlist address, distinguished only by their names.
+ *
+ * Returns `null` rather than guessing. A source the file cannot be located in is a source the drawer
+ * must not offer to edit — the alternative is writing the wrong entry's fields.
+ */
+export function locateVisualEntry(
+  rawText: string,
+  section: VisualSectionKey,
+  source: { key: string; api?: string },
+): VisualEntry | null {
+  const config = readVisualConfig(rawText);
+  if (!config.ok) return null;
+  const target = config.sections.find((item) => item.key === section);
+  if (!target) return null;
+
+  const address = (source.api ?? "").trim();
+  const candidates = address
+    ? target.entries.filter(
+        (entry) =>
+          (entry.fields.find((field) => field.name === summaryField[section])?.value ?? "").trim() ===
+          address,
+      )
+    : [];
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  // More than one entry shares the address, so the key decides. A key the file states is matched
+  // exactly; the parser's renamed form is not searched for, because it is not in the file and
+  // matching it would pick the wrong row of a duplicate pair.
+  const byKey = candidates.find((entry) => entry.sourceKey === source.key);
+  return byKey ?? null;
+}
+
+/**
  * Removes one entry.
  *
  * Deleting here and deleting from the source list are different operations on purpose: the list

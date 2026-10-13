@@ -208,32 +208,6 @@ function closeFilterPanel() {
   fireEvent.click(screen.getByRole("button", { name: /筛选/ }));
 }
 
-/** Opens the 适配器 tab. Radix switches tabs on pointer-down, not click. */
-function openAdaptersTab() {
-  const tab = screen.getByRole("tab", { name: "适配器" });
-  fireEvent.mouseDown(tab, { button: 0 });
-  fireEvent.click(tab);
-}
-
-/** Opens the 原始配置 tab. Radix switches tabs on pointer-down, not click. */
-function openRawTab() {
-  const tab = screen.getByRole("tab", { name: "原始配置" });
-  fireEvent.mouseDown(tab, { button: 0 });
-  fireEvent.click(tab);
-}
-
-/** Switches the raw tab between its two views. Nested tabs need the same pointer sequence. */
-function chooseRawMode(name: "可视化" | "代码") {
-  const tab = screen.getByRole("tab", { name });
-  fireEvent.mouseDown(tab, { button: 0 });
-  fireEvent.click(tab);
-}
-
-/** Expands one section of the visual editor. Sections start collapsed. */
-function openVisualSection(title: string) {
-  fireEvent.click(screen.getByRole("button", { name: new RegExp(`^${title}`) }));
-}
-
 /**
  * Starts a batch test through the 测速 control.
  *
@@ -263,24 +237,6 @@ function startBatchTest(scope: "全部测速" | "只测未测过的" = "全部�
     );
   }
   fireEvent.click(item);
-}
-
-/**
- * The adapter card. The tab and the card title are both 适配器, so matching the text alone is
- * ambiguous; scope to the card that holds the adapter table or its empty state.
- */
-function adapterCard() {
-  const card = screen
-    .getAllByText("适配器")
-    .map((node) => node.closest("[data-slot='card']"))
-    .find(Boolean);
-  if (!card) throw new Error("adapter card not found");
-  // Guard against matching a different card: the adapter card always holds the table or its
-  // empty state, so a stray match would make the assertions below pass vacuously.
-  if (!card.querySelector("[data-slot='table'], [data-slot='empty']")) {
-    throw new Error("matched a card that is not the adapter card");
-  }
-  return card as HTMLElement;
 }
 
 /**
@@ -470,18 +426,6 @@ describe("config center", () => {
     expect(screen.queryByLabelText("配置解析报告")).not.toBeInTheDocument();
     expect(screen.queryByText("已识别源")).not.toBeInTheDocument();
     expect(screen.queryByText("普通可用")).not.toBeInTheDocument();
-  });
-
-  it("calls the list a source list and its column a resource name", () => {
-    // "资源源" was a typo-like duplication, and "能力" named the mechanism rather than the
-    // outcome a user cares about. "清单" was the other awkward one: a list is just a list.
-    renderCenter();
-
-    expect(screen.getByRole("tab", { name: /源列表/ })).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /源清单/ })).not.toBeInTheDocument();
-    expect(screen.getByText("资源名称")).toBeInTheDocument();
-    expect(screen.queryByText("资源源")).not.toBeInTheDocument();
-    expect(screen.queryByText("能力")).not.toBeInTheDocument();
   });
 
   it("opens on the usable sources rather than the whole configuration", () => {
@@ -1106,25 +1050,17 @@ describe("config center", () => {
     expect(page?.className).not.toContain("overflow-auto");
   });
 
-  it("gives the adapter list its own scroll region, like the source list", () => {
-    // Without it the adapter table ran past the bottom of the card instead of scrolling inside it.
-    renderCenter();
-    openAdaptersTab();
-
-    const card = adapterCard();
-    const scroller = card.querySelector("[data-slot='scroll-area']");
-    expect(scroller).not.toBeNull();
-    expect(scroller?.className).toContain("min-h-0");
-  });
-
   it("insets every tab's content the same way", () => {
-    // The four tabs had four different insets: the table tabs put their rows at 24px inside the
-    // card, 原始配置 at 12px (a 29px text inset) and 解析报告 at 20px (a 34px text inset). jsdom
-    // cannot measure any of that, so the contract that produces it is what is pinned.
+    // The insets used to differ per tab: the table tabs put their rows at 24px inside the card,
+    // 原始配置 at 12px (a 29px text inset) and 解析报告 at 20px (a 34px text inset). jsdom cannot
+    // measure any of that, so the contract that produces it is what is pinned.
     //
     // The rule: the card content carries no padding of its own, each tab's own wrapper supplies
     // 16px (matching the header's `px-4`), and a bordered list box adds 8px more so its row text
     // lands at 24px — which is where the tables' `pl-6` puts theirs.
+    //
+    // Only the source list is left to assert this against: 适配器 and 原始配置 were removed from the
+    // page, so their halves of this contract went with them.
     renderCenter();
 
     // The tables express the 24px with `pl-6`/`pr-6` on their edge cells.
@@ -1138,403 +1074,28 @@ describe("config center", () => {
     expect(
       sourcesCard?.querySelector("[data-slot='table-head']")?.className,
     ).toContain("pl-6");
-
-    // 适配器 matches it.
-    openAdaptersTab();
-    const adapterCardEl = adapterCard();
-    expect(
-      adapterCardEl.querySelector("[data-slot='card-content']")?.className,
-    ).toContain("p-0");
-    expect(
-      adapterCardEl.querySelector("[data-slot='table-head']")?.className,
-    ).toContain("pl-6");
-  });
-
-  it("gives 原始配置 the same 16px content inset as the list", () => {
-    // These two are the pair the user compared. 原始配置 was `p-3 pt-4` (12px); it now carries no
-    // padding and an inner wrapper supplies 16px, so the block edges line up with the card header's
-    // own `px-4`.
-    renderCenter();
-    openRawTab();
-
-    const rawCard = screen
-      .getAllByText("原始配置")
-      .map((node) => node.closest("[data-slot='card']"))
-      .find(Boolean);
-    expect(rawCard?.querySelector("[data-slot='card-content']")?.className).toContain("p-0");
-    // The search box and the scroll area's content each carry the 16px, because the scroll area
-    // itself must span the full card width — that is what keeps the overlay scrollbar from moving
-    // the list. See the note on `makes the raw search box and the list below it the same width`.
-    //
-    // Asserted from the search field upwards rather than by a fixed descendant path: the field is now
-    // the shared `SearchInput`, whose own root carries no padding, and the inset sits on the wrapper
-    // around it. Selecting `> div > div.relative` happened to catch the editor's outer column instead
-    // once that extra level appeared, which is the fragility this form avoids.
-    const searchField = rawCard?.querySelector("input[aria-label='搜索配置项']");
-    expect(searchField).toBeTruthy();
-    let insetWrapper: Element | null = searchField?.parentElement ?? null;
-    while (insetWrapper && !insetWrapper.className.includes("px-4")) {
-      insetWrapper = insetWrapper.parentElement;
-    }
-    expect(insetWrapper?.className).toContain("px-4");
-    const scrollContent = rawCard?.querySelector(
-      "[data-slot='scroll-area-viewport'] > div > div",
-    );
-    expect(scrollContent?.className).toContain("px-4");
-  });
-
-  it("keeps the top inset, which the split padding had dropped", () => {
-    // The wrapper carried `px-4 pb-4` with no `pt`, so the search box sat flush against the card
-    // header's border. The inset is now declared per element rather than split across two, so a
-    // half-applied padding is not expressible.
-    renderCenter();
-    openRawTab();
-
-    const rawCard = screen
-      .getAllByText("原始配置")
-      .map((node) => node.closest("[data-slot='card']"))
-      .find(Boolean);
-    const wrapper = rawCard?.querySelector("[data-slot='card-content'] > div");
-    expect(wrapper?.className).toContain("pt-4");
-  });
-
-  it("makes the raw search box and the list below it the same width", () => {
-    // They are siblings in a column, so they must share an edge. The list must use an overlay
-    // scrollbar: a native one is laid out inside its box and takes 6px of width from the content,
-    // which measured as a 1072px list under a 1078px search box and a section box 17px from the
-    // card's left edge but 23px from its right. jsdom cannot measure that, so what is pinned is
-    // that the list scrolls through an overlay `ScrollArea` rather than `overflow-y-auto`.
-    renderCenter();
-    openRawTab();
-
-    const content = screen
-      .getAllByText("原始配置")
-      .map((node) => node.closest("[data-slot='card']"))
-      .find(Boolean)
-      ?.querySelector("[data-slot='card-content']");
-
-    const scroller = content?.querySelector("[data-slot='scroll-area']");
-    expect(scroller).not.toBeNull();
-    // No native scroller anywhere in this tab, and no asymmetric padding on the scroll content.
-    expect(content?.querySelector("div.overflow-y-auto")).toBeNull();
-    const scrollContent = content?.querySelector(
-      "[data-slot='scroll-area-viewport'] > div > div",
-    );
-    expect(scrollContent?.className).toContain("px-4");
-    expect(scrollContent?.className).not.toMatch(/\bpr-\d/);
-  });
-
-  it("gives 原始配置's rows the same padding as a table row", () => {
-    // The list's rows looked more tightly packed than the adapter table's. Both now use 10px of
-    // vertical padding; the remaining height difference is the adapter rows' second line of text.
-    renderCenter();
-    openRawTab();
-
-    const row = screen.getByRole("button", { name: "编辑 可用的源" }).closest("div.flex");
-    expect(row?.className).toContain("py-2.5");
-    expect(row?.className).toContain("px-2");
-  });
-
-  it("sizes the raw editor from the space left, not a fixed height", () => {
-    // A fixed 680px editor made the card 938px tall in an 805px window. The page is
-    // overflow-hidden, so the bottom of the editor and the last lines of the configuration were
-    // unreachable. jsdom cannot measure this, so the contract that makes it fit is what is pinned.
-    renderCenter();
-    openRawTab();
-    // The code view is where the editor lives; the visual view is the default.
-    chooseRawMode("代码");
-
-    const card = screen
-      .getAllByText("原始配置")
-      .map((node) => node.closest("[data-slot='card']"))
-      .find(Boolean);
-    expect(card?.className).toContain("min-h-0");
-    expect(card?.className).toContain("flex-1");
-
-    const editor = card?.querySelector("[data-slot='scroll-area']");
-    expect(editor?.className).toContain("min-h-0");
-    expect(editor?.className).toContain("flex-1");
-    // No viewport-derived height: that is what overflowed the window.
-    expect(editor?.className).not.toMatch(/h-\[min\(/);
-    expect(editor?.className).not.toContain("min-h-[520px]");
-  });
-
-  it("shows each entry's test result instead of its address", () => {
-    // The address was the second half of every row and it is what a user cannot read: 340 lines of
-    // `https://…/api.php/provide/vod` distinguish nothing. What the space is worth is the answer to
-    // "does this one work", which the source list already knows.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [
-            { key: "ok", name: "可用的源", api: "https://example.com/api.php/provide/vod/" },
-            { key: "no", name: "不可用的源", api: "https://blocked.example/spider" },
-          ],
-        }),
-        sources: [
-          source({
-            key: "ok",
-            name: "可用的源",
-            api: "https://example.com/api.php/provide/vod/",
-            testStatus: "passed",
-            testItemCount: 20,
-          }),
-          source({
-            key: "no",
-            name: "不可用的源",
-            api: "https://blocked.example/spider",
-            testStatus: "failed",
-            testMessage: "请求失败。",
-          }),
-        ],
-      });
-    });
-    openRawTab();
-
-    const okRow = screen.getByRole("button", { name: "编辑 可用的源" }).closest("div");
-    // A passing test reports what it found, which is the useful fact.
-    expect(okRow?.textContent).toContain("20 条内容");
-    // The address is not in the row.
-    expect(okRow?.textContent).not.toContain("api.php/provide/vod");
-
-    const badRow = screen.getByRole("button", { name: "编辑 不可用的源" }).closest("div");
-    expect(badRow?.textContent).toContain("测试失败");
-    expect(badRow?.textContent).not.toContain("blocked.example");
-  });
-
-  it("says an entry cannot be tested rather than that it is untested", () => {
-    // 未测试 implies the user has not got round to it, which is exactly the judgement this badge
-    // exists to support. A record with no address can never be tested, and one with no runnable
-    // adapter has nothing to test with — both need saying.
-    renderCenter();
-    // The rows come from the configuration text and the badges from the parsed sources, so both
-    // sides have to carry the same keys.
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [
-            { key: "broken", name: "缺少地址的源", api: "" },
-            { key: "no", name: "不可用的源", api: "https://blocked.example/spider" },
-          ],
-        }),
-        sources: [
-          source({
-            key: "broken",
-            name: "缺少地址的源",
-            sourceType: "live",
-            capability: "invalid",
-            capabilityNote: "直播源缺少 name 或 url/api 字段。",
-            api: "",
-          }),
-          source({
-            key: "no",
-            name: "不可用的源",
-            api: "https://blocked.example/spider",
-            siteProtocol: "spider",
-            jar: "https://blocked.example/1.jar",
-            capability: "blocked",
-          }),
-        ],
-      });
-    });
-    openRawTab();
-
-    const brokenRow = screen.getByRole("button", { name: "编辑 缺少地址的源" }).closest("div");
-    expect(brokenRow?.textContent).toContain("配置无效");
-    expect(brokenRow?.textContent).not.toContain("未测试");
-
-    const blockedRow = screen.getByRole("button", { name: "编辑 不可用的源" }).closest("div");
-    expect(blockedRow?.textContent).toContain("无法测试");
-    expect(blockedRow?.textContent).not.toContain("未测试");
-  });
-
-  it("says nothing about a test for an entry with no parsed source", () => {
-    // A newly added entry has no parsed source yet, and no claim can be made about it.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({ sources: [] });
-    });
-    openRawTab();
-
-    const row = screen.getByRole("button", { name: "编辑 可用的源" }).closest("div");
-    expect(row?.textContent).not.toContain("未测试");
-    expect(row?.textContent).not.toContain("测试失败");
-    expect(row?.textContent).not.toContain("配置无效");
-  });
-
-  it("matches a test result by key, not by position", () => {
-    // The join between a row and its result is the key. Matching by position would attach one
-    // source's outcome to another's row as soon as the file was reordered.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [
-            { key: "no", name: "不可用的源", api: "https://blocked.example/spider" },
-            { key: "ok", name: "可用的源", api: "https://example.com/api.php/provide/vod/" },
-          ],
-        }),
-        sources: [
-          source({
-            key: "ok",
-            name: "可用的源",
-            api: "https://example.com/api.php/provide/vod/",
-            testStatus: "passed",
-            testItemCount: 20,
-          }),
-          source({
-            key: "no",
-            name: "不可用的源",
-            api: "https://blocked.example/spider",
-            testStatus: "failed",
-            testMessage: "请求失败。",
-          }),
-        ],
-      });
-    });
-    openRawTab();
-
-    // The rows are in the file's order; each carries its own result.
-    expect(
-      screen.getByRole("button", { name: "编辑 不可用的源" }).closest("div")?.textContent,
-    ).toContain("测试失败");
-    expect(
-      screen.getByRole("button", { name: "编辑 可用的源" }).closest("div")?.textContent,
-    ).toContain("20 条内容");
-  });
-
-  it("shows the address once the row is opened", () => {
-    // Hiding it from the summary is not hiding it from the user: it is one click away, in the field
-    // where it can also be corrected.
-    renderCenter();
-    openRawTab();
-
-    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-
-    expect(screen.getByLabelText("api")).toHaveValue(
-      "https://example.com/api.php/provide/vod/",
-    );
-  });
-
-  it("opens the raw tab in the visual view", () => {
-    // Most of what a user does — rename a source, fix an address, drop one — does not need a text
-    // editor, and 340 lines of JSON is the hardest possible surface for the easiest task.
-    renderCenter();
-    openRawTab();
-
-    expect(screen.getByRole("tab", { name: "可视化" })).toHaveAttribute(
-      "data-state",
-      "active",
-    );
-    // The sections a configuration is made of, as lists rather than braces. The heading carries the
-    // count and the hint as part of its accessible name, which is what makes it readable on its own.
-    for (const [title, hint] of [
-      ["影视源", "点播接口"],
-      ["直播源", "频道列表"],
-      ["解析服务", "解析成可直接播放的地址"],
-    ] as const) {
-      expect(
-        screen.getByRole("button", { name: new RegExp(`^${title}.*${hint}`) }),
-      ).toBeInTheDocument();
-    }
-    // And the entries are rows, not braces.
-    expect(screen.getByRole("button", { name: "编辑 可用的源" })).toBeInTheDocument();
-  });
-
-  it("keeps one document across the two views", () => {
-    // Two views, one document: switching must not copy, convert or discard anything, and an edit
-    // made in the code view has to be what the visual view then shows.
-    renderCenter();
-    openRawTab();
-
-    const sites = screen.getByRole("button", { name: /^影视源/ });
-    expect(within(sites).getByText("2")).toBeInTheDocument();
-
-    chooseRawMode("代码");
-    // The visual view is gone and the editor is present.
-    expect(screen.queryByRole("button", { name: /^影视源/ })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("原始配置文本")).toBeInTheDocument();
-  });
-
-  it("offers the code view's helpers only in the code view", () => {
-    // Format and check act on text. Showing them over a form would suggest they apply to the form.
-    renderCenter();
-    openRawTab();
-
-    for (const name of ["格式化", "检查并修正"]) {
-      expect(screen.queryByRole("button", { name }), name).not.toBeInTheDocument();
-    }
-
-    chooseRawMode("代码");
-    for (const name of ["格式化", "检查并修正"]) {
-      expect(screen.getByRole("button", { name }), name).toBeInTheDocument();
-    }
-  });
-
-  it("merges the check and the repair into one action", () => {
-    // They were two buttons over the same text, and 校验 only ever reported what 自动修正 could then
-    // fix — so the user read the diagnosis and pressed a second button for the obvious next step.
-    // One action repairs first and reports what is left.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        // A Markdown fence, which the repair path knows how to strip.
-        rawConfig: "```json\n{\"sites\":[]}\n```",
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-    chooseRawMode("代码");
-
-    expect(screen.queryByRole("button", { name: "校验" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "自动修正" })).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "检查并修正" }));
-
-    const status = screen.getByRole("status", { name: "配置检查结果" });
-    expect(status).toHaveTextContent("移除 Markdown 代码围栏");
-    // It reports the state it left the user in, not just what it changed.
-    expect(status).toHaveTextContent(/识别到 \d+ 个源/);
-  });
-
-  it("reports a configuration it could not repair", () => {
-    // The refusal has to say where the problem is: the user is looking at the editor and has to find
-    // it themselves. Text that is not even readable has nothing to repair.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({ rawConfig: "{ sites: [", normalizedConfig: "{}" });
-    });
-    openRawTab();
-    chooseRawMode("代码");
-
-    fireEvent.click(screen.getByRole("button", { name: "检查并修正" }));
-
-    expect(screen.getByRole("status", { name: "配置检查结果" })).toHaveTextContent(
-      /需要手动修正/,
-    );
   });
 
   it("saves an edit on its own, without a save button", async () => {
     // The user asked for edits to land by themselves: needing to press 保存 turns a typo they are
-    // about to fix into a decision about whether their work is stored yet. Deletions and edits used
-    // to be discarded unless they pressed the button.
+    // about to fix into a decision about whether their work is stored yet. The drawer's fields go
+    // through the same debounced save the 原始配置 editor used, so this is that promise kept after
+    // the tab was removed: the field is in the drawer, the write still happens on its own.
     vi.useFakeTimers();
     try {
       renderCenter();
-      openRawTab();
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes("可用的源"));
+      fireEvent.click(row as HTMLElement);
+      const sheet = screen.getByRole("dialog");
 
-      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-      const nameField = screen.getByLabelText("name");
+      const nameField = within(sheet).getByLabelText("name");
       fireEvent.change(nameField, { target: { value: "改名后的源" } });
       fireEvent.blur(nameField);
 
       // No save button exists at all any more.
       expect(screen.queryByRole("button", { name: /保存改动/ })).not.toBeInTheDocument();
-      // The status says the edit has not landed yet, which is how the user knows.
-      expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent(
-        "等待自动保存",
-      );
 
       vi.mocked(replaceAllConfigDocuments).mockClear();
       await act(async () => {
@@ -1544,10 +1105,8 @@ describe("config center", () => {
       expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
       const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
       expect(written.rawConfig).toContain("改名后的源");
-      // And the status settles, so the page agrees with storage.
-      expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent(
-        "已自动保存",
-      );
+      // The sibling entry is untouched.
+      expect(written.rawConfig).toContain("不可用的源");
     } finally {
       vi.useRealTimers();
     }
@@ -1561,16 +1120,21 @@ describe("config center", () => {
         release = () => resolve({ ...input, id: 2, sourceCount: input.sources.length, importedAt: "刚刚" });
       }));
       renderCenter();
-      openRawTab();
-      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-      fireEvent.change(screen.getByLabelText("name"), { target: { value: "第一份编辑" } });
-      fireEvent.blur(screen.getByLabelText("name"));
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes("可用的源"));
+      fireEvent.click(row as HTMLElement);
+      const sheet = screen.getByRole("dialog");
+
+      fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "第一份编辑" } });
+      fireEvent.blur(within(sheet).getByLabelText("name"));
       await act(async () => { await vi.advanceTimersByTimeAsync(700); });
       expect(release).toBeTypeOf("function");
-      fireEvent.change(screen.getByLabelText("name"), { target: { value: "写入期间的新编辑" } });
-      fireEvent.blur(screen.getByLabelText("name"));
+      // A second edit while the first write is still in flight, which must not be lost.
+      fireEvent.change(within(sheet).getByLabelText("name"), { target: { value: "写入期间的新编辑" } });
+      fireEvent.blur(within(sheet).getByLabelText("name"));
       await act(async () => { release!(); });
-      expect(screen.getByLabelText("name")).toHaveValue("写入期间的新编辑");
+      expect(within(sheet).getByLabelText("name")).toHaveValue("写入期间的新编辑");
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(vi.mocked(replaceAllConfigDocuments).mock.calls.at(-1)?.[0].rawConfig).toContain("写入期间的新编辑");
       expect(useAppStore.getState().configDocuments).toHaveLength(1);
@@ -1585,14 +1149,18 @@ describe("config center", () => {
     // duplicate entries.
     //
     // The count is the assertion: "an edit is saved" is satisfied by a loop, so it has to be
-    // "exactly once".
+    // "exactly once". The drawer's fields go through the same `saveEditorText` guard, so the same
+    // count is what keeps them from reintroducing it.
     vi.useFakeTimers();
     try {
       renderCenter();
-      openRawTab();
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes("可用的源"));
+      fireEvent.click(row as HTMLElement);
+      const sheet = screen.getByRole("dialog");
 
-      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-      const nameField = screen.getByLabelText("name");
+      const nameField = within(sheet).getByLabelText("name");
       fireEvent.change(nameField, { target: { value: "只写一次" } });
       fireEvent.blur(nameField);
 
@@ -1602,8 +1170,11 @@ describe("config center", () => {
       });
 
       expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
-      // And the page settles rather than still believing there is work to save.
-      expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent("已自动保存");
+      // And the page settles rather than still writing on an idle page.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -1615,10 +1186,13 @@ describe("config center", () => {
     vi.useFakeTimers();
     try {
       renderCenter();
-      openRawTab();
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes("可用的源"));
+      fireEvent.click(row as HTMLElement);
+      const sheet = screen.getByRole("dialog");
 
-      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-      const nameField = screen.getByLabelText("name");
+      const nameField = within(sheet).getByLabelText("name");
       fireEvent.change(nameField, { target: { value: "改一次" } });
       fireEvent.blur(nameField);
 
@@ -1651,10 +1225,13 @@ describe("config center", () => {
           ),
         });
       });
-      openRawTab();
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes("可用的源"));
+      fireEvent.click(row as HTMLElement);
+      const sheet = screen.getByRole("dialog");
 
-      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-      const nameField = screen.getByLabelText("name");
+      const nameField = within(sheet).getByLabelText("name");
       fireEvent.change(nameField, { target: { value: "改名的源" } });
       fireEvent.blur(nameField);
 
@@ -1673,348 +1250,143 @@ describe("config center", () => {
     }
   });
 
-  it("offers no save button at all, only the auto-save state", () => {
-    // The user's instruction: edits save themselves. A save button is not only redundant, it is a
-    // decision the user should not have to make — whether the typo they are about to fix is stored
-    // yet. What replaces it is a status, which cannot be pressed at the wrong moment.
-    //
-    // The unparseable-text branch is covered where it lives, in `config-autosave.test.ts`: the
-    // visual view always re-serialises valid JSON, so it cannot be driven to produce broken text,
-    // and jsdom cannot type into the CodeMirror view that can.
-    renderCenter();
-    openRawTab();
+  /**
+   * Editing a source from its own drawer.
+   *
+   * **This is the capability the 原始配置 tab used to hold.** The user asked for that tab gone — "用户
+   * 完全能看懂的是源列表里的内容，点开该资源查看抽屉里的详情" — so the fields moved to the drawer. If these
+   * do not work, deleting the tab removes the only way to fix a source's address, and a source with a
+   * typo in it can only be deleted and re-imported.
+   */
+  describe("editing a source from its drawer", () => {
+    /** Opens the drawer for the named source. */
+    function openDrawerFor(name: string) {
+      const row = screen
+        .getAllByRole("row")
+        .find((r) => r.textContent?.includes(name));
+      fireEvent.click(row as HTMLElement);
+      return screen.getByRole("dialog");
+    }
 
-    expect(screen.queryByRole("button", { name: /保存改动/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /^保存$/ })).not.toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "自动保存状态" })).toHaveTextContent("已自动保存");
-  });
-
-  it("edits a source through the visual view and writes it back", async () => {
-    // The point of the visual editor: changing a field is typing in a box, and the result reaches
-    // storage. Asserted through the write, because a visual view that only updated its own state
-    // would still relabel the row.
-    vi.useFakeTimers();
-    try {
+    it("shows the source's editable fields", () => {
       renderCenter();
-      openRawTab();
+      const sheet = openDrawerFor("可用的源");
 
-      fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-      const nameField = screen.getByLabelText("name");
-      fireEvent.change(nameField, { target: { value: "改名后的源" } });
-      fireEvent.blur(nameField);
+      // The same fields the visual editor offered, in the same order, labelled with the file's own
+      // key names because those are what the configuration contains.
+      expect(within(sheet).getByText("编辑")).toBeInTheDocument();
+      expect(within(sheet).getByLabelText("name")).toHaveValue("可用的源");
+      expect(within(sheet).getByLabelText("api")).toHaveValue(
+        "https://example.com/api.php/provide/vod/",
+      );
+    });
 
-      // The row's label follows, which is the visual view reading its own document.
-      expect(screen.getByRole("button", { name: "编辑 改名后的源" })).toBeInTheDocument();
-      // The other entry is untouched.
-      expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
+    it("writes an edit back to the configuration", async () => {
+      // Asserted through the write: a form that only relabelled the header would pass any check made
+      // against the screen.
+      vi.useFakeTimers();
+      try {
+        renderCenter();
+        const sheet = openDrawerFor("可用的源");
 
-      vi.mocked(replaceAllConfigDocuments).mockClear();
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(1000);
+        const nameField = within(sheet).getByLabelText("name");
+        fireEvent.change(nameField, { target: { value: "改过的名字" } });
+        fireEvent.blur(nameField);
+
+        vi.mocked(replaceAllConfigDocuments).mockClear();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+
+        expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
+        const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
+        expect(written.rawConfig).toContain("改过的名字");
+        // The sibling entry is untouched, so the edit landed on the located entry only.
+        expect(written.rawConfig).toContain("不可用的源");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("refuses to empty a required field, and says why", () => {
+      // The same refusal the visual editor made, for the same reason: an entry whose address is gone
+      // cannot work, and the reason would be invisible in the list.
+      renderCenter();
+      const sheet = openDrawerFor("可用的源");
+
+      const apiField = within(sheet).getByLabelText("api");
+      fireEvent.change(apiField, { target: { value: "" } });
+      fireEvent.blur(apiField);
+
+      expect(screen.getByText("没有修改")).toBeInTheDocument();
+      expect(screen.getByText(/必填/)).toBeInTheDocument();
+      // Nothing was half-applied: the field still holds the stored address.
+      expect(within(sheet).getByLabelText("api")).toHaveValue(
+        "https://example.com/api.php/provide/vod/",
+      );
+    });
+
+    it("marks a required field, and only the required ones", () => {
+      renderCenter();
+      const sheet = openDrawerFor("可用的源");
+
+      // `api` is required; `name` is not, because the parser names an unnamed entry itself.
+      expect(within(sheet).getAllByText("必需").length).toBeGreaterThan(0);
+      const apiLabel = within(sheet).getByLabelText("api").closest("label");
+      const nameLabel = within(sheet).getByLabelText("name").closest("label");
+      expect(apiLabel?.textContent).toContain("必需");
+      expect(nameLabel?.textContent).not.toContain("必需");
+    });
+
+    it("says why it offers no form when the entry cannot be located", () => {
+      // The address is what the entry is found by, so a source claiming an address the file does not
+      // contain cannot be edited. Guessing would write another entry's fields, so the drawer refuses
+      // and explains instead of showing a form that would corrupt the file.
+      renderCenter();
+      act(() => {
+        useAppStore.setState({
+          rawConfig: JSON.stringify({
+            sites: [{ key: "ok", name: "可用的源", api: "https://different.example/api" }],
+          }),
+        });
       });
 
-      expect(replaceAllConfigDocuments).toHaveBeenCalledTimes(1);
-      const written = vi.mocked(replaceAllConfigDocuments).mock.calls[0][0];
-      expect(written.rawConfig).toContain("改名后的源");
-      expect(written.rawConfig).toContain("不可用的源");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+      const sheet = openDrawerFor("可用的源");
 
-  it("refuses to empty a required field, and says why", () => {
-    // Writing an empty address would leave an entry that cannot work, with the reason invisible.
-    renderCenter();
-    openRawTab();
-    fireEvent.click(screen.getByRole("button", { name: "编辑 可用的源" }));
-
-    const apiField = screen.getByLabelText("api");
-    fireEvent.change(apiField, { target: { value: "" } });
-    fireEvent.blur(apiField);
-
-    expect(screen.getByText(/必填/)).toBeInTheDocument();
-    // The entry is still listed under its original name, so nothing was half-applied.
-    expect(screen.getByRole("button", { name: "编辑 可用的源" })).toBeInTheDocument();
-  });
-
-  it("removes a source from the configuration text", () => {
-    // The list removes a parsed source; this edits the file. Both are wanted, and they are
-    // different operations.
-    renderCenter();
-    openRawTab();
-
-    fireEvent.click(screen.getByRole("button", { name: "删除 可用的源" }));
-
-    expect(screen.queryByRole("button", { name: "编辑 可用的源" })).not.toBeInTheDocument();
-    // The other entry is untouched.
-    expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
-  });
-
-  it("adds a source carrying the fields the section needs", () => {
-    renderCenter();
-    openRawTab();
-
-    fireEvent.click(screen.getByRole("button", { name: "添加影视源" }));
-
-    // Three entries now: the two fixtures plus the new one, which is named by its position until
-    // it has a name.
-    const sites = screen.getByRole("button", { name: /^影视源/ });
-    expect(within(sites).getByText("3")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "编辑 第 3 项" })).toBeInTheDocument();
-  });
-
-  it("finds an entry by name or address", () => {
-    // With 340 entries the search is the difference between a usable list and a wall.
-    renderCenter();
-    openRawTab();
-
-    fireEvent.change(screen.getByLabelText("搜索配置项"), {
-      target: { value: "不可用" },
+      expect(within(sheet).getByText("编辑")).toBeInTheDocument();
+      expect(within(sheet).getByText(/无法在配置文本里确定这一条的位置/)).toBeInTheDocument();
+      expect(within(sheet).queryByLabelText("api")).not.toBeInTheDocument();
     });
 
-    expect(screen.getByRole("button", { name: "编辑 不可用的源" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "编辑 可用的源" })).not.toBeInTheDocument();
-  });
-
-  it("warns before a visual edit would drop comments", () => {
-    // Re-serialising normalises formatting and drops comments. Telling the user first is the
-    // difference between a considered choice and silent loss of text they wrote.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: "{\n  // 注释\n  sites: [],\n}",
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-
-    expect(screen.getByText(/可视化模式保存时会重新排版并去掉注释/)).toBeInTheDocument();
-  });
-
-  it("explains a configuration it cannot open visually", () => {
-    // "Nothing here" and "I cannot read this" need different actions, so the failure is stated
-    // rather than shown as an empty list.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({ rawConfig: "{ sites: [", normalizedConfig: "{}" });
-    });
-    openRawTab();
-
-    expect(screen.getByText("无法以可视化方式打开")).toBeInTheDocument();
-    expect(screen.getByText(/切换到「代码模式」/)).toBeInTheDocument();
-  });
-
-  it("clears the settings Moseek does not read, in one action", () => {
-    // These belong to the TVBox client — a decoder choice, ad filters, a wallpaper — and no code
-    // path in Moseek reads any of them; the export writes the normalized snapshot, which drops them
-    // anyway. Measured on the owner's configuration: 9,134 of 50,419 bytes never leave the app.
-    // So clearing them is offered directly instead of leaving the user to work it out.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
-          wallpaper: "https://wall.example/1.jpg",
-          ads: ["ad.example"],
-          ijk: [{ group: "软解码" }],
-        }),
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-
-    expect(screen.getByText("其他设置")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /清理全部 3 项/ }));
-
-    // Gone from the settings, and the sources the application does use are untouched.
-    expect(screen.queryByLabelText("wallpaper")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("ads")).not.toBeInTheDocument();
-    expect(screen.queryByText("其他设置")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "编辑 可用的源" })).toBeInTheDocument();
-  });
-
-  it("removes one setting without touching the others", () => {
-    // Clearing a setting's box already deleted the key, but an empty box reads as "no value" rather
-    // than "this key is gone" — so the row states it.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
-          wallpaper: "https://wall.example/1.jpg",
-          ads: ["ad.example"],
-        }),
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-
-    fireEvent.click(screen.getByRole("button", { name: "删除设置 wallpaper" }));
-
-    expect(screen.queryByLabelText("wallpaper")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("ads")).toBeInTheDocument();
-  });
-
-  it("marks repeated parser addresses and can drop them", () => {
-    // The resolver tries the first 12 usable services in the file's own order, so a repeat spends
-    // one of those places on an attempt already made. Measured on the owner's configuration: 75
-    // entries, 57 distinct addresses, and the twelfth usable one sits at position 14.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
-          parses: [
-            { name: "解析甲", type: 1, url: "https://jx.example/?url=" },
-            { name: "解析乙", type: 1, url: "https://other.example/?url=" },
-            { name: "解析甲的重复", type: 1, url: "https://jx.example/?url=" },
+    it("edits a live source through the lives section, not sites", () => {
+      // A live entry's address field is `url`, and it lives under `lives`. Addressing the wrong
+      // section would silently match nothing — these operations no-op on an unknown index, so the
+      // form would appear to work and write nothing.
+      renderCenter();
+      act(() => {
+        useAppStore.setState({
+          sources: [
+            source({
+              key: "live1",
+              name: "直播源一",
+              sourceType: "live",
+              api: "https://live.example/a.m3u",
+            }),
           ],
-        }),
-        normalizedConfig: "{}",
+          rawConfig: JSON.stringify({
+            sites: [],
+            lives: [{ key: "live1", name: "直播源一", url: "https://live.example/a.m3u" }],
+          }),
+          // A live source with no test result is hidden by the default 适配器状态 filter, so the row has
+          // to be asked for the way a user would ask for it.
+          sourceFilter: clearedSourceFilter,
+        });
       });
+
+      const sheet = openDrawerFor("直播源一");
+      expect(within(sheet).getByLabelText("url")).toHaveValue("https://live.example/a.m3u");
+      expect(within(sheet).queryByLabelText("api")).not.toBeInTheDocument();
     });
-    openRawTab();
-    openVisualSection("解析服务");
-
-    // One row is marked, and the marker carries the reason rather than just the word.
-    expect(screen.getAllByText("重复")).toHaveLength(1);
-    expect(screen.getByText("重复")).toHaveAttribute(
-      "title",
-      expect.stringContaining("占掉一次尝试机会"),
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: /去掉 1 条重复地址/ }));
-
-    // The first of each address survives, the repeat is gone, and the button goes with it.
-    expect(screen.getByRole("button", { name: "编辑 解析甲" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "编辑 解析乙" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "编辑 解析甲的重复" })).not.toBeInTheDocument();
-    expect(screen.queryByText("重复")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /去掉 .* 条重复地址/ })).not.toBeInTheDocument();
-  });
-
-  it("offers no cleanup when there is nothing to clean", () => {
-    // A control that would remove nothing cannot be acted on, so its absence is also information:
-    // it is how a user learns the file has no repeats.
-    renderCenter();
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({
-          sites: [{ key: "ok", name: "可用的源", api: supported.api }],
-          parses: [
-            { name: "解析甲", type: 1, url: "https://jx.example/?url=" },
-            { name: "解析乙", type: 1, url: "https://other.example/?url=" },
-          ],
-        }),
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-    openVisualSection("解析服务");
-
-    expect(screen.queryByRole("button", { name: /去掉 .* 条重复地址/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /清理全部/ })).not.toBeInTheDocument();
-  });
-
-  it("gives the adapter list the same toolbar as the source list", () => {
-    // Both lists are read the same way — search, then a count — so a reader who has used one already
-    // knows how to use the other. The adapter tab used to have no search at all, and its counts sat
-    // on a separate line as a second set of controls doing the filter's job. There is no filter here
-    // any more, and deliberately so: every registered adapter can run, so a 状态 filter would offer
-    // options that all lead to the same eight rows.
-    renderCenter();
-    openAdaptersTab();
-
-    const card = adapterCard();
-    expect(
-      within(card).getByPlaceholderText("搜索适配器名称或说明"),
-    ).toBeInTheDocument();
-    // The count reads the same as the source list's.
-    expect(within(card).getByText(/^共 \d+ 类$/)).toBeInTheDocument();
-  });
-
-  it("narrows the adapter list by search", () => {
-    renderCenter();
-    openAdaptersTab();
-
-    const card = adapterCard();
-    const bodyRows = () =>
-      within(card)
-        .getAllByRole("row")
-        .filter((row) => row.closest("tbody"));
-    const rowsBefore = bodyRows().length;
-
-    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
-      target: { value: "声明式" },
-    });
-
-    const rows = bodyRows();
-    expect(rows.length).toBeLessThan(rowsBefore);
-    // Everything left matches the keyword, so the search is not just hiding rows arbitrarily.
-    for (const row of rows) {
-      expect(row.textContent).toMatch(/声明式/);
-    }
-  });
-
-  it("counts the rows the list is actually showing", () => {
-    // The count has to answer "how many rows will I get", which is the same question the removed
-    // filter's numbers were supposed to answer. It counted sources once, reading "可执行 26 个源"
-    // beside a choice that revealed 9 rows; now it counts the rows themselves, so it cannot drift
-    // from what is on screen — including while a search is narrowing it.
-    renderCenter();
-    openAdaptersTab();
-
-    const card = adapterCard();
-    const bodyRows = () =>
-      within(card)
-        .getAllByRole("row")
-        .filter((row) => row.closest("tbody"));
-
-    const shown = bodyRows().length;
-    expect(shown).toBeGreaterThan(0);
-    expect(within(card).getByText(`共 ${shown} 类`)).toBeInTheDocument();
-
-    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
-      target: { value: "声明式" },
-    });
-    const narrowed = bodyRows().length;
-    expect(narrowed).toBeLessThan(shown);
-    expect(within(card).getByText(`共 ${narrowed} 类`)).toBeInTheDocument();
-  });
-
-  it("updates the count as the search narrows the list", () => {
-    // The count is the feedback that the search did something; a stale count beside a filtered
-    // list is worse than no count.
-    renderCenter();
-    openAdaptersTab();
-
-    const card = adapterCard();
-    const countBefore = within(card).getByText(/^共 \d+ 类$/).textContent;
-
-    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
-      target: { value: "脚本" },
-    });
-
-    const countAfter = within(card).getByText(/^共 \d+ 类$/).textContent;
-    expect(countAfter).not.toBe(countBefore);
-    const claimed = Number(countAfter?.replace(/\D/g, "") ?? "0");
-    const bodyRows = within(card)
-      .getAllByRole("row")
-      .filter((row) => row.closest("tbody"));
-    expect(bodyRows.length).toBe(claimed);
-  });
-
-  it("explains an empty search result in terms of the search", () => {
-    // "切换筛选条件" was the only hint, but a keyword that matches nothing is not a filter problem.
-    renderCenter();
-    openAdaptersTab();
-
-    fireEvent.change(screen.getByPlaceholderText("搜索适配器名称或说明"), {
-      target: { value: "不存在的适配器名字" },
-    });
-
-    expect(screen.getByText("没有匹配的适配器")).toBeInTheDocument();
-    expect(screen.getByText(/换个关键词/)).toBeInTheDocument();
   });
 
   it("never shows 部分支持, which no code path could produce", () => {
@@ -2163,40 +1535,6 @@ describe("config center", () => {
     expect(
       screen.getByRole("switch", { name: "启用 状态过期的源" }),
     ).toBeInTheDocument();
-  });
-
-  it("lists only adapters that can run, with no status column to read", () => {
-    // The table used to carry a 状态 column and a matching filter dropdown. Five registry entries
-    // could not run, so both made sense; now every entry can, which would make the column say
-    // 可执行 on all eight rows and every filter option lead to the same eight rows. Both are gone —
-    // 部分支持 was removed from this page for exactly the same reason.
-    renderCenter();
-    openAdaptersTab();
-
-    expect(screen.queryByLabelText("筛选适配器")).not.toBeInTheDocument();
-    const header = screen
-      .getAllByRole("row")[0];
-    expect(header.textContent).toContain("适配器");
-    expect(header.textContent).not.toContain("状态");
-    // Every row is an adapter Moseek can actually run, so none of them explains itself by naming a
-    // plugin family for another client.
-    for (const gone of [
-      "Drpy JS",
-      "csp_AppMao",
-      "远程 JAR",
-      "Spider 运行时",
-      "JS 扩展源",
-    ]) {
-      expect(screen.queryByText(new RegExp(gone)), gone).not.toBeInTheDocument();
-    }
-  });
-
-  it("names the adapter tab in plain words", () => {
-    renderCenter();
-
-    // "矩阵" was the hard word; the tab now just says what the panel holds.
-    expect(screen.getByRole("tab", { name: "适配器" })).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: /矩阵/ })).not.toBeInTheDocument();
   });
 
   it("uses one word for an execution state, whichever surface shows it", () => {
@@ -4033,58 +3371,6 @@ describe("config center", () => {
     fireEvent.click(screen.getByRole("button", { name: /全部测速/ }));
 
     expect(screen.getByRole("button", { name: /取消测速/ })).toBeInTheDocument();
-  });
-
-  it("caps a long section and offers the rest on request", () => {    // Measured on the owner's configuration: 影视源 holds 695 entries, and every one was mounted the
-    // moment the dialog opened — that is the delay before it appears and the unresponsiveness inside
-    // it, and it is not a parsing cost. A section that long is not read top to bottom either; it is
-    // searched, or scrolled to a name the user already has in mind.
-    renderCenter();
-    const sites = Array.from({ length: 120 }, (_, index) => ({
-      key: `k${index}`,
-      name: `源 ${index}`,
-      api: `https://s${index}.example/api.php/provide/vod`,
-    }));
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({ sites }),
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-
-    // 50 of the 120 are mounted, and the rest are one click away.
-    expect(screen.getByRole("button", { name: "编辑 源 0" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "编辑 源 49" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "编辑 源 50" })).not.toBeInTheDocument();
-    expect(screen.getByText(/已显示 50 \/ 120 条/)).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "显示全部" }));
-    expect(screen.getByRole("button", { name: "编辑 源 119" })).toBeInTheDocument();
-    expect(screen.queryByText(/已显示/)).not.toBeInTheDocument();
-  });
-
-  it("never caps a search, because that is when a cap would hide what was asked for", () => {
-    // The one case where showing only part of the matches is actively wrong.
-    renderCenter();
-    const sites = Array.from({ length: 120 }, (_, index) => ({
-      key: `k${index}`,
-      name: `匹配源 ${index}`,
-      api: `https://s${index}.example/api.php/provide/vod`,
-    }));
-    act(() => {
-      useAppStore.setState({
-        rawConfig: JSON.stringify({ sites }),
-        normalizedConfig: "{}",
-      });
-    });
-    openRawTab();
-
-    fireEvent.change(screen.getByLabelText("搜索配置项"), { target: { value: "匹配源" } });
-
-    // All 120 matches are rendered, with no "显示全部" in the way.
-    expect(screen.getByRole("button", { name: "编辑 匹配源 119" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "显示全部" })).not.toBeInTheDocument();
   });
 
   /**

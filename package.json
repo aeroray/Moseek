@@ -17,8 +17,6 @@
     "release:check": "node scripts/verify-release-version.mjs"
   },
   "dependencies": {
-    "@codemirror/lang-json": "^6.0.2",
-    "@codemirror/state": "^6.7.4",
     "@tanstack/react-query": "^5.90.2",
     "@tanstack/react-virtual": "^3.14.13",
     "@tauri-apps/api": "^2.12.1",
@@ -29,7 +27,6 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "cn": "^0.3.0",
-    "codemirror": "^6.0.2",
     "hls.js": "^1.6.10",
     "json5": "^2.2.3",
     "lucide-react": "^0.545.0",
