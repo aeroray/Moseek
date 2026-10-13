@@ -2,33 +2,23 @@
 
 English · [简体中文](README.md)
 
-A Windows desktop player for TVBox / CatVod-style configurations: import one config file, and browse
-a film library and live TV. **Runs declarative configurations only — no remote scripts, JARs, or
-spiders are ever executed.**
+A Windows desktop player: import a TVBox / CatVod-style configuration, and browse a film library and
+live TV. **Nothing in a configuration is ever executed — remote scripts, JARs and spiders are refused.**
 
 ![Library](docs/images/library.png)
 
 ## Features
 
-- **Movies & live TV** — CMS catalogue browsing and search; grouped live channels with HLS and FLV
-  playback.
-- **Honest source grading** — every source is classified on import: usable ones work, unusable ones
-  say why. Nothing is dropped silently.
-- **Import what you see** — a configuration is listed before it lands (films / live / resolvers);
+- **Movies and live TV** — category browsing, search, episode selection; grouped channels, TV guides
+  and per-line testing. HLS and FLV both play.
+- **Sources are identified before they are used** — each one is classified on import: working sources
+  work, broken ones say why. Nothing is dropped silently.
+- **See it before you import it** — a configuration is listed in full first (films / live / resolvers);
   you tick what you want.
-- **One configuration** — repeated imports merge and deduplicate into a single document. Favourites,
-  footprints and playback progress are stored separately from configurations.
-- **All network traffic goes through Rust** — pages, guides, media streams and posters all pass one
-  policy gateway; the webview never contacts a media host directly.
-
-## Screenshots
-
-| | |
-|---|---|
-| ![Configuration](docs/images/config.png) | ![Source detail](docs/images/source-detail.png) |
-| Configuration: sources, tests, enablement | Source detail: read-only, with edit on demand |
-| ![Import](docs/images/import.png) | ![Favourites](docs/images/favorites.png) |
-| Import: list first, tick, then import | Favourites & footprints: pick up where you left off |
+- **One configuration** — repeated imports merge and deduplicate. Favourites, footprints and playback
+  progress are stored separately from configurations.
+- **One network gate** — everything passes a Rust network layer that refuses loopback, private-range
+  and dangerous-scheme addresses.
 
 ## Download
 
@@ -49,11 +39,8 @@ Other commands: `pnpm test` (unit tests), `pnpm lint`, `pnpm typecheck`, `pnpm b
 
 ## What it does not do
 
-- It does not execute remote scripts, JARs or spiders — such sources are identified and **refused**,
-  not silently broken.
-- No mobile platforms.
-- It ships no sources. Without a configuration file it has nothing to play; use one you obtained
-  legitimately.
+- Windows only; no mobile platforms.
+- It ships no sources of its own. You need your own configuration file, obtained legitimately.
 
 ## Tech stack
 
