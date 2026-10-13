@@ -41,3 +41,16 @@ Evidence:
 Decision:
 `data-[size=*]:px-*` outranks a caller's `pl-8`, and tailwind-merge cannot reconcile different utility
 groups. Emit size geometry as plain classes and split left/right padding.
+
+## MC-DEC-20261008-a1000005 — Overlays tint the icon, not the panel
+
+Status: active
+Scope: area:frontend
+Subject: MC-SUBJ-20261008-a1000008
+Facet: architecture
+Evidence:
+- repo:src/components/ui/toast.tsx
+
+Decision:
+A toast body stays on `bg-card/95` with `shadow-xl backdrop-blur-md`; only the icon carries the status
+colour. `--status-*-bg` is a badge tint — a 12% fill across a 24rem panel reads as another application.
