@@ -63,7 +63,20 @@ git push origin v0.2.0
 
 工作流会：校验版本号与标签一致 → 读取发布说明 → 构建并签名安装包 → 创建 GitHub Release → 上传 `latest.json`。
 
-目前只产出 Windows 的 NSIS 安装包；macOS 加入后，这个 job 会改成 `windows-latest` 与 `macos-latest` 的矩阵，签名密钥与 `latest.json` 也要按平台分别配置。
+**三个平台行并行构建**：Windows 产出 NSIS 安装包，macOS 按架构各出一份（`aarch64-apple-darwin` 给 Apple 芯片，`x86_64-apple-darwin` 给 Intel）。它们不会互相覆盖 `latest.json` —— tauri-action 会先读回已有清单，再合并进自己那一条平台记录。
+
+`latest.json` 里的平台键按架构分开（`darwin-aarch64`、`darwin-x86_64`），所以 macOS 必须分两个架构构建，通用二进制反而无法告诉 Intel 机器该取哪一片。
+
+### 关于签名
+
+这里有两套完全不同的签名，别混淆：
+
+| | 用途 | 成本 |
+|---|---|---|
+| **minisign**（`TAURI_SIGNING_PRIVATE_KEY`） | 给**自动更新**的载荷签名，应用只安装能验证通过的更新 | 免费，自己生成 |
+| **Apple 证书** | 让 macOS 信任应用本体（Gatekeeper） | **需要每年 99 美元的开发者账号** |
+
+本项目**不使用 Apple 证书**：`tauri.macos.conf.json` 里设了 `signingIdentity: "-"`，即 ad-hoc 签名。这是开源免费软件的合理取舍——代价是 macOS 用户首次打开时需手动放行（右键 →「打开」，或在「系统设置 → 隐私与安全性」里点「仍要打开」）。README 的下载说明应告知这一点。
 
 ## 版本号为什么必须一致
 
@@ -90,7 +103,10 @@ git push origin v0.2.0
 # 需要私钥才能产出签名，否则 updater 无法使用
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.tauri\moseek-updater.key" -Raw
 $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "moseek-updater"
-pnpm tauri build --bundles nsis
+pnpm tauri build
 ```
 
-产物：`src-tauri/target/release/bundle/nsis/`，含 `Moseek_<版本>_x64-setup.exe` 与同名 `.sig`。
+不用传 `--bundles`：产出哪些包由平台配置决定，CLI 会自动读 `tauri.windows.conf.json` 或 `tauri.macos.conf.json`。
+
+- Windows 产物：`src-tauri/target/release/bundle/nsis/`，含 `Moseek_<版本>_x64-setup.exe` 与同名 `.sig`。
+- macOS 产物：`src-tauri/target/release/bundle/dmg/` 与 `.../macos/`。在 Apple 芯片上要给 Intel 出包时加 `--target x86_64-apple-darwin`。

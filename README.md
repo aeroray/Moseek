@@ -26,8 +26,13 @@ refused.**
 
 ## Download
 
-Windows installer (NSIS) from [Releases](https://github.com/aeroray/Moseek/releases). The app checks
-for updates on GitHub Releases and offers them in-app.
+Windows installer (NSIS), or a macOS `.dmg`, from
+[Releases](https://github.com/aeroray/Moseek/releases). The app checks for updates on GitHub Releases
+and offers them in-app.
+
+> **macOS:** the build is ad-hoc signed, not notarised — a paid Apple developer account is not
+> something a free project should need. On first launch, right-click the app and choose **Open**, or
+> allow it under **System Settings → Privacy & Security**. After that it starts normally.
 
 ## Build from source
 

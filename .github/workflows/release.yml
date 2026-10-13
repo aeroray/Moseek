@@ -23,11 +23,24 @@ permissions:
 
 jobs:
   release:
-    # Windows today; macOS is planned. The job is not a matrix yet because only the NSIS bundle
-    # exists — a second runner would produce an artifact nothing consumes. When the macOS bundle is
-    # configured, this becomes a matrix over windows-latest and macos-latest, and the signing secrets
-    # and updater manifest gain their per-platform entries.
-    runs-on: windows-latest
+    # One row per artifact that ships. The macOS rows are split by architecture because the updater
+    # manifest keys them separately (`darwin-aarch64` and `darwin-x86_64`), and a universal binary
+    # would not tell an Intel Mac which slice to take.
+    #
+    # The rows do not clobber each other's `latest.json`: tauri-action reads the existing manifest and
+    # merges its own platform entries into it (`upload-version-json.ts`), which is what makes a matrix
+    # safe here rather than a last-writer-wins race.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-latest
+            target: ""
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.platform }}
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
@@ -50,11 +63,17 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          # `matrix.target` is either a cross target or empty, so it can be passed through directly.
+          # Only the macOS rows need one; asking elsewhere would download toolchains never used.
+          targets: ${{ matrix.target }}
 
       - name: Cache the Rust build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # A per-target cache, or the two macOS rows would fight over one directory.
+          key: ${{ matrix.target || 'default' }}
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -76,8 +95,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The private half of the minisign keypair whose public half is in tauri.conf.json. The
-          # installer is signed with it, and the app refuses to install anything that does not verify.
+          # The private half of the minisign keypair whose public half is in tauri.conf.json. This
+          # signs the *updater* payload, not the app bundle, and every platform needs it. It is not an
+          # Apple certificate: the macOS build is ad-hoc signed (`signingIdentity: "-"`), which is what
+          # lets a free open-source project ship a working macOS build with no paid developer account.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
@@ -91,4 +112,6 @@ jobs:
           prerelease: false
           # Writes latest.json, the manifest the in-app updater reads.
           uploadUpdaterJson: true
-          args: --bundles nsis
+          # No `--bundles` here: which bundles to produce is per-platform, and that lives in
+          # tauri.windows.conf.json and tauri.macos.conf.json so the CLI picks them up automatically.
+          args: ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
