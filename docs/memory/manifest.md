@@ -74,6 +74,10 @@ Discover optional memory without loading it. Entries here are not default loads.
   - activation: path-or-explicit
   - paths: `src/features/config/**`, `src/lib/adapters.ts`, `src/lib/config-*.ts`
   - description: Import, parse, classify, prune, and merge configuration documents.
+- `areas/config-schema.md`
+  - activation: path-or-explicit
+  - paths: `src/features/config/config-schema.ts`, `src/features/config/config-parser.ts`
+  - description: What an incoming configuration file may contain, and how unfamiliar shapes are accepted.
 - `areas/player.md`
   - activation: path-or-explicit
   - paths: `src/features/player/**`, `src/features/live/**`

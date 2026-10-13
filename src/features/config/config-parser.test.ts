@@ -220,6 +220,48 @@ describe("Moseek config parser", () => {
     expect(result.sources[1]?.api).toBe("https://live.example/channels.m3u");
   });
 
+  it("accepts an explicit null where a field is optional", () => {
+    // **This is the round-trip defect, reproduced without the user's file.** Moseek's export
+    // serialises the whole source record, so fields the store no longer uses are written as an
+    // explicit `null` — measured on a real export, `scriptArchiveId` appeared 39 times. `.optional()`
+    // accepts only a MISSING key, so every file this app exported failed to import with
+    // `解析失败（字段 sites.0.scriptArchiveId）：Invalid input`, and nothing in the message said the
+    // file had been written by the app that refused it.
+    const result = parseConfigText(`{
+      sites: [{
+        key: "null-field源",
+        name: "含 null 的源",
+        api: "https://cms.example/api",
+        scriptArchiveId: null,
+        type: null,
+      }],
+      lives: [],
+    }`);
+
+    expect(result.ok).toBe(true);
+    expect(result.sources[0]?.key).toBe("null-field源");
+    // Normalised to absent rather than passed through. `scriptArchiveId` is not part of
+    // `SourceRecord` — it is a leftover the exporter still writes — so the assertion reads the parsed
+    // record as a plain object rather than through the typed shape.
+    expect(
+      (result.sources[0] as unknown as Record<string, unknown>).scriptArchiveId,
+    ).toBeUndefined();
+  });
+
+  it("still rejects a null where the value is required", () => {
+    // The fix must not become "null is always fine". `api` is required for a CMS source, and a null
+    // there is a genuinely unusable entry rather than an optional field spelled explicitly.
+    const result = parseConfigText(`{
+      sites: [{ key: "broken", name: "缺地址", api: null }],
+      lives: [],
+    }`);
+
+    // The document still parses — the entry is reported rather than failing the file — but it must
+    // not be called usable.
+    expect(result.ok).toBe(true);
+    expect(result.sources[0]?.capability).not.toBe("supported");
+  });
+
   it("makes duplicate source keys unique across CMS and live sources", () => {
     const result = parseConfigText(`{
       sites: [

@@ -1,21 +1,51 @@
 import { z } from "zod";
 
+/**
+ * The three ways a configuration says "this field has no value": it omits the key, it writes an empty
+ * string, or it writes `null`.
+ *
+ * **`null` and absent are different to Zod, and JSON treats them as the same idea.** Every optional
+ * field below used to accept only the first two, so a file that spelled a value `null` failed
+ * validation for the whole document. That is not a hypothetical: Moseek's own export serialises the
+ * source record, so it wrote `"scriptArchiveId": null` on all 39 entries, and re-importing the file
+ * produced `解析失败（字段 sites.0.scriptArchiveId）：Invalid input` — the app could not read what it
+ * had just written. The same shape appears in hand-edited files and in other clients' exports, which
+ * is why this is handled once here rather than field by field.
+ *
+ * Normalising to `undefined` rather than widening each union keeps one spelling of "no value"
+ * downstream, where callers already branch on `undefined`.
+ */
+const absentWhenNull = (value: unknown) => (value === null ? undefined : value);
+
 const optionalText = z.preprocess((value) => {
-  if (typeof value !== "string") return value;
-  const trimmed = value.trim();
+  const unwrapped = absentWhenNull(value);
+  if (typeof unwrapped !== "string") return unwrapped;
+  const trimmed = unwrapped.trim();
   return trimmed.length > 0 ? trimmed : undefined;
 }, z.string().min(1).optional());
 
 const optionalConfigText = z.preprocess((value) => {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
+  const unwrapped = absentWhenNull(value);
+  if (typeof unwrapped === "string") {
+    const trimmed = unwrapped.trim();
     return trimmed.length > 0 ? trimmed : undefined;
   }
-  if (value !== null && typeof value === "object") {
-    return JSON.stringify(value);
+  if (typeof unwrapped === "object") {
+    return JSON.stringify(unwrapped);
   }
-  return value;
+  return unwrapped;
 }, z.string().min(1).optional());
+
+/**
+ * A number-or-string field that may also be absent or `null`.
+ *
+ * `type` is a TVBox dialect number but some files write it as a string, and `scriptArchiveId` is the
+ * leftover of the removed script runtime — its type allows both and its value is now always null.
+ */
+const optionalNumberOrText = z.preprocess(
+  absentWhenNull,
+  z.union([z.number().int(), z.string()]).optional(),
+);
 
 /**
  * The fields a configuration spells as a flag.
@@ -50,9 +80,10 @@ export const rawFlagFields: ReadonlySet<string> = new Set(RAW_FLAG_FIELDS);
  * still reported.
  */
 const optionalBoolean = z.preprocess((value) => {
-  if (value === 0 || value === "0" || value === "false") return false;
-  if (value === 1 || value === "1" || value === "true") return true;
-  return value;
+  const unwrapped = absentWhenNull(value);
+  if (unwrapped === 0 || unwrapped === "0" || unwrapped === "false") return false;
+  if (unwrapped === 1 || unwrapped === "1" || unwrapped === "true") return true;
+  return unwrapped;
 }, z.boolean().optional());
 
 export const RawSiteSchema = z
@@ -60,8 +91,8 @@ export const RawSiteSchema = z
     id: optionalText,
     key: optionalText,
     name: optionalText,
-    scriptArchiveId: z.union([z.number().int(), z.string()]).optional(),
-    type: z.union([z.number().int(), z.string()]).optional(),
+    scriptArchiveId: optionalNumberOrText,
+    type: optionalNumberOrText,
     api: optionalText,
     logo: optionalText,
     desc: optionalText,
@@ -84,7 +115,7 @@ export const RawLiveSchema = z
     id: optionalText,
     key: optionalText,
     name: optionalText,
-    type: z.union([z.number().int(), z.string()]).optional(),
+    type: optionalNumberOrText,
     url: optionalText,
     source: optionalText,
     api: optionalText,
