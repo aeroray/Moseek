@@ -792,6 +792,179 @@ function getSiteProtocol(
   return "unknown";
 }
 
+/**
+ * Unwraps a TVBox `proxy://` line into the address it really points at.
+ *
+ * **A second spelling of the same idea as `unwrapLocalProxyUrl` above, and it needs its own reader.**
+ * That one handles the HTTP form — `http://127.0.0.1:9978/proxy?do=live&url=<address>` — which is what
+ * published configurations usually carry. This one handles the private scheme form, which is what the
+ * user's configuration carries:
+ *
+ *     proxy://do=live&type=txt&ext=aHR0cDovL2hvbWUuanVuZGllLnRvcDo4MS9DYXQvdHYvbGl2ZS50eHQ=
+ *
+ * The shape is TVBox's: the `ext` parameter holds the address **base64-encoded**, and `do=live` says
+ * what to do with it. Measured against the user's own entry, decoding `ext` yields
+ * `http://home.jundie.top:81/Cat/tv/live.txt`, which is the same host their other working live sources
+ * use — so the address is real and this is the only thing that was not being read.
+ *
+ * **Only `do=live` with an `http(s)` result is unwrapped.** A `proxy://` line pointing at TVBox's own
+ * local server (`do=parse`, `do=danmaku`) is not a playlist, and returning a decoded address for it
+ * would claim a source is usable when nothing can fetch it. Anything unrecognised is returned
+ * unchanged, which leaves it classified as a private protocol — the honest answer.
+ */
+export function unwrapLiveProxyLine(value: string): string {
+  const trimmed = value.trim();
+  if (!/^proxy:\/\//i.test(trimmed)) return trimmed;
+
+  // **The parameters are the path, not the query.** `proxy://do=live&type=txt&ext=…` has no `?`, so a
+  // URL parser reads `do=live&type=txt&ext=…` as the HOST and `searchParams` comes back empty — the
+  // first version of this did exactly that and silently decoded nothing. The text after the scheme is
+  // taken verbatim and parsed as a query string instead.
+  const rawParams = trimmed.slice("proxy://".length);
+  const action = readRawParameter(rawParams, "do");
+  if (action.toLowerCase() !== "live") return trimmed;
+
+  // **`ext` is read from the raw text rather than from `params`.** The value is base64 followed by an
+  // optional template, and the template's parameters are separated by `&` — which is also what
+  // separates the proxy's own parameters. `URLSearchParams` therefore splits `ext` at the first `&`
+  // and returns only the head of the template, dropping `&date={date}`. The first version of this did
+  // exactly that; the test caught it.
+  const ext = readRawParameter(rawParams, "ext");
+  if (!ext) return trimmed;
+
+  // Both forms appear: the bare base64 payload, and the same payload with `?ch={name}` template
+  // suffixes that TVBox consumes itself. Only the base64 head is decoded, and the remainder is kept
+  // when it is a usable template — dropping it would lose a per-channel guide address.
+  const suffixIndex = ext.search(/[?&#]/);
+  const head = suffixIndex >= 0 ? ext.slice(0, suffixIndex) : ext;
+  const suffix = suffixIndex >= 0 ? ext.slice(suffixIndex) : "";
+
+  const decoded = decodeBase64Text(head);
+  if (!decoded) return trimmed;
+  const address = decoded.trim();
+  if (!/^https?:\/\//i.test(address)) return trimmed;
+
+  // **A payload pointing back at the client's own server is not usable here.** The base64 sometimes
+  // holds the other spelling of a local proxy rather than a real list address. Returning it would
+  // claim the source is fetchable when the thing it names only exists while TVBox itself is running,
+  // so it is left wrapped and stays classified as a private protocol.
+  if (isLoopbackOrLocal(address)) return trimmed;
+
+  return `${address}${suffix}`;
+}
+
+/** Whether an address names this machine or a private network. */
+function isLoopbackOrLocal(value: string): boolean {
+  let host: string;
+  try {
+    host = new URL(value).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return (
+    host === "localhost" ||
+    host === "0.0.0.0" ||
+    host === "[::1]" ||
+    host.endsWith(".local") ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+  );
+}
+
+/**
+ * Decodes base64 that may be standard or URL-safe, padded or not.
+ *
+ * TVBox writes the payload with whatever produced it, and both alphabets appear in the wild. Node and
+ * the browser disagree about `atob` for the URL-safe alphabet and about missing padding, so both are
+ * normalised first. Returns `null` rather than throwing: a `proxy://` line that is not base64 is
+ * simply not one of these, and this function's caller already has an answer for that.
+ */
+function decodeBase64Text(value: string): string | null {
+  const normalised = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalised.padEnd(
+    normalised.length + ((4 - (normalised.length % 4)) % 4),
+    "=",
+  );
+  try {
+    // `atob` yields binary; the payload is UTF-8 text.
+    const binary = atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads one parameter out of a `key=value&key=value` string, without splitting inside a nested value.
+ *
+ * **Written by hand because `URLSearchParams` cannot express this.** The `ext` parameter's value is
+ * base64 followed by a template whose own parameters are `&`-separated — and the template's parameters
+ * look exactly like the proxy's. What distinguishes them is that the template starts after a `?`:
+ *
+ *     do=live&type=txt&ext=<base64>?ch={name}&date={date}
+ *                                        ↑ the nested part begins here
+ *
+ * So parsing walks the string and treats everything after a `?` as part of the preceding value. That
+ * is the shape TVBox writes, and the alternative — `URLSearchParams` — silently truncated the value at
+ * the first `&`, which the test for the template suffix caught.
+ */
+function readRawParameter(source: string, name: string): string {
+  let index = 0;
+  while (index < source.length) {
+    const equals = source.indexOf("=", index);
+    if (equals < 0) break;
+    const key = source.slice(index, equals);
+    const valueStart = equals + 1;
+    // The value runs to the next `&` — unless a `?` opened a nested parameter list first, in which
+    // case it runs to the end of the string.
+    let end = source.length;
+    const nested = source.indexOf("?", valueStart);
+    const nextAmp = source.indexOf("&", valueStart);
+    if (nextAmp >= 0 && (nested < 0 || nextAmp < nested)) {
+      end = nextAmp;
+    }
+    if (key === name) return source.slice(valueStart, end);
+    index = end + 1;
+  }
+  return "";
+}
+
+/**
+ * The address a live entry's `channels` lines point at, or `""` when it has none.
+ *
+ * TVBox lets one live entry carry several selectable lines instead of a single `url`:
+ *
+ *     {"channels": [{"name": "live", "urls": ["proxy://do=live&type=txt&ext=<base64>"]}],
+ *      "group": "redirect"}
+ *
+ * Moseek read only `url`/`source`/`api`, so such an entry arrived with no address and was reported as
+ * `直播源缺少 name 或 url/api 字段`: the source is valid and working in other clients, and here it was
+ * an empty row. **The entry itself is the important part** — the user's original configuration file
+ * still has this shape, so without this it would break again on the next import.
+ *
+ * Only the first usable line is taken. Moseek's live model is one address per source; the remaining
+ * lines are not lost from the stored document, because the raw text keeps the entry as written — this
+ * only decides which address the row uses. Picking the first is what TVBox itself does.
+ */
+function liveChannelsAddress(live: RawLive): string {
+  const channels = (live as { channels?: unknown }).channels;
+  if (!Array.isArray(channels)) return "";
+  for (const channel of channels) {
+    if (!channel || typeof channel !== "object" || Array.isArray(channel)) continue;
+    const urls = (channel as { urls?: unknown }).urls;
+    if (!Array.isArray(urls)) continue;
+    for (const url of urls) {
+      if (typeof url !== "string") continue;
+      const candidate = unwrapLiveProxyLine(url);
+      if (/^https?:\/\//i.test(candidate)) return candidate;
+    }
+  }
+  return "";
+}
+
 function classifyLiveSource(
   live: RawLive,
   index: number,
@@ -799,8 +972,10 @@ function classifyLiveSource(
 ): SourceRecord {
   const key = live.key ?? `live-${index + 1}`;
   const name = live.name ?? `直播源 ${index + 1}`;
+  // `channels` is consulted last: an entry that states a plain address is unambiguous, and only an
+  // entry that does not falls back to its line list.
   const api = resolveConfiguredUrl(
-    live.url ?? live.source ?? live.api ?? "",
+    live.url ?? live.source ?? live.api ?? liveChannelsAddress(live) ?? "",
     baseUrl,
   );
   const normalizedApi = api.toLowerCase();

@@ -110,6 +110,28 @@ export const RawSiteSchema = z
   })
   .passthrough();
 
+/**
+ * A live source's `channels` lines.
+ *
+ * TVBox lets one live entry carry several selectable lines instead of a single `url`:
+ *
+ *     {"channels": [{"name": "live", "urls": ["proxy://do=live&type=txt&ext=<base64>"]}],
+ *      "group": "redirect"}
+ *
+ * Moseek read only `url`/`source`/`api`, so such an entry arrived with no address at all and was
+ * reported as `直播源缺少 name 或 url/api 字段` — the source was in the file and working in other
+ * clients, and here it was an empty row. Measured on the user's own configuration: the entry is
+ * `live-15`/`live-14`, named `直播源 14` by the positional fallback, `api: ""`.
+ *
+ * **`z.unknown()` on the whole field, not a modelled array.** This part of the format is not one Moseek
+ * uses for anything except reading an address, and modelling it means every unexpected shape — a
+ * string, a null element, `urls` as a number — fails validation for the ENTIRE document. The parser
+ * walks it defensively instead, which is the same treatment `parses` already gets. An earlier version
+ * of this field did model the array and a `"channels": "not-an-array"` entry took the whole
+ * configuration down.
+ */
+const optionalChannels = z.preprocess(absentWhenNull, z.unknown().optional());
+
 export const RawLiveSchema = z
   .object({
     id: optionalText,
@@ -126,6 +148,7 @@ export const RawLiveSchema = z
     // fail validation for the whole configuration.
     ext: optionalConfigText,
     epg: optionalText,
+    channels: optionalChannels,
   })
   .passthrough();
 
