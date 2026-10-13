@@ -70,7 +70,7 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
             onClick={() => setClearOpen(true)}
           >
             <Trash2 className="size-3.5" aria-hidden="true" />
-            清空足迹
+            清除足迹
           </Button>
         )}
       </header>
@@ -80,8 +80,8 @@ export function HistoryView({ onNavigate }: HistoryViewProps) {
       <ClearRecordsDialog
         open={clearOpen}
         onOpenChange={setClearOpen}
-        title="清空足迹"
-        description="选择要清空的记录。清空后无法恢复，影视与电视直播各自独立。"
+        title="清除足迹"
+        description="选择要清除的足迹。清除后无法恢复，影视与电视直播各自独立。"
         targets={[
           { kind: "vod", label: "影视足迹", count: vodRecords.length },
           { kind: "live", label: "电视直播足迹", count: liveRecords.length },

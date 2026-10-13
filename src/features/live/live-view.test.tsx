@@ -286,7 +286,7 @@ describe("LiveView EPG rendering", () => {
   it("renders the program guide returned by the adapter", async () => {
     // The adapter resolves an EpgCatalog (`{ programs }`), not a bare array. Assigning the
     // whole object to the program list made `epgPrograms.filter` throw during render, which
-    // the root Error Boundary surfaced as "Moseek 暂时无法显示这个页面".
+    // the root Error Boundary surfaced as "拾影暂时无法显示这个页面".
     render(<LiveView />);
 
     await waitFor(() => {

@@ -167,7 +167,7 @@ describe("HistoryView", () => {
     // The only button is the header's clear action; nothing in either timeline is interactive.
     const buttons = screen.getAllByRole("button");
     expect(buttons).toHaveLength(1);
-    expect(buttons[0]).toHaveTextContent("清空足迹");
+    expect(buttons[0]).toHaveTextContent("清除足迹");
     expect(onNavigate).not.toHaveBeenCalled();
   });
 
@@ -367,9 +367,9 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
     // Both kinds start selected, so the ordinary case is a single confirm.
-    fireEvent.click(screen.getByRole("button", { name: "清空全部" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除全部" }));
 
     expect(useAppStore.getState().history).toHaveLength(0);
   });
@@ -380,7 +380,7 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
 
     // Both are on to begin with, so the scopes are visible before anything is deselected.
     const vod = screen.getByRole("checkbox", { name: "影视足迹" });
@@ -392,7 +392,7 @@ describe("HistoryView", () => {
     expect(vod).toHaveAttribute("data-state", "unchecked");
 
     // The action now names the narrower scope instead of claiming to clear everything.
-    fireEvent.click(screen.getByRole("button", { name: "清空电视直播足迹" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除电视直播足迹" }));
 
     const remaining = useAppStore.getState().history;
     expect(remaining).toHaveLength(1);
@@ -403,9 +403,9 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: "电视直播足迹" }));
-    fireEvent.click(screen.getByRole("button", { name: "清空影视足迹" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除影视足迹" }));
 
     const remaining = useAppStore.getState().history;
     expect(remaining).toHaveLength(1);
@@ -418,13 +418,13 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
 
     expect(screen.getByRole("checkbox", { name: "影视足迹" })).toBeEnabled();
     expect(screen.getByRole("checkbox", { name: "电视直播足迹" })).toBeDisabled();
     // The empty one is not selected, so the confirm button describes only what it will clear.
     expect(
-      screen.getByRole("button", { name: "清空影视足迹" }),
+      screen.getByRole("button", { name: "清除影视足迹" }),
     ).toBeInTheDocument();
   });
 
@@ -433,10 +433,10 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: "影视足迹" }));
 
-    expect(screen.getByRole("button", { name: "清空" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "清除" })).toBeDisabled();
   });
 
   it("names only the kinds it can actually clear", () => {
@@ -445,10 +445,10 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
 
-    expect(screen.queryByRole("button", { name: "清空全部" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "清空影视足迹" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "清除全部" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "清除影视足迹" })).toBeEnabled();
   });
 
   it("starts with everything selected again when reopened", () => {
@@ -457,11 +457,11 @@ describe("HistoryView", () => {
     useAppStore.setState({ history: [vodFootprint(), liveFootprint()] });
     render(<HistoryView onNavigate={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
     fireEvent.click(screen.getByRole("checkbox", { name: "影视足迹" }));
     fireEvent.click(screen.getByRole("button", { name: "取消" }));
 
-    fireEvent.click(screen.getByRole("button", { name: /清空足迹/ }));
+    fireEvent.click(screen.getByRole("button", { name: /清除足迹/ }));
     expect(screen.getByRole("checkbox", { name: "影视足迹" })).toHaveAttribute(
       "data-state",
       "checked",

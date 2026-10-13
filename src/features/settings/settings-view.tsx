@@ -72,11 +72,10 @@ interface SettingsViewProps {
    */
   historyCounts: Record<FootprintKind, number>;
   favoriteCounts: Record<FootprintKind, number>;
-  progressCount: number;
   onClearHistory: (kind: FootprintKind) => void;
   onClearFavorites: (kind: FootprintKind) => void;
   /**
-   * The app's own data, for 软件数据's export and import.
+   * The app's own data, for the export and import above.
    *
    * Passed in rather than read from the store here so this view stays a presentational component like
    * the rest of the settings page — the same reason the counts above are props.
@@ -111,7 +110,6 @@ export function SettingsView({
   onAutoEpgEnabledChange,
   historyCounts,
   favoriteCounts,
-  progressCount,
   onClearHistory,
   onClearFavorites,
   favorites,
@@ -145,13 +143,13 @@ export function SettingsView({
       const text = buildAppDataText({ theme, favorites, liveFavorites });
       const saved = await exportConfigFile(text, undefined, {
         fileName: APP_DATA_FILE_NAME,
-        title: "导出软件数据",
+        title: "导出收藏与主题",
       });
       if (!saved) return;
       // The counts are named rather than the byte size: the user's question is whether their
       // favourites came along, and "12 KB" answers a different one.
       setDataMessage(
-        `已导出到 ${saved.path}（收藏 ${favorites.length + liveFavorites.length} 项、主题偏好）。`,
+        `已导出到 ${saved.path}（收藏 ${favorites.length + liveFavorites.length} 项、主题设置）。`,
       );
     } catch (error) {
       setDataMessage(
@@ -173,12 +171,12 @@ export function SettingsView({
     setIsDataBusy(true);
     setDataMessage("");
     try {
-      const file = await readConfigFile("导入软件数据");
+      const file = await readConfigFile("导入收藏与主题");
       if (!file) return;
       const data = readAppDataText(file.text);
       if (!data) {
         setDataMessage(
-          "这个文件里没有软件数据。请选择「导出软件数据」生成的文件；配置文件请到配置中心导入。",
+          "这个文件里没有收藏或主题设置。配置文件请在配置中心导入。",
         );
         return;
       }
@@ -226,7 +224,7 @@ export function SettingsView({
             {/* No badge beside the title. "拾影 · 偏好设置" named the product and the page in the
                 same breath as the heading, and the heading already says which page this is. */}
             <p className="mt-0.5 text-xs text-muted-foreground">
-              主题外观、播放引擎与网络安全控制
+              外观、播放和本机数据
             </p>
           </div>
         </section>
@@ -344,23 +342,24 @@ export function SettingsView({
                   <div className="flex flex-col px-5">
                     <SettingsSection
                       title="本机数据"
-                      description="足迹与观看进度是同一批记录的两种读法，清除其中一类会一并清掉它对应的进度。"
+                      description="只保存在这台电脑上。"
                     >
-                      {/* Counts as tiles rather than one oversized figure: three plain numbers do
-                          not need the hero-metric treatment, and the row reads as a summary. */}
-                      <div className="grid grid-cols-3 gap-3">
+                      {/* **Two tiles, not three.** 观看进度 was a third figure beside 足迹, and the
+                          prose then had to explain that they are the same records read two ways —
+                          which is a data-model fact, not something a reader wants. A footprint and
+                          its progress are one thing; the count of footprints is the honest number. */}
+                      <div className="grid grid-cols-2 gap-3">
                         <StorageStat label="足迹" value={historyCount} />
                         <StorageStat label="收藏" value={favoriteCount} />
-                        <StorageStat label="观看进度" value={progressCount} />
                       </div>
                     </SettingsSection>
 
-                    <SettingsSection title="清理" description="清除后无法恢复。">
+                    <SettingsSection title="清除" description="清除后无法恢复。">
                       <div className="flex flex-col divide-y divide-border/60">
                         <SettingRow
                           icon={<Trash2 className="size-4" aria-hidden="true" />}
                           label="清除足迹"
-                          description="移除全部影视与电视直播足迹，以及它们对应的观看进度；收藏会保留。"
+                          description="清除全部足迹和对应的观看进度，收藏保留。"
                           control={
                             <Button
                               type="button"
@@ -376,7 +375,7 @@ export function SettingsView({
                         <SettingRow
                           icon={<Trash2 className="size-4" aria-hidden="true" />}
                           label="清除收藏"
-                          description="移除全部影视收藏与电视直播收藏；足迹会保留。"
+                          description="清除全部收藏，足迹保留。"
                           control={
                             <Button
                               type="button"
@@ -404,17 +403,17 @@ export function SettingsView({
                         exporting a configuration carried personal data with it. 配置中心 exports
                         resources; this page exports the application's own data. */}
                     <SettingsSection
-                      title="软件数据"
-                      description="收藏与主题偏好。它们不属于资源配置，因此单独导入导出；配置中心只处理影视源与直播源。"
+                      title="收藏与主题"
+                      description="与配置分开导入导出。"
                     >
                       <div className="flex flex-col divide-y divide-border/60">
                         <SettingRow
                           icon={<Download className="size-4" aria-hidden="true" />}
-                          label="导出软件数据"
+                          label="导出收藏与主题"
                           description={
                             favoriteCount > 0
-                              ? `收藏 ${favoriteCount} 项与当前主题偏好，写成一个 JSON 文件。`
-                              : "当前没有收藏，只导出主题偏好。"
+                              ? `收藏 ${favoriteCount} 项和主题设置。`
+                              : "当前没有收藏，只导出主题设置。"
                           }
                           control={
                             <Button
@@ -430,8 +429,8 @@ export function SettingsView({
                         />
                         <SettingRow
                           icon={<Upload className="size-4" aria-hidden="true" />}
-                          label="导入软件数据"
-                          description="从之前导出的文件恢复收藏与主题；已有的收藏会合并，不会覆盖。"
+                          label="导入收藏与主题"
+                          description="从导出的文件恢复，已有的收藏会合并。"
                           control={
                             <Button
                               type="button"

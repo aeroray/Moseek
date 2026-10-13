@@ -22,15 +22,15 @@ export interface ClearTarget<K extends string = string> {
 /**
  * The confirm button's word, naming exactly what it is about to remove.
  *
- * A fixed "全部清空" sitting beside a deselected checkbox would contradict the control above it, so
+ * A fixed "全部清除" sitting beside a deselected checkbox would contradict the control above it, so
  * the action states its own scope and the button and the checkboxes can never disagree. One kind
- * selected is named rather than summarised as 全部: with only films recorded, "清空全部" is true but
- * says less than "清空影视足迹", and the point of the label is to answer "what am I about to lose".
+ * selected is named rather than summarised as 全部: with only films recorded, "清除全部" is true but
+ * says less than "清除影视足迹", and the point of the label is to answer "what am I about to lose".
  */
 export function clearActionText(clearedLabels: string[]) {
-  if (clearedLabels.length === 0) return "清空";
-  if (clearedLabels.length === 1) return `清空${clearedLabels[0]}`;
-  return "清空全部";
+  if (clearedLabels.length === 0) return "清除";
+  if (clearedLabels.length === 1) return `清除${clearedLabels[0]}`;
+  return "清除全部";
 }
 
 /**

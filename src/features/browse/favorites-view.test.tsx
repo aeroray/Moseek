@@ -810,7 +810,7 @@ describe("FavoritesView", () => {
     fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
     expect(useAppStore.getState().favorites).toHaveLength(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "清空全部" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除全部" }));
 
     expect(useAppStore.getState().favorites).toHaveLength(0);
     expect(useAppStore.getState().liveFavorites).toHaveLength(0);
@@ -828,7 +828,7 @@ describe("FavoritesView", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "影视收藏" }));
-    fireEvent.click(screen.getByRole("button", { name: "清空电视直播收藏" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除电视直播收藏" }));
 
     expect(useAppStore.getState().favorites).toHaveLength(1);
     expect(useAppStore.getState().liveFavorites).toHaveLength(0);

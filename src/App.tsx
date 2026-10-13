@@ -57,7 +57,6 @@ function App() {
   const history = useAppStore((state) => state.history);
   const favorites = useAppStore((state) => state.favorites);
   const liveFavorites = useAppStore((state) => state.liveFavorites);
-  const playbackProgress = useAppStore((state) => state.playbackProgress);
   const clearHistory = useAppStore((state) => state.clearHistory);
   const clearFavorites = useAppStore((state) => state.clearFavorites);
   const restoreFavorites = useAppStore((state) => state.restoreFavorites);
@@ -175,7 +174,6 @@ function App() {
                       vod: favorites.length,
                       live: liveFavorites.length,
                     }}
-                    progressCount={Object.keys(playbackProgress).length}
                     onClearHistory={clearHistory}
                     onClearFavorites={clearFavorites}
                     themeMode={theme}

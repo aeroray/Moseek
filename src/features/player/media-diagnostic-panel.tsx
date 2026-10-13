@@ -244,7 +244,7 @@ function buildReportText(
   snapshot: MediaDiagnosticSnapshot | null,
   note?: string | null,
 ) {
-  const lines: string[] = ["Moseek 播放诊断"];
+  const lines: string[] = ["拾影播放诊断"];
   if (note) lines.push(`前置提示：${note}`);
   if (!snapshot) {
     lines.push("（尚未开始播放，没有播放器数据）");

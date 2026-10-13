@@ -685,7 +685,7 @@ export function ConfigCenter() {
         setConfigDocument(saved, true);
         setParseState({
           type: "success",
-          title: "已清理无法适配的源",
+          title: "已删除不能用的源",
           message: `已从配置中移除 ${pruned.removed} 个不能用的源。`,
         });
       })
@@ -900,7 +900,7 @@ export function ConfigCenter() {
           type: "success",
           title: "直播源已自动恢复",
           message:
-            "已为旧配置替换为可访问的公开兼容直播列表，请点击连接测试确认当前频道可用。",
+            "已自动换上一份可用的直播源，请测试确认频道能用。",
         });
       })
       .catch(() => {
@@ -977,7 +977,7 @@ export function ConfigCenter() {
    */
   const [isRemoving, setIsRemoving] = useState(false);
   /**
-   * Which step of the 清空所有配置 confirmation is open, if any.
+   * Which step of the 清除所有配置 confirmation is open, if any.
    *
    * **Two steps, not one, and that is the user's requirement.** Clearing the configuration deletes the
    * file they imported, and re-importing it is the only way back — so the first dialog states what will
@@ -1066,7 +1066,7 @@ export function ConfigCenter() {
       await clearAllConfigDocuments();
       clearConfigDocument();
       // **`clearConfigDocument` does not empty the document list, and the database now has none.**
-      // Leaving the mirror populated made the header keep claiming a document and left 清空所有配置
+      // Leaving the mirror populated made the header keep claiming a document and left 清除所有配置
       // enabled with nothing to clear — measured in a real browser: after the clear the list read
       // 0 个源 while `configDocuments` still held one entry. The store action is scoped to the active
       // document, so the list is emptied explicitly here.
@@ -2423,7 +2423,7 @@ export function ConfigCenter() {
             onClick={() => setClearStep("confirm")}
           >
             <Trash2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
-            清空所有配置
+            清除所有配置
           </Button>
         </section>
 
@@ -2683,7 +2683,7 @@ export function ConfigCenter() {
                       <span
                         title={
                           testingKeys.size > 0
-                            ? "正在测试，结束后再清理。"
+                            ? "正在测试，结束后再删除。"
                             : undefined
                         }
                       >
@@ -2706,7 +2706,7 @@ export function ConfigCenter() {
                             data-icon="inline-start"
                             aria-hidden="true"
                           />
-                          清理不可用 ({bulkRemovableSources.length})
+                          删除不可用 ({bulkRemovableSources.length})
                         </Button>
                       </span>
                     )}
@@ -2780,7 +2780,7 @@ export function ConfigCenter() {
                             Testing the filter first therefore made the "当前配置没有源" branch
                             unreachable, and a configuration with no sources at all was reported as
                             "调整关键词或筛选条件后重试": advice to adjust a filter that can never
-                            produce a row. Measured after 清空所有配置, where the list is genuinely
+                            produce a row. Measured after 清除所有配置, where the list is genuinely
                             empty and the message blamed the user's filtering.
                             An empty configuration is the more specific fact, so it is tested first. */}
                         <EmptyTitle>
@@ -3161,7 +3161,7 @@ export function ConfigCenter() {
                   </li>
                   <li>该配置的导出结果里也不会再包含它们。</li>
                   <li>
-                    相关收藏和播放记录会一并清理。
+                    相关收藏和播放记录会一并清除。
                   </li>
                   <li>此操作不能撤销。</li>
                 </ul>
@@ -3193,7 +3193,7 @@ export function ConfigCenter() {
         </DialogContent>
       </Dialog>
 
-      {/* 清空所有配置 — step one of two.
+      {/* 清除所有配置 — step one of two.
           It names what is lost *and* what is kept, because the fear this dialog has to answer is
           "will this take my favourites with it", and the honest answer is no. */}
       <Dialog
@@ -3204,7 +3204,7 @@ export function ConfigCenter() {
       >
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>清空所有配置？</DialogTitle>
+            <DialogTitle>清除所有配置？</DialogTitle>
             <DialogDescription asChild>
               <div className="flex flex-col gap-3 text-sm">
                 <p>
@@ -3255,7 +3255,7 @@ export function ConfigCenter() {
         </DialogContent>
       </Dialog>
 
-      {/* 清空所有配置 — step two of two.
+      {/* 清除所有配置 — step two of two.
           Deliberately plainer than the first: the reasoning was given there, and repeating it would
           make the second step feel like the same dialog rather than a distinct confirmation. */}
       <Dialog
@@ -4280,7 +4280,7 @@ function describeUneditableSource(source: SourceRecord) {
   if (!source.api.trim()) {
     return "这一条在配置里没有地址，所以没有可以修改的字段。";
   }
-  return "Moseek 无法在配置文本里确定这一条的位置（可能有多条完全相同的地址），因此不提供编辑。删除后重新导入可以替代。";
+  return "拾影无法确定这一条在配置里的位置（可能有多条相同地址），不能编辑。可以删除后重新导入。";
 }
 
 /**
@@ -4683,7 +4683,7 @@ const SourceTable = memo(function SourceTable({
             <TableHead className="w-[30%] pl-6">名称</TableHead>
             <TableHead className="w-[13%]">状态</TableHead>
             <TableHead className="w-[22%]">适配器</TableHead>
-            <TableHead className="w-[15%]">连接测试</TableHead>
+            <TableHead className="w-[15%]">测试</TableHead>
             <TableHead className="w-16 text-center">启用</TableHead>
             <TableHead className="w-20 pr-6 text-center">
               操作

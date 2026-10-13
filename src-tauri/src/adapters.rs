@@ -139,21 +139,19 @@ impl SiteAdapterKind {
     /// a missing or dangerous address, a malformed record, or a family that needs remote code.
     pub(crate) fn ensure_executable(self, source: &SourceRecord) -> Result<Self, String> {
         if source.api.trim().is_empty() {
-            return Err("缺少可用的接口地址，无法建立请求。".to_string());
+            return Err("这个源没有可用地址。".to_string());
         }
         if has_dangerous_scheme(&source.api) {
-            return Err("检测到危险协议，Moseek 默认阻止执行。".to_string());
+            return Err("这个地址不安全，拾影不会使用。".to_string());
         }
         match self {
-            // A spider is refused because the family needs a runtime, not because a stored field
-            // said so. The message names the actual reason.
-            Self::Spider => match script_family(source) {
-                Some(ScriptFamily::RemoteCode) => {
-                    Err("该源依赖远程脚本或 JAR，Moseek 只记录和展示，不会执行。".to_string())
-                }
-                _ => Err("该源需要 Spider 运行时，Moseek 只记录和展示，不会执行。".to_string()),
-            },
-            Self::Unsupported => Err("无法确认该源的安全适配边界。".to_string()),
+            // A spider is refused because the family needs a runtime, not because a stored field said
+            // so. Both spellings of that family — a remote script and a bare spider — are refused for
+            // the same reason and say the same thing: the user's question is "why can't this run",
+            // and the answer is the same either way. Which one it is stays visible in the source's
+            // own adapter label.
+            Self::Spider => Err("这个源需要额外程序，拾影只记录，不会运行。".to_string()),
+            Self::Unsupported => Err("无法确认这个源是否安全。".to_string()),
             _ => Ok(self),
         }
     }

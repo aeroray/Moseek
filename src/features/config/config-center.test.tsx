@@ -1450,7 +1450,7 @@ describe("config center", () => {
 
       // The explanation replaces the 编辑 button, since there is nothing one could open. The
       // read-only sections stay — they are still worth reading.
-      expect(within(sheet).getByText(/无法在配置文本里确定这一条的位置/)).toBeInTheDocument();
+      expect(within(sheet).getByText(/无法确定这一条在配置里的位置/)).toBeInTheDocument();
       expect(within(sheet).queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
       expect(within(sheet).getByText("基本信息")).toBeInTheDocument();
     });
@@ -1573,7 +1573,7 @@ describe("config center", () => {
     expect(blockedRow).not.toMatch(/(^|[^暂不])支持/);
     // And the state that used to appear here is gone for good.
     expect(blockedRow).not.toContain("部分支持");
-    // The 连接测试 column says why there is no result rather than claiming a pending test. It used to
+    // The 测试 column says why there is no result rather than claiming a pending test. It used to
     // read 未测试 for a row the column beside it had just called 已阻止, which implies the user simply
     // has not got round to it.
     expect(blockedRow).toContain("无法测试");
@@ -1891,7 +1891,7 @@ describe("config center", () => {
     renderCenter();
     chooseFilter("未适配");
 
-    const bulk = screen.getByRole("button", { name: /清理不可用/ });
+    const bulk = screen.getByRole("button", { name: /删除不可用/ });
     // Two of the three fixture sources cannot run.
     expect(bulk.textContent).toContain("2");
 
@@ -1919,7 +1919,7 @@ describe("config center", () => {
       target: { value: "暂不支持" },
     });
 
-    const bulk = screen.getByRole("button", { name: /清理不可用/ });
+    const bulk = screen.getByRole("button", { name: /删除不可用/ });
     expect(bulk.textContent).toContain("1");
 
     fireEvent.click(bulk);
@@ -1937,17 +1937,17 @@ describe("config center", () => {
     renderCenter();
 
     expect(
-      screen.queryByRole("button", { name: /清理不可用/ }),
+      screen.queryByRole("button", { name: /删除不可用/ }),
     ).not.toBeInTheDocument();
 
     chooseFilter("未适配");
     expect(
-      screen.getByRole("button", { name: /清理不可用/ }),
+      screen.getByRole("button", { name: /删除不可用/ }),
     ).toBeInTheDocument();
 
     chooseFilter("全部");
     expect(
-      screen.getByRole("button", { name: /清理不可用/ }),
+      screen.getByRole("button", { name: /删除不可用/ }),
     ).toBeInTheDocument();
   });
 
@@ -1966,7 +1966,7 @@ describe("config center", () => {
     renderPage(<ConfigCenter />);
 
     expect(
-      screen.queryByRole("button", { name: /清理不可用/ }),
+      screen.queryByRole("button", { name: /删除不可用/ }),
     ).not.toBeInTheDocument();
   });
 
@@ -2142,7 +2142,7 @@ describe("config center", () => {
     for (const resolve of pending) resolve(testResult());
   });
 
-  it("disables 清理不可用 while a test is running, and re-enables it after", async () => {
+  it("disables 删除不可用 while a test is running, and re-enables it after", async () => {
     // A running test is what creates removable sources: every failure switches one off and adds it to
     // this count, so mid-run the number climbs under the cursor and the set behind it is still
     // changing. Confirming a deletion whose size the user never saw is the thing to prevent.
@@ -2153,19 +2153,19 @@ describe("config center", () => {
     renderCenter();
     chooseFilter("未适配");
 
-    const before = screen.getByRole("button", { name: /清理不可用/ });
+    const before = screen.getByRole("button", { name: /删除不可用/ });
     expect(before).toBeEnabled();
 
     startBatchTest();
 
-    const during = await screen.findByRole("button", { name: /清理不可用/ });
+    const during = await screen.findByRole("button", { name: /删除不可用/ });
     expect(during).toBeDisabled();
     // Kept on screen rather than removed, so the toolbar does not reflow as the run proceeds.
     expect(during).toBeInTheDocument();
 
     resolveTest(testResult());
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /清理不可用/ })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /删除不可用/ })).toBeEnabled();
     });
   });
 
@@ -2421,7 +2421,7 @@ describe("config center", () => {
   });
 
   it("counts an unreachable source as removable, because it is unusable", async () => {
-    // 清理不可用 deletes what cannot work. A source we could not reach cannot work, so it belongs in
+    // 删除不可用 deletes what cannot work. A source we could not reach cannot work, so it belongs in
     // the set — the same rule the switch follows, so the count and the switches cannot disagree.
     vi.mocked(testSourceCommand).mockResolvedValue(
       testResult({
@@ -2439,7 +2439,7 @@ describe("config center", () => {
     });
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: /清理不可用 \(1\)/ }),
+        screen.getByRole("button", { name: /删除不可用 \(1\)/ }),
       ).toBeInTheDocument();
     });
   });
@@ -3474,7 +3474,7 @@ describe("config center", () => {
   });
 
   /**
-   * 清空所有配置 — the one destructive action on this page.
+   * 清除所有配置 — the one destructive action on this page.
    *
    * The user's requirement was explicit: it must take two confirmations, because it deletes the
    * configuration file they imported and re-importing it is the only way back.
@@ -3482,7 +3482,7 @@ describe("config center", () => {
   describe("clearing every configuration", () => {
     /** Opens both confirmation steps and presses the final button. */
     function clearEverything() {
-      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+      fireEvent.click(screen.getByRole("button", { name: "清除所有配置" }));
       fireEvent.click(screen.getByRole("button", { name: "继续" }));
       fireEvent.click(screen.getByRole("button", { name: "确认清空" }));
     }
@@ -3491,11 +3491,11 @@ describe("config center", () => {
       renderCenter();
       vi.mocked(clearAllConfigDocuments).mockClear();
 
-      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+      fireEvent.click(screen.getByRole("button", { name: "清除所有配置" }));
 
       // Step one names what is lost and what is kept.
       expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(screen.getByText("清空所有配置？")).toBeInTheDocument();
+      expect(screen.getByText("清除所有配置？")).toBeInTheDocument();
       expect(screen.getByText(/收藏、足迹与观看进度保留/)).toBeInTheDocument();
       // **Nothing has been deleted yet.** Pressing the first button must not call the command.
       expect(clearAllConfigDocuments).not.toHaveBeenCalled();
@@ -3512,13 +3512,13 @@ describe("config center", () => {
       vi.mocked(clearAllConfigDocuments).mockClear();
 
       // Cancel at step one.
-      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+      fireEvent.click(screen.getByRole("button", { name: "清除所有配置" }));
       fireEvent.click(screen.getByRole("button", { name: "取消" }));
       expect(clearAllConfigDocuments).not.toHaveBeenCalled();
 
       // Cancel at step two — the dangerous one to get wrong, because the user has already
       // committed once and might reasonably change their mind.
-      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+      fireEvent.click(screen.getByRole("button", { name: "清除所有配置" }));
       fireEvent.click(screen.getByRole("button", { name: "继续" }));
       fireEvent.click(screen.getByRole("button", { name: "取消" }));
       expect(clearAllConfigDocuments).not.toHaveBeenCalled();
@@ -3602,7 +3602,7 @@ describe("config center", () => {
       await waitFor(() => expect(clearAllConfigDocuments).toHaveBeenCalledTimes(1));
 
       const state = useAppStore.getState();
-      // The button says 清空所有配置, and that is exactly what it must do — no more.
+      // The button says 清除所有配置, and that is exactly what it must do — no more.
       expect(state.favorites).toHaveLength(1);
       expect(state.liveFavorites).toHaveLength(1);
       expect(state.playbackProgress["ok:1"]).toBe(120);
@@ -3612,7 +3612,7 @@ describe("config center", () => {
       // A control that cannot do anything teaches the user the app ignores them, which is the rule
       // the storage tab's clear buttons already follow.
       renderCenter();
-      const button = () => screen.getByRole("button", { name: "清空所有配置" });
+      const button = () => screen.getByRole("button", { name: "清除所有配置" });
       expect(button()).toBeEnabled();
 
       act(() => {
@@ -3632,7 +3632,7 @@ describe("config center", () => {
       // `executions: ["enabled"]` already applied, so `isFilterUnfiltered` is false from the first
       // render and the "当前配置没有源" branch was unreachable. A configuration with no sources was
       // therefore told to "调整关键词或筛选条件后重试" — advice to adjust a filter that cannot
-      // produce a row. Measured in a real browser straight after 清空所有配置.
+      // produce a row. Measured in a real browser straight after 清除所有配置.
       renderCenter();
       act(() => {
         useAppStore.setState({

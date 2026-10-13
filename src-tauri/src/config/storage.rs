@@ -1996,7 +1996,7 @@ mod tests {
         for message in [
             "CMS 响应返回错误状态：HTTP 404；Not Found",
             "CMS 响应不是有效 JSON：expected value at line 1 column 1",
-            "d.kstore.space 解析到本机或局域网地址，Moseek 不会请求它",
+            "d.kstore.space 指向本机或局域网，拾影不会访问",
         ] {
             let mut connection = Connection::open_in_memory().unwrap();
             create_test_schema(&connection);

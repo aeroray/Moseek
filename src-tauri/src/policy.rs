@@ -140,7 +140,7 @@ pub(crate) fn validate_remote_url(url: &Url) -> Result<(), String> {
     let host = url.host_str().ok_or_else(|| "地址缺少主机名".to_string())?;
     // The wording names the actual problem. It used to say "enable this in settings", pointing at
     // a switch that does not exist: the rule is fixed and the address simply cannot be used.
-    let denied = format!("{host} 是本机或局域网地址，Moseek 不会请求它");
+    let denied = format!("{host} 指向本机或局域网，拾影不会访问");
     if is_disallowed_host(host) {
         return Err(denied);
     }
@@ -642,7 +642,7 @@ async fn resolve_allowed_addresses(
     // A literal address is checked directly, matching the rule applied to a resolved name.
     if let Ok(address) = host.parse::<IpAddr>() {
         if is_disallowed_ip(address) {
-            return Err(format!("{host} 是本机或局域网地址，Moseek 不会请求它"));
+            return Err(format!("{host} 指向本机或局域网，拾影不会访问"));
         }
         return Ok(vec![std::net::SocketAddr::new(address, port)]);
     }
@@ -653,7 +653,7 @@ async fn resolve_allowed_addresses(
         .iter()
         .any(|address| is_disallowed_ip(address.ip()))
     {
-        return Err(format!("{host} 解析到本机或局域网地址，Moseek 不会请求它"));
+        return Err(format!("{host} 指向本机或局域网，拾影不会访问"));
     }
     if addresses.is_empty() {
         return Err("远程主机没有解析出可用地址".to_string());

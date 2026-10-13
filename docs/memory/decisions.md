@@ -89,7 +89,7 @@ Evidence:
 
 Decision:
 User-facing text targets someone who only wants to watch: no jargon, field names, adapter ids, or paths. One
-word per concept, never two for the same thing.
+word per concept — 清除 records, 删除 a source, 测试 the probe, 拾影 in sentences.
 
 Reason:
 播放诊断 is exempt: opt-in and technical by design.

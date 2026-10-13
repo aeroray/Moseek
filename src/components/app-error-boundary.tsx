@@ -40,10 +40,10 @@ export class AppErrorBoundary extends Component<
           <div>
             <p className="text-sm font-medium text-destructive">界面错误</p>
             <h1 id="app-error-title" className="mt-1 text-xl font-semibold">
-              Moseek 暂时无法显示这个页面
+              拾影暂时无法显示这个页面
             </h1>
             <p className="mt-2 text-sm leading-6 text-muted-foreground">
-              当前页面遇到未处理的界面错误。重新加载不会删除本地配置或脚本档案。
+              重新加载即可恢复。收藏和配置都不会丢失。
             </p>
           </div>
           <Button type="button" className="w-fit" onClick={this.handleReload}>

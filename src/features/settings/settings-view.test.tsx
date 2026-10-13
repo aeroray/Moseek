@@ -114,14 +114,15 @@ describe("settings page", () => {
     renderSettings({
       historyCounts: { vod: 5, live: 2 },
       favoriteCounts: { vod: 3, live: 1 },
-      progressCount: 2,
     });
     openTab("存储");
 
     // Totals are summed from the per-kind counts the dialog lists, so they cannot disagree.
+    // Two figures, not three: 观看进度 used to sit beside 足迹 as its own number, and the prose then
+    // had to explain that the two are the same records — a data-model fact a reader does not want.
     expect(screen.getByText("7")).toBeInTheDocument();
     expect(screen.getByText("4")).toBeInTheDocument();
-    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.queryByText("观看进度")).not.toBeInTheDocument();
     expect(screen.queryByText(/LOCALAPPDATA/)).not.toBeInTheDocument();
     expect(screen.queryByText("清理请求缓存")).not.toBeInTheDocument();
   });
@@ -143,7 +144,7 @@ describe("settings page", () => {
       "checked",
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "清空全部" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除全部" }));
 
     expect(props.onClearHistory).toHaveBeenCalledWith("vod");
     expect(props.onClearHistory).toHaveBeenCalledWith("live");
@@ -154,7 +155,7 @@ describe("settings page", () => {
     openTab("存储");
 
     fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
-    fireEvent.click(screen.getByRole("button", { name: "清空全部" }));
+    fireEvent.click(screen.getByRole("button", { name: "清除全部" }));
 
     expect(props.onClearFavorites).toHaveBeenCalledWith("vod");
     expect(props.onClearFavorites).toHaveBeenCalledWith("live");
@@ -170,7 +171,7 @@ describe("settings page", () => {
     fireEvent.click(screen.getByRole("button", { name: "清除收藏" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "影视收藏" }));
     fireEvent.click(
-      screen.getByRole("button", { name: "清空电视直播收藏" }),
+      screen.getByRole("button", { name: "清除电视直播收藏" }),
     );
 
     expect(props.onClearFavorites).toHaveBeenCalledWith("live");
