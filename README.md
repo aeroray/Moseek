@@ -1,15 +1,15 @@
 # Moseek · 拾影
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](#download)
+[![Platform: Windows · macOS planned](https://img.shields.io/badge/Platform-Windows%20%C2%B7%20macOS%20planned-0078D4.svg)](#download)
 
 [简体中文](README.zh-CN.md) · English
 
-A Windows desktop player for TVBox / CatVod-style configurations: import one config file, then browse
-a film library and live TV. **Nothing in a configuration is ever executed — remote scripts, JARs and
-spiders are refused.**
+A desktop player for TVBox / CatVod-style configurations: import one config file, then watch movies
+and live TV. **Nothing in a configuration is ever executed — remote scripts, JARs and spiders are
+refused.**
 
-![Moseek's library view](docs/images/library.png)
+![Moseek's movie grid](docs/images/library.png)
 
 ## Features
 
@@ -44,7 +44,7 @@ Other scripts: `pnpm test` (unit tests), `pnpm lint`, `pnpm typecheck`, `pnpm bu
 
 ## Scope
 
-- Windows only; no mobile platforms.
+- Desktop only — Windows today, macOS planned. No mobile platforms.
 - No sources are bundled. You need your own configuration file, obtained legitimately.
 
 ## Tech stack

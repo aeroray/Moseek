@@ -1,8 +1,8 @@
 # Project Brief
 
-**Moseek (拾影)** is a Windows desktop player for TVBox/CatVod-style IPTV and VOD configurations.
-It imports a config file, normalizes its sources, and plays CMS catalogues and live channels through
-adapters that execute nothing remote.
+**Moseek (拾影)** is a desktop player for TVBox/CatVod-style IPTV and VOD configurations. It imports a
+config file, normalizes its sources, and plays CMS catalogues and live channels through adapters that
+execute nothing remote. Windows today; macOS planned.
 
 ## Shape
 

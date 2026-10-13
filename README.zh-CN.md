@@ -1,18 +1,18 @@
 # 拾影 · Moseek
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows-0078D4.svg)](#下载)
+[![Platform: Windows · macOS planned](https://img.shields.io/badge/Platform-Windows%20%C2%B7%20macOS%20planned-0078D4.svg)](#下载)
 
 简体中文 · [English](README.md)
 
-Windows 桌面播放器：导入一份 TVBox / CatVod 风格的配置，就能看影视库和电视直播。
+桌面端播放器：导入一份 TVBox / CatVod 风格的配置，就能看影视和电视直播。
 **配置里的代码一律不执行：远程脚本、JAR、爬虫全部拒绝。**
 
-![拾影的影视库界面](docs/images/library.png)
+![拾影的影视界面](docs/images/library.png)
 
 ## 特性
 
-- **影视库与电视直播** —— 分类浏览、搜索、选集；频道分组、节目单、线路测试。HLS 与 FLV 都能播。
+- **看影视与电视直播** —— 分类浏览、搜索、选集；频道分组、节目单、线路测试。HLS 与 FLV 都能播。
 - **先识别，再使用** —— 每个源导入时判定类型与可用性：能用的直接用，不能用的说明原因，不悄悄丢弃。
 - **导入前先看清** —— 配置读进来会先列出全部内容（影视源 / 直播源 / 解析源），勾选后才导入。
 - **一套配置** —— 多次导入自动合并去重；收藏、足迹、观看进度与配置分开保存。
@@ -36,7 +36,7 @@ pnpm tauri build   # 产出安装包（src-tauri/target/release/bundle/）
 
 ## 范围
 
-- 只支持 Windows，不做移动端。
+- 只做桌面端：目前支持 Windows，macOS 在计划中；不做移动端。
 - 不自带任何源；需要你自己的配置文件，请使用合法获得的。
 
 ## 技术栈

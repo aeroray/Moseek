@@ -61,7 +61,9 @@ git push origin main
 git push origin v0.2.0
 ```
 
-工作流会：校验版本号与标签一致 → 读取发布说明 → 构建并签名 NSIS 安装包 → 创建 GitHub Release → 上传 `latest.json`。
+工作流会：校验版本号与标签一致 → 读取发布说明 → 构建并签名安装包 → 创建 GitHub Release → 上传 `latest.json`。
+
+目前只产出 Windows 的 NSIS 安装包；macOS 加入后，这个 job 会改成 `windows-latest` 与 `macos-latest` 的矩阵，签名密钥与 `latest.json` 也要按平台分别配置。
 
 ## 版本号为什么必须一致
 

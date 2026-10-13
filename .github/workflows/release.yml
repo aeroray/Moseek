@@ -1,7 +1,7 @@
 name: Release
 
-# Pushing a SemVer tag (for example v0.2.0) builds the Windows installer, signs it, publishes a
-# GitHub Release, and uploads `latest.json` for in-app updates.
+# Pushing a SemVer tag (for example v0.2.0) builds the installer, signs it, publishes a GitHub
+# Release, and uploads `latest.json` for in-app updates.
 #
 # The same job can be run by hand against an existing tag. `workflow_dispatch` exists because a build
 # can fail for a reason unrelated to the code (a runner image change, a transient network fault), and
@@ -23,8 +23,10 @@ permissions:
 
 jobs:
   release:
-    # Windows only: the app ships an NSIS installer, and a second platform would double the build
-    # time to produce an artifact nothing consumes.
+    # Windows today; macOS is planned. The job is not a matrix yet because only the NSIS bundle
+    # exists — a second runner would produce an artifact nothing consumes. When the macOS bundle is
+    # configured, this becomes a matrix over windows-latest and macos-latest, and the signing secrets
+    # and updater manifest gain their per-platform entries.
     runs-on: windows-latest
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
