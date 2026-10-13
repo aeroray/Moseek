@@ -30,3 +30,31 @@ Decision:
 One preprocess normalises `null` to `undefined` for every optional field. `.optional()` accepts only a
 missing key, but the exporter serialises source records, so Moseek could not re-import its own export.
 Fix the pattern, not the one field reported.
+
+## MC-DEC-20261008-b1000004 — Export rebuilds from the list, not a stored snapshot
+
+Status: active
+Scope: area:config-schema
+Subject: MC-SUBJ-20261008-a1000003
+Facet: lifecycle
+Evidence:
+- repo:src/features/config/config-export.ts
+
+Decision:
+`buildExportConfigText` derives `sites`/`lives` from `sources` at write time. The stored
+`normalizedConfig` is maintained separately and drifts, so the file described a different set from the
+list. Keep every other top-level key from the stored text.
+
+## MC-DEC-20261008-b1000005 — A configuration carries resources only
+
+Status: active
+Scope: area:config-schema
+Subject: MC-SUBJ-20261008-a1000003
+Facet: architecture
+Evidence:
+- repo:src/features/settings/app-data-file.ts
+
+Decision:
+Favourites and the theme move through 设置 as `moseek-data.json`; a configuration never carries them.
+`moseek`, `schemaVersion`, `configDialect` and `blockedFields` are excluded from the visual editor's
+其他设置. The legacy `moseek` reader stays, for old exports.

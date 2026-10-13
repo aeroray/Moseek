@@ -378,6 +378,11 @@ pub async fn export_config_file(
     // live in the webview's storage, and passing the finished text keeps one write path here rather
     // than a second "write these bytes" command with its own dialog.
     text: Option<String>,
+    // The name the save dialog opens with, and its title, when the caller is not writing a
+    // configuration. 设置 exports the app's own data through this same command — it is the same
+    // operation, one dialog and one write, and only the two labels differ.
+    file_name: Option<String>,
+    title: Option<String>,
     state: State<'_, AppDatabase>,
 ) -> Result<Option<ExportedConfig>, String> {
     // Read the text and release the lock before awaiting the dialog: the guard is not held across
@@ -398,8 +403,8 @@ pub async fn export_config_file(
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .set_title("导出配置")
-        .set_file_name(EXPORT_FILE_NAME)
+        .set_title(title.unwrap_or_else(|| "导出配置".to_string()))
+        .set_file_name(file_name.unwrap_or_else(|| EXPORT_FILE_NAME.to_string()))
         .add_filter("JSON 配置", &["json"])
         .save_file(move |path| {
             let _ = sender.send(path);
@@ -429,6 +434,76 @@ pub async fn export_config_file(
 /// `moseek-config.json` rather than the old `moseek-normalized-config.json`: the file is the user's
 /// configuration, and "normalized" named an internal detail they never chose.
 const EXPORT_FILE_NAME: &str = "moseek-config.json";
+
+/// What the user chose to open, and what was in it.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedFile {
+    pub path: String,
+    pub text: String,
+}
+
+/// The size a file may reach before it is refused, matching `MAX_CONFIG_TEXT_BYTES` in the frontend.
+///
+/// Kept in step deliberately: a file the dialog opens but the parser then rejects with "超过 10 MiB
+/// 限制" would report the same fact twice, in two different words. Refusing at the dialog is the
+/// earlier and more useful of the two.
+const MAX_IMPORT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Reads a JSON file the user picks, for importing.
+///
+/// **The counterpart to `export_config_file`, and it exists for the same reason.** Reading a local file
+/// is not something a webview can do: a browser `<input type="file">` would hand the app a `File`
+/// object, but the app's own persistence is in Rust and the import path is text in and text out, so a
+/// command that returns the text keeps one entry point rather than two. It also means the user sees a
+/// native dialog naming the file, which is what makes an import auditable.
+///
+/// `Ok(None)` means the user dismissed the dialog: an ordinary outcome, not an error.
+///
+/// The size cap is real rather than theoretical — the dialog can select any file on disk, and reading a
+/// multi-gigabyte one into a `String` would fail with an allocation error that names nothing.
+#[tauri::command]
+pub async fn read_config_file(
+    app: tauri::AppHandle,
+    title: Option<String>,
+) -> Result<Option<ImportedFile>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_title(title.unwrap_or_else(|| "导入配置".to_string()))
+        .add_filter("JSON 配置", &["json"])
+        .pick_file(move |path| {
+            let _ = sender.send(path);
+        });
+
+    let chosen = receiver
+        .await
+        .map_err(|_| "打开对话框未能返回结果。".to_string())?;
+    let Some(chosen) = chosen else {
+        return Ok(None);
+    };
+    let path: std::path::PathBuf = chosen
+        .into_path()
+        .map_err(|error| format!("无法解析所选文件位置：{error}"))?;
+
+    let metadata =
+        std::fs::metadata(&path).map_err(|error| format!("无法读取文件信息：{error}"))?;
+    if metadata.len() > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "文件过大（{} KB），超过可导入的上限（{} MiB）。",
+            metadata.len() / 1024,
+            MAX_IMPORT_BYTES / 1024 / 1024
+        ));
+    }
+
+    let text =
+        std::fs::read_to_string(&path).map_err(|error| format!("读取文件失败：{error}"))?;
+
+    Ok(Some(ImportedFile {
+        path: path.to_string_lossy().into_owned(),
+        text,
+    }))
+}
 
 /// What fetching a configuration address produced.
 ///

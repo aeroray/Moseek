@@ -97,9 +97,10 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
-  attachExportExtras,
   readExportExtras,
+  stripExportExtras,
 } from "@/features/config/config-extras";
+import { buildExportConfigText } from "@/features/config/config-export";
 import {
   absolutizeRelativeSites,
   mergeRawConfigs,
@@ -302,11 +303,9 @@ export function ConfigCenter() {
   const setSourceFilter = useAppStore((state) => state.setSourceFilter);
   const isFilterOpen = useAppStore((state) => state.isSourceFilterOpen);
   const setIsFilterOpen = useAppStore((state) => state.setSourceFilterOpen);
-  // Favourites and the theme travel in an export under a namespaced key. The store owns them; this
-  // page is where an export is assembled and where an import is read back.
-  const theme = useAppStore((state) => state.theme);
-  const favorites = useAppStore((state) => state.favorites);
-  const liveFavorites = useAppStore((state) => state.liveFavorites);
+  // Favourites and the theme no longer travel in an export — 设置 owns 软件数据 now — but the store
+  // actions stay: an older export still carries a `moseek` key, and reading it is how a user who
+  // exported before the split gets their favourites back.
   const setTheme = useAppStore((state) => state.setTheme);
   const restoreFavorites = useAppStore((state) => state.restoreFavorites);
   const [adapterQuery, setAdapterQuery] = useState("");
@@ -2020,6 +2019,18 @@ export function ConfigCenter() {
     // documents in memory and hands the result over here rather than routing it through the editor.
     const incomingText = options.rawOverride ?? importText;
 
+    // **The `moseek` key is dropped before anything else reads the text.** Exported files used to
+    // carry the user's favourites and theme under that key. Two reasons it must not survive:
+    //
+    //  - The visual editor renders unrecognised top-level keys as rows under 其他设置, so the app's own
+    //    data appeared as a TVBox client setting. 配置中心 holds resources; app data belongs in 设置.
+    //  - It would then be written into the stored document and re-exported, so a file that picked it
+    //    up once would keep carrying it.
+    //
+    // Read first, discard second: `applyImportedExtras` below restores the favourites from an older
+    // export, so removing the key here loses the data only from the configuration, not from the user.
+    const strippedText = stripExportExtras(incomingText);
+
     // **Unsupported entries are dropped before anything else looks at them.** The user's decision:
     // an adapter Moseek cannot support should not be carried around at all, because recognising it
     // tells the reader nothing and this application will never implement it. Pruning the incoming
@@ -2028,7 +2039,7 @@ export function ConfigCenter() {
     // The count is taken from the same call that removes them, so the sentence the user reads is
     // about what actually happened rather than a second count that could disagree.
     const prunedIncoming = pruneUnsupportedConfigText(
-      incomingText,
+      strippedText,
       configBaseUrl ?? null,
     );
     const prunedCount = prunedIncoming.removed;
@@ -2147,18 +2158,27 @@ export function ConfigCenter() {
         .join(" "),
     });
     setImportOpen(false);
-    // Favourites and the theme, if this file carries them. Read after the configuration has been
-    // committed, so a malformed extras block cannot stop the import itself from happening — the
-    // sources are the reason the user pasted the file.
-    applyImportedExtras(storedRawText);
+    // Favourites and the theme, if this file carries them. Two details matter here:
+    //
+    //  - **`incomingText`, not `storedRawText`.** The stored text has had the `moseek` key stripped, so
+    //    reading the extras from it would find nothing — the key is exactly what was removed. The
+    //    original text is the only place the data still is.
+    //  - Read after the configuration has been committed, so a malformed extras block cannot stop the
+    //    import itself from happening — the sources are the reason the user pasted the file.
+    applyImportedExtras(incomingText);
   };
 
   /**
    * Folds the non-configuration part of an imported file into the store.
    *
-   * Only the fields the file actually carries are touched: a configuration written by someone else
-   * has no `moseek` key at all, and one that mentions favourites but not a theme must not reset the
-   * theme to a default nobody chose.
+   * **Kept for files exported before 软件数据 moved to 设置.** Those carry favourites and the theme
+   * under a `moseek` key. The key is stripped from the document itself — see `commitParsedConfig` — so
+   * this is the only path that still reads it, and it exists so a user who exported earlier does not
+   * lose the only copy they have.
+   *
+   * Only the fields the file actually carries are touched: a configuration written by someone else has
+   * no `moseek` key at all, and one that mentions favourites but not a theme must not reset the theme
+   * to a default nobody chose.
    */
   const applyImportedExtras = (text: string) => {
     const extras = readExportExtras(text);
@@ -2215,35 +2235,44 @@ export function ConfigCenter() {
     }
   };
 
+  /**
+   * Writes the configuration the user is looking at.
+   *
+   * **Two things changed here, both because the file and the screen disagreed.**
+   *
+   * 1. **The text is rebuilt from `sources`, not read from `normalizedConfig`.** Those are maintained
+   *    separately, and when they drift the export silently describes a different set of sources from
+   *    the list. Reported as "导出前 60 个，重新导入后 55 个" — the file held 55 while the page showed
+   *    60, and the import was faithful to the file. Deriving the collections at write time makes the
+   *    two agree by construction.
+   *
+   * 2. **No `moseek` key.** Favourites and the theme used to ride along under a namespaced key, which
+   *    made a configuration file carry the user's own app data. The visual editor renders unrecognised
+   *    top-level keys as rows under 其他设置, so importing that file showed 收藏 as a "TVBox 客户端的
+   *    设置" — confusing, and the user's own conclusion is the design rule: 配置中心 holds resources,
+   *    and app data belongs in 设置.
+   *
+   * The extras still have to be *read* on import, because a file exported by an older version of this
+   * app carries them. They are read and then discarded — see `applyImportedExtras`.
+   */
   const handleExport = async () => {
     // The write happens in Rust, behind a real save dialog. The previous version built a blob URL and
     // clicked a detached anchor, which did nothing at all in this webview while reporting no error —
     // see `export_config_file` for the mechanism. Every outcome is now stated, including the one
     // where the user changes their mind.
     try {
-      // Favourites and the theme are not configuration — TVBox has no notion of either — so they
-      // travel under a namespaced key that other clients ignore and that this app reads back on
-      // import. 足迹 is deliberately not included: it records where this machine has been.
-      const text = attachExportExtras(
-        normalizedConfig || JSON.stringify({ sites: sources, lives: [] }, null, 2),
-        { schemaVersion: 1, theme, favorites, liveFavorites },
-      );
+      const text = buildExportConfigText(normalizedConfig, sources);
       const saved = await exportConfigFile(text, activeConfigId ?? undefined);
       if (!saved) {
         // A dismissed dialog is an ordinary outcome, not a failure, so nothing is reported.
         return;
       }
-      const extras = [
-        favorites.length > 0 || liveFavorites.length > 0
-          ? `收藏 ${favorites.length + liveFavorites.length} 项`
-          : null,
-        theme ? "主题偏好" : null,
-      ].filter(Boolean);
       setParseState({
         type: "success",
         message:
           `已导出到 ${saved.path}（${Math.round(saved.bytes / 1024)} KB）` +
-          (extras.length > 0 ? `，含${extras.join("、")}` : ""),
+          `，含 ${sources.filter((source) => source.sourceType !== "live").length} 个影视源、` +
+          `${sources.filter((source) => source.sourceType === "live").length} 个直播源。`,
       });
     } catch (error) {
       setParseState({

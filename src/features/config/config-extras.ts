@@ -2,20 +2,22 @@ import type { LiveFavorite, ThemeMode, VodFavorite } from "@/types/moseek";
 import { normalizeLiveFavorite, normalizeVodFavorite } from "@/lib/user-content";
 
 /**
- * The part of an export that is not configuration.
+ * The part of a file that is not configuration, and the one reader that still understands it.
  *
- * A TVBox configuration has no notion of favourites or of a UI theme, so these travel in a
- * namespaced `moseek` key alongside the real fields. Two consequences follow, and both are why the
- * shape is defined here rather than inline at the call site:
+ * **This is now a legacy shape, kept deliberately.** Favourites and the theme used to be written into
+ * every exported configuration under a `moseek` key. That was wrong for two reasons the user reported:
+ * the visual editor renders unrecognised top-level keys as rows under 其他设置, so importing an export
+ * showed 收藏 as a TVBox client setting; and exporting a configuration carried personal data with it.
  *
- *  - **The file stays importable by other clients.** `sites` / `lives` / `parses` are untouched, so
- *    TVBox and friends read the same file they always could; the extra key is ignored by them.
- *  - **Import has to opt in.** Reading `moseek` back is a deliberate step, not a side effect of
- *    parsing, so a configuration from an untrusted source cannot silently replace the user's
- *    favourites or their theme.
+ * They now live in their own file — see `features/settings/app-data-file.ts` — and `sites` / `lives` /
+ * `parses` are the only keys a configuration carries.
  *
- * 足迹 is deliberately absent. The user asked for it to stay out: a list of where you have been is a
- * record of this machine's use, and carrying it to another computer would be noise at best.
+ * What remains here is the reader, because a user who exported before the split has their only copy of
+ * their favourites in this shape, and refusing to read it would lose it. `stripExportExtras` is what
+ * keeps the shape out of the stored document.
+ *
+ * 足迹 is deliberately absent from all of it. The user asked for it to stay out: a list of where you
+ * have been is a record of this machine's use, and carrying it to another computer would be noise.
  */
 export interface MoseekExportExtras {
   schemaVersion: 1;
@@ -29,38 +31,31 @@ export interface MoseekExportExtras {
 export const EXPORT_EXTRAS_KEY = "moseek";
 
 /**
- * Merges the extras into a configuration document.
+ * Removes the `moseek` key from a configuration document.
  *
- * Operates on text rather than on an object because the raw text is what the app stores and exports:
- * parsing and re-serialising it here would drop any field the parser does not model — the same
- * reason the import merge works on raw text.
+ * **A configuration that still carries it shows the user's own app data as a configuration setting.**
+ * The visual editor lists unrecognised top-level keys under 其他设置, and `moseek` was not in its known
+ * set, so importing an exported file put 收藏 and the theme into a block labelled "TVBox 客户端的设置".
  *
- * If the text is not a JSON object, it is returned unchanged. An export that cannot be annotated is
- * still a valid export; refusing to write it would be the worse outcome.
+ * Stripping at the import boundary is what keeps the stored document a pure configuration. Doing it on
+ * export alone would leave the key in every document already imported, so the block would return on the
+ * next open — the stored text, not the file, is what the editor reads.
+ *
+ * Returns the text unchanged when the key is absent, so the ordinary case costs one parse and no
+ * re-serialisation: comments and layout survive for a configuration written by another client.
  */
-export function attachExportExtras(
-  configText: string,
-  extras: MoseekExportExtras,
-): string {
+export function stripExportExtras(configText: string): string {
   let parsed: unknown;
   try {
     parsed = JSON.parse(configText);
   } catch {
     return configText;
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return configText;
-  }
-
-  // Drop empty collections rather than writing `"favorites": []`: an absent key and an empty one mean
-  // the same thing to the importer, and a file that says nothing about favourites should not look
-  // like it is saying "you have none".
-  const cleaned: MoseekExportExtras = { schemaVersion: 1 };
-  if (extras.theme) cleaned.theme = extras.theme;
-  if (extras.favorites?.length) cleaned.favorites = extras.favorites;
-  if (extras.liveFavorites?.length) cleaned.liveFavorites = extras.liveFavorites;
-
-  return JSON.stringify({ ...parsed, [EXPORT_EXTRAS_KEY]: cleaned }, null, 2);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return configText;
+  const record = parsed as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, EXPORT_EXTRAS_KEY)) return configText;
+  delete record[EXPORT_EXTRAS_KEY];
+  return JSON.stringify(record, null, 2);
 }
 
 /**

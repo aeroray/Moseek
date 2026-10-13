@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Download,
   FileUp,
   HardDrive,
   Info,
@@ -9,6 +10,7 @@ import {
   Play,
   Sun,
   Trash2,
+  Upload,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -36,7 +38,17 @@ import {
 } from "@/components/clear-records-dialog";
 import { AppUpdatePanel } from "@/features/update/app-update-panel";
 import { APP_VERSION } from "@/lib/app-meta";
-import type { FootprintKind, ThemeMode } from "@/types/moseek";
+import { exportConfigFile, readConfigFile } from "@/lib/tauri";
+import { buildAppDataText, readAppDataText } from "@/features/settings/app-data-file";
+import type {
+  FootprintKind,
+  LiveFavorite,
+  ThemeMode,
+  VodFavorite,
+} from "@/types/moseek";
+
+/** The name the 软件数据 save dialog opens with, distinct from the configuration's file name. */
+const APP_DATA_FILE_NAME = "moseek-data.json";
 
 /**
  * The version is read through `app-meta`, which is the one place the product's display facts live.
@@ -63,6 +75,20 @@ interface SettingsViewProps {
   progressCount: number;
   onClearHistory: (kind: FootprintKind) => void;
   onClearFavorites: (kind: FootprintKind) => void;
+  /**
+   * The app's own data, for 软件数据's export and import.
+   *
+   * Passed in rather than read from the store here so this view stays a presentational component like
+   * the rest of the settings page — the same reason the counts above are props.
+   */
+  themeMode: ThemeMode;
+  favorites: VodFavorite[];
+  liveFavorites: LiveFavorite[];
+  /** Restores favourites from a data file. Returns how many were added. */
+  onRestoreAppData: (input: {
+    favorites?: VodFavorite[];
+    liveFavorites?: LiveFavorite[];
+  }) => { vod: number; live: number };
 }
 
 /**
@@ -88,8 +114,15 @@ export function SettingsView({
   progressCount,
   onClearHistory,
   onClearFavorites,
+  favorites,
+  liveFavorites,
+  onRestoreAppData,
 }: SettingsViewProps) {
   const [storageMessage, setStorageMessage] = useState("");
+  /** The outcome of the last 软件数据 export or import, so the section reports what happened. */
+  const [dataMessage, setDataMessage] = useState("");
+  /** Whether a file dialog is open, so both buttons are disabled while it is. */
+  const [isDataBusy, setIsDataBusy] = useState(false);
   /** Which clear dialog is open, if any. `null` means neither. */
   const [clearKind, setClearKind] = useState<"history" | "favorites" | null>(
     null,
@@ -97,6 +130,81 @@ export function SettingsView({
 
   const historyCount = historyCounts.vod + historyCounts.live;
   const favoriteCount = favoriteCounts.vod + favoriteCounts.live;
+
+  /**
+   * Writes the app's own data to a JSON file.
+   *
+   * Same Rust command the configuration centre uses; only the dialog's labels differ. That is
+   * deliberate — one dialog and one write path means an export cannot behave differently depending on
+   * which page it was started from.
+   */
+  const handleExportData = async () => {
+    setIsDataBusy(true);
+    setDataMessage("");
+    try {
+      const text = buildAppDataText({ theme, favorites, liveFavorites });
+      const saved = await exportConfigFile(text, undefined, {
+        fileName: APP_DATA_FILE_NAME,
+        title: "导出软件数据",
+      });
+      if (!saved) return;
+      // The counts are named rather than the byte size: the user's question is whether their
+      // favourites came along, and "12 KB" answers a different one.
+      setDataMessage(
+        `已导出到 ${saved.path}（收藏 ${favorites.length + liveFavorites.length} 项、主题偏好）。`,
+      );
+    } catch (error) {
+      setDataMessage(
+        `导出失败：${error instanceof Error ? error.message : "无法写入文件"}`,
+      );
+    } finally {
+      setIsDataBusy(false);
+    }
+  };
+
+  /**
+   * Reads a data file back.
+   *
+   * Accepts the old format too — favourites nested under a configuration's `moseek` key — because a
+   * user who exported before this split has their only copy in that shape, and telling them it is the
+   * wrong kind of file would be true and useless.
+   */
+  const handleImportData = async () => {
+    setIsDataBusy(true);
+    setDataMessage("");
+    try {
+      const file = await readConfigFile("导入软件数据");
+      if (!file) return;
+      const data = readAppDataText(file.text);
+      if (!data) {
+        setDataMessage(
+          "这个文件里没有软件数据。请选择「导出软件数据」生成的文件；配置文件请到配置中心导入。",
+        );
+        return;
+      }
+      if (data.theme) onThemeChange(data.theme);
+      const added = onRestoreAppData({
+        favorites: data.favorites,
+        liveFavorites: data.liveFavorites,
+      });
+      const parts = [
+        added.vod > 0 ? `影视收藏 ${added.vod} 项` : null,
+        added.live > 0 ? `直播收藏 ${added.live} 项` : null,
+        data.theme ? "主题偏好" : null,
+      ].filter(Boolean);
+      setDataMessage(
+        parts.length > 0
+          ? `已恢复：${parts.join("、")}。已有收藏保持不变。`
+          : "文件中没有可恢复的内容。",
+      );
+    } catch (error) {
+      setDataMessage(
+        `导入失败：${error instanceof Error ? error.message : "无法读取文件"}`,
+      );
+    } finally {
+      setIsDataBusy(false);
+    }
+  };
   const historyTargets: ClearTarget<FootprintKind>[] = [
     { kind: "vod", label: "影视足迹", count: historyCounts.vod },
     { kind: "live", label: "电视直播足迹", count: historyCounts.live },
@@ -285,6 +393,61 @@ export function SettingsView({
                       {storageMessage && (
                         <p className="text-xs text-muted-foreground">
                           {storageMessage}
+                        </p>
+                      )}
+                    </SettingsSection>
+
+                    {/* 软件数据 lives here rather than in 配置中心, and that placement is the point.
+                        Favourites and the theme used to ride along inside an exported configuration
+                        under a `moseek` key, which had two consequences the user reported: the visual
+                        editor listed 收藏 under 其他设置 as if it were a TVBox client setting, and
+                        exporting a configuration carried personal data with it. 配置中心 exports
+                        resources; this page exports the application's own data. */}
+                    <SettingsSection
+                      title="软件数据"
+                      description="收藏与主题偏好。它们不属于资源配置，因此单独导入导出；配置中心只处理影视源与直播源。"
+                    >
+                      <div className="flex flex-col divide-y divide-border/60">
+                        <SettingRow
+                          icon={<Download className="size-4" aria-hidden="true" />}
+                          label="导出软件数据"
+                          description={
+                            favoriteCount > 0
+                              ? `收藏 ${favoriteCount} 项与当前主题偏好，写成一个 JSON 文件。`
+                              : "当前没有收藏，只导出主题偏好。"
+                          }
+                          control={
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              disabled={isDataBusy}
+                              onClick={() => void handleExportData()}
+                            >
+                              导出
+                            </Button>
+                          }
+                        />
+                        <SettingRow
+                          icon={<Upload className="size-4" aria-hidden="true" />}
+                          label="导入软件数据"
+                          description="从之前导出的文件恢复收藏与主题；已有的收藏会合并，不会覆盖。"
+                          control={
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              size="sm"
+                              disabled={isDataBusy}
+                              onClick={() => void handleImportData()}
+                            >
+                              选择文件
+                            </Button>
+                          }
+                        />
+                      </div>
+                      {dataMessage && (
+                        <p className="text-xs text-muted-foreground" role="status">
+                          {dataMessage}
                         </p>
                       )}
                     </SettingsSection>

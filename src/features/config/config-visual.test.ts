@@ -123,6 +123,43 @@ describe("reading a configuration into the visual model", () => {
     expect(result.sections[0].entries[0].extraFieldCount).toBe(2);
   });
 
+  it("does not offer the parser's own bookkeeping as a TVBox setting", () => {
+    // **The reported defect.** The block is for keys belonging to other TVBox clients, but it was also
+    // listing `schemaVersion`, `configDialect` and `blockedFields` — all three written by Moseek's own
+    // parser when it normalises a document. So an imported configuration grew a 其他设置 block that
+    // the same configuration did not have before the import, and the block offered a `schemaVersion`
+    // text box whose value is regenerated on every write.
+    const result = readVisualConfig(
+      JSON.stringify({
+        sites: [],
+        schemaVersion: "0.2",
+        configDialect: "tvbox",
+        blockedFields: ["spider"],
+        // The app's own data key, from an export written before 软件数据 moved to 设置.
+        moseek: { schemaVersion: 1, favorites: [{ key: "leaked" }] },
+      }),
+    );
+    if (!result.ok) throw new Error("expected a parse");
+
+    const keys = result.settings.map((s) => s.key);
+    for (const key of ["schemaVersion", "configDialect", "blockedFields", "moseek"]) {
+      expect(keys, key).not.toContain(key);
+    }
+  });
+
+  it("still offers a key that belongs to another TVBox client", () => {
+    // The other half: the block's purpose is to show these, so the fix above must not become an
+    // allow-list that hides them.
+    const result = readVisualConfig(
+      JSON.stringify({ sites: [], doh: [{ name: "dns", url: "https://dns.example" }], ads: ["ad"] }),
+    );
+    if (!result.ok) throw new Error("expected a parse");
+
+    const keys = result.settings.map((s) => s.key);
+    expect(keys).toContain("doh");
+    expect(keys).toContain("ads");
+  });
+
   it("separates the entry arrays from the scalar settings", () => {
     const result = readVisualConfig(sample);
     if (!result.ok) throw new Error("expected a parse");

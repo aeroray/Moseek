@@ -23,6 +23,10 @@ function renderSettings(overrides: Partial<Parameters<typeof SettingsView>[0]> =
     progressCount: 1,
     onClearHistory: vi.fn(),
     onClearFavorites: vi.fn(),
+    themeMode: "dark" as const,
+    favorites: [],
+    liveFavorites: [],
+    onRestoreAppData: vi.fn(() => ({ vod: 0, live: 0 })),
     ...overrides,
   };
   render(<SettingsView {...props} />);

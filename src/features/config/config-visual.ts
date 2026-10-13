@@ -1,5 +1,6 @@
 import JSON5 from "json5";
 
+import { EXPORT_EXTRAS_KEY } from "@/features/config/config-extras";
 import { rawFlagFields } from "@/features/config/config-schema";
 
 /**
@@ -154,6 +155,34 @@ const summaryField: Record<VisualSectionKey, string> = {
   parses: "url",
 };
 
+/**
+ * Top-level keys that are not configuration and must never be offered as 其他设置 rows.
+ *
+ * **The block exists for keys belonging to other TVBox clients** — `doh`, `ads`, `ijk`, `wallpaper` —
+ * so a user can see and clear them. The keys listed here are different: they are either this app's own
+ * data or bookkeeping the parser writes itself, and showing them made the block say something false.
+ *
+ *  - `moseek` carried favourites and the theme. Exported files no longer write it and import strips it,
+ *    but a document that already contains it must not show the user's 收藏 under a heading that says
+ *    "TVBox 客户端的设置".
+ *  - `schemaVersion`, `configDialect` and `blockedFields` are **written by the parser** — see
+ *    `normalizedConfig` in config-parser.ts. They describe the document to other tools. Listing them
+ *    as editable "TVBox settings" offered the user a text box for `schemaVersion` whose value is
+ *    regenerated on every write, so editing it did nothing and the heading misdescribed it.
+ *
+ * The count differed between documents, which is how the user noticed: a freshly imported document had
+ * a 其他设置 block while the same configuration before re-import did not.
+ *
+ * This is deliberately a deny-list rather than an allow-list: the block's purpose is to show keys
+ * belonging to other clients, and an allow-list would hide exactly those.
+ */
+const nonConfigurationKeys = new Set<string>([
+  EXPORT_EXTRAS_KEY,
+  "schemaVersion",
+  "configDialect",
+  "blockedFields",
+]);
+
 const knownSectionKeys = new Set<string>(visualSections.map((section) => section.key));
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -266,6 +295,8 @@ export function readVisualConfig(rawText: string): VisualConfigResult {
   const unknownKeys: string[] = [];
   for (const [key, value] of Object.entries(parsed)) {
     if (knownSectionKeys.has(key)) continue;
+    // This app's own data key is not a configuration setting. See `nonConfigurationKeys`.
+    if (nonConfigurationKeys.has(key)) continue;
     if (isPlainObject(value) || Array.isArray(value)) {
       // Collections of rules, hosts and proxies are configuration a user edits as text, not as
       // rows: there is no useful per-item form for `doh` or `ads` that would not be a text box.

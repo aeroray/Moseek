@@ -211,19 +211,42 @@ export interface ExportedConfigFile {
 }
 
 /**
- * Writes the configuration to a file the user chooses.
+ * Writes text to a file the user chooses.
  *
  * Resolves to `null` when the user dismisses the dialog, which is not a failure. The previous
  * approach built a blob URL and clicked a detached anchor, which silently did nothing in this
  * webview — see the Rust side for the mechanism.
  *
- * `text` is the finished document. The caller supplies it because an export also carries the parts
- * that are not configuration (favourites, theme), and those live in the webview's storage.
+ * `text` is the finished document. The caller supplies it because it owns the content — the
+ * configuration centre assembles one from its source list, and 设置 assembles the app's own data file.
+ *
+ * `file_name` and `title` exist for the second of those callers: it is the same operation — one
+ * dialog, one write — and only the labels differ. Defaulting both to the configuration's names keeps
+ * the common call site short.
  */
-export async function exportConfigFile(text: string, documentId?: number) {
+export async function exportConfigFile(
+  text: string,
+  documentId?: number,
+  options: { fileName?: string; title?: string } = {},
+) {
   return invokeCommand<ExportedConfigFile | null>("export_config_file", {
     documentId: documentId ?? null,
     text,
+    fileName: options.fileName ?? null,
+    title: options.title ?? null,
+  });
+}
+
+/**
+ * Reads a JSON file the user picks.
+ *
+ * Resolves to `null` when the user dismisses the dialog. The counterpart to `exportConfigFile`, and it
+ * exists because a webview cannot read a local path: the dialog is native, so the user sees which file
+ * an import is about to use.
+ */
+export async function readConfigFile(title?: string) {
+  return invokeCommand<{ path: string; text: string } | null>("read_config_file", {
+    title: title ?? null,
   });
 }
 

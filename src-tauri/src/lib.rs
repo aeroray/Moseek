@@ -57,6 +57,7 @@ pub fn run() {
             config::commands::update_source_test,
             config::commands::export_config,
             config::commands::export_config_file,
+            config::commands::read_config_file,
             config::commands::fetch_config_url,
             config::commands::set_config_source_base_url,
             config::commands::recover_known_live_sources,

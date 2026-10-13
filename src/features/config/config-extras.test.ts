@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  attachExportExtras,
+  EXPORT_EXTRAS_KEY,
   readExportExtras,
+  stripExportExtras,
+  type MoseekExportExtras,
 } from "@/features/config/config-extras";
 import type { LiveFavorite, VodFavorite } from "@/types/moseek";
 
@@ -27,52 +29,72 @@ const liveFavorite = (key: string): LiveFavorite =>
 
 const CONFIG = JSON.stringify({ sites: [{ key: "a", api: "https://a" }], lives: [] });
 
-describe("attachExportExtras", () => {
-  it("adds favourites and the theme without disturbing the configuration", () => {
-    const text = attachExportExtras(CONFIG, {
-      schemaVersion: 1,
-      theme: "dark",
-      favorites: [favorite("a")],
-      liveFavorites: [liveFavorite("c")],
-    });
+/**
+ * Builds the legacy shape the old exporter wrote.
+ *
+ * Kept as a local helper now that nothing in the application writes it — `attachExportExtras` was
+ * removed when 软件数据 moved to 设置. The reader and the stripper still have to understand the shape,
+ * because a user who exported before the split has their only copy in it.
+ */
+function withExtras(configText: string, extras: MoseekExportExtras): string {
+  const parsed = JSON.parse(configText);
+  const cleaned: MoseekExportExtras = { schemaVersion: 1 };
+  if (extras.theme) cleaned.theme = extras.theme;
+  if (extras.favorites?.length) cleaned.favorites = extras.favorites;
+  if (extras.liveFavorites?.length) cleaned.liveFavorites = extras.liveFavorites;
+  return JSON.stringify({ ...parsed, [EXPORT_EXTRAS_KEY]: cleaned }, null, 2);
+}
+
+describe("stripExportExtras", () => {
+  it("removes the app's own data from a configuration document", () => {
+    // **The defect this exists for.** The key is this app's own data, not configuration, but the visual
+    // editor lists unrecognised top-level keys under 其他设置 — so importing an exported file showed the
+    // user's 收藏 inside a block described as "TVBox 客户端的设置". Reported by the user as confusing.
+    const text = stripExportExtras(
+      withExtras(CONFIG, {
+        schemaVersion: 1,
+        theme: "dark",
+        favorites: [favorite("a")],
+        liveFavorites: [liveFavorite("c")],
+      }),
+    );
     const parsed = JSON.parse(text);
 
-    // The configuration itself is what other clients read; it must survive byte-for-byte in meaning.
+    expect(parsed).not.toHaveProperty(EXPORT_EXTRAS_KEY);
+    // The configuration itself must survive: this is a removal, not a rewrite.
     expect(parsed.sites).toEqual([{ key: "a", api: "https://a" }]);
     expect(parsed.lives).toEqual([]);
-    expect(parsed.moseek.theme).toBe("dark");
-    expect(parsed.moseek.favorites).toHaveLength(1);
-    expect(parsed.moseek.liveFavorites).toHaveLength(1);
   });
 
-  it("never writes 足迹", () => {
-    // The user asked for it to stay out: it records where this machine has been, and carrying it to
-    // another computer would be noise. A stray key would also make the file's shape unpredictable.
-    const text = attachExportExtras(CONFIG, { schemaVersion: 1, theme: "dark" });
-    expect(text).not.toContain("history");
-    expect(text).not.toContain("足迹");
+  it("returns a configuration with no extras byte-for-byte unchanged", () => {
+    // The ordinary case is a file written by another client, and re-serialising it would drop comments
+    // and layout for no reason.
+    expect(stripExportExtras(CONFIG)).toBe(CONFIG);
   });
 
-  it("omits empty collections rather than writing empty arrays", () => {
-    // An absent key and an empty one mean the same thing to the importer, and a file that says
-    // nothing about favourites should not look like it is saying "you have none".
-    const parsed = JSON.parse(
-      attachExportExtras(CONFIG, { schemaVersion: 1, favorites: [], liveFavorites: [] }),
+  it("returns unparseable text unchanged rather than throwing", () => {
+    // A document that cannot be read is not a reason to fail the import: the parser will report it.
+    expect(stripExportExtras("not json")).toBe("not json");
+    expect(stripExportExtras("[]")).toBe("[]");
+    expect(stripExportExtras("null")).toBe("null");
+  });
+
+  it("does not touch a key that merely contains the word", () => {
+    // Scoped to the exact key, so a configuration carrying `moseekVersion` or `notmoseek` keeps it.
+    const text = stripExportExtras(
+      JSON.stringify({ sites: [], moseekVersion: 2, nested: { [EXPORT_EXTRAS_KEY]: 1 } }),
     );
-    expect(parsed.moseek).not.toHaveProperty("favorites");
-    expect(parsed.moseek).not.toHaveProperty("liveFavorites");
-  });
-
-  it("returns unparseable text unchanged", () => {
-    // An export that cannot be annotated is still a valid export; refusing to write it would be the
-    // worse outcome.
-    expect(attachExportExtras("not json", { schemaVersion: 1, theme: "dark" })).toBe("not json");
+    const parsed = JSON.parse(text);
+    expect(parsed.moseekVersion).toBe(2);
+    expect(parsed.nested[EXPORT_EXTRAS_KEY]).toBe(1);
   });
 });
 
 describe("readExportExtras", () => {
-  it("round-trips what an export wrote", () => {
-    const text = attachExportExtras(CONFIG, {
+  it("round-trips what the old exporter wrote", () => {
+    // The reader is the one part of the old shape that must keep working: a user who exported before
+    // 软件数据 moved has their only copy of their favourites in this form.
+    const text = withExtras(CONFIG, {
       schemaVersion: 1,
       theme: "light",
       favorites: [favorite("a")],

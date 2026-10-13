@@ -60,6 +60,7 @@ function App() {
   const playbackProgress = useAppStore((state) => state.playbackProgress);
   const clearHistory = useAppStore((state) => state.clearHistory);
   const clearFavorites = useAppStore((state) => state.clearFavorites);
+  const restoreFavorites = useAppStore((state) => state.restoreFavorites);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -177,6 +178,10 @@ function App() {
                     progressCount={Object.keys(playbackProgress).length}
                     onClearHistory={clearHistory}
                     onClearFavorites={clearFavorites}
+                    themeMode={theme}
+                    favorites={favorites}
+                    liveFavorites={liveFavorites}
+                    onRestoreAppData={restoreFavorites}
                   />
                 </ViewPane>
               )}
