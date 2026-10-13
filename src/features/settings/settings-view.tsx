@@ -35,16 +35,16 @@ import {
   type ClearTarget,
 } from "@/components/clear-records-dialog";
 import { AppUpdatePanel } from "@/features/update/app-update-panel";
+import { APP_VERSION } from "@/lib/app-meta";
 import type { FootprintKind, ThemeMode } from "@/types/moseek";
 
 /**
- * The running version, injected at build time from `package.json`.
+ * The version is read through `app-meta`, which is the one place the product's display facts live.
  *
- * Read from the bundle rather than hard-coded so it cannot drift from the version the installer and
- * the update manifest agree on — a panel that displayed a version differing from the one the updater
- * compares would make "已是最新版本" untrustworthy.
+ * It is still injected at build time from `package.json` rather than hard-coded, so it cannot drift
+ * from the version the installer and the update manifest agree on — a panel displaying a version
+ * differing from the one the updater compares would make "已是最新版本" untrustworthy.
  */
-const APP_VERSION = __APP_VERSION__;
 
 interface SettingsViewProps {
   theme: ThemeMode;

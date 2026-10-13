@@ -1127,6 +1127,45 @@ pub(super) fn set_source_test_in_connection(
 /// source key sets catches that, because a trimmed document's keys are a subset of the
 /// original's. Matching is intentionally generous — the user is asked, not blocked — so a
 /// false positive costs one click while a missed match silently duplicates a configuration.
+/// Removes every configuration, leaving the database with none.
+///
+/// **Lives here rather than inline in the command so it can be tested against a real schema.** The
+/// existing `replace_all_in_connection` test helper duplicates its command's body, which is tolerable
+/// for a swap that is easy to verify by reading. A deletion is not: the failure to catch is a row that
+/// survives, and a test of a copy proves nothing about the rows the copy did not touch.
+///
+/// **It clears only configuration.** Favourites, footprints and playback progress are the user's own
+/// content and are not held in these tables at all — that split is deliberate, and it is what the
+/// confirmation dialog promises.
+///
+/// The `sources` table is cleared explicitly even though it cascades from `config_documents`: it is
+/// written only by older versions, and `ON DELETE CASCADE` requires `PRAGMA foreign_keys = ON`, which
+/// is set per connection. A database opened without it would keep orphaned source rows.
+///
+/// The activation pointer is removed with the rows it names. Leaving it would make the app claim an
+/// active configuration that does not exist, which fails on the next read — so the three statements
+/// are one transaction, because a half-cleared state is worse than either outcome.
+pub(crate) fn clear_all_in_connection(connection: &mut Connection) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    transaction
+        .execute("DELETE FROM sources", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM config_documents", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM app_settings WHERE key = 'active_config_document_id'",
+            [],
+        )
+        .map_err(|error| error.to_string())?;
+
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 pub(crate) fn find_config_duplicate(
     connection: &Connection,
     raw_config: &str,
@@ -1241,6 +1280,123 @@ mod tests {
                  );",
             )
             .unwrap();
+    }
+
+    /// The `sources` table as the real migrations create it, cascade included.
+    ///
+    /// `create_test_schema` above omits it. That was fine while nothing under test touched the table,
+    /// but the clear path deletes from it, and a test that silently skipped a table would pass while
+    /// leaving rows behind.
+    fn create_sources_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE sources (
+                   source_key TEXT PRIMARY KEY,
+                   document_id INTEGER NOT NULL REFERENCES config_documents(id) ON DELETE CASCADE,
+                   name TEXT NOT NULL,
+                   source_type TEXT NOT NULL,
+                   api TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn clearing_removes_every_document_and_the_sources_table() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        create_sources_schema(&connection);
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES ('一', '{}', '{}', '[]', 0)",
+                [],
+            )
+            .unwrap();
+        let first = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES ('二', '{}', '{}', '[]', 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sources (source_key, document_id, name, source_type, api) VALUES ('a', ?1, 'A', 'cms', 'https://a.example')",
+                params![first],
+            )
+            .unwrap();
+
+        clear_all_in_connection(&mut connection).unwrap();
+
+        let documents: i64 = connection
+            .query_row("SELECT COUNT(*) FROM config_documents", [], |row| row.get(0))
+            .unwrap();
+        let sources: i64 = connection
+            .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(documents, 0, "每一份配置文档都必须被删除，而不是只删激活的那份");
+        assert_eq!(sources, 0, "sources 表也必须为空，否则会留下孤儿行");
+    }
+
+    #[test]
+    fn clearing_removes_the_activation_pointer() {
+        // **The failure this prevents.** Leaving `active_config_document_id` naming a deleted document
+        // makes the app claim an active configuration that does not exist, which fails on the next
+        // read — `load_active_config` returns `None` and the page disagrees with the database.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        create_sources_schema(&connection);
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES ('一', '{}', '{}', '[]', 0)",
+                [],
+            )
+            .unwrap();
+        let id = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO app_settings (key, value) VALUES ('active_config_document_id', ?1)",
+                params![id.to_string()],
+            )
+            .unwrap();
+
+        clear_all_in_connection(&mut connection).unwrap();
+
+        let pointer: Option<String> = connection
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'active_config_document_id'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(pointer, None, "激活指针必须随它指向的行一起消失");
+        assert_eq!(active_config_id(&connection).unwrap(), None);
+    }
+
+    #[test]
+    fn clearing_leaves_other_settings_alone() {
+        // The statement is scoped by key on purpose. A bare `DELETE FROM app_settings` would take the
+        // user's unrelated preferences with it, and this is the assertion that says so.
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        create_sources_schema(&connection);
+        connection
+            .execute(
+                "INSERT INTO app_settings (key, value) VALUES ('theme', 'dark')",
+                [],
+            )
+            .unwrap();
+
+        clear_all_in_connection(&mut connection).unwrap();
+
+        let theme: String = connection
+            .query_row("SELECT value FROM app_settings WHERE key = 'theme'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(theme, "dark");
     }
 
     /// The body of `replace_all_config_documents`, without the Tauri `State` wrapper, so the swap

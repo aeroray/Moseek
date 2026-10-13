@@ -121,6 +121,20 @@ export async function deleteConfigDocument(documentId: number) {
   });
 }
 
+/**
+ * Removes every stored configuration.
+ *
+ * **The one destructive call in this file.** It is what the configuration centre's 清空所有配置
+ * button invokes after two confirmations, and it exists as its own command rather than as
+ * `deleteConfigDocument` in a loop so the deletion is a single transaction on the Rust side — see
+ * `clear_all_config_documents` for why a half-cleared state is the outcome to avoid.
+ *
+ * Favourites and footprints are untouched by design.
+ */
+export async function clearAllConfigDocuments() {
+  return invokeCommand<void>("clear_all_config_documents");
+}
+
 export async function saveConfigDocument(input: SaveConfigDocumentInput) {
   return invokeCommand<StoredConfigDocument>("save_config_document", { input });
 }

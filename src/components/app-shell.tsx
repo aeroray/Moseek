@@ -11,6 +11,7 @@ import {
 
 import { AppLogo } from "@/components/app-logo";
 import { WindowControls } from "@/components/window-controls";
+import { APP_NAME, APP_SLOGAN } from "@/lib/app-meta";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useAppStore } from "@/stores/app-store";
@@ -70,7 +71,7 @@ export function AppShell({ activeView, children, onNavigate }: AppShellProps) {
           >
             <AppLogo
               className="size-5 rounded"
-              title="拾影 · 万千影视，一拾即得"
+              title={`${APP_NAME} · ${APP_SLOGAN}`}
             />
           </div>
           <div className="flex-1" data-tauri-drag-region />

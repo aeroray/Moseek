@@ -255,6 +255,20 @@ pub fn delete_config_document(
     storage::load_active_document(&connection)
 }
 
+/// Removes every configuration, leaving the database with none.
+///
+/// **This is the "start over" path, and it deletes the user's imported file.** The interface puts two
+/// confirmations in front of it (see `config-center`'s clear dialogs); this command is the single place
+/// the deletion is reached, so there is exactly one path to audit.
+///
+/// The statements themselves live in `storage::clear_all_in_connection`, which is where they can be
+/// tested against a real schema — see that function for why the deletion is one transaction.
+#[tauri::command]
+pub fn clear_all_config_documents(state: State<'_, AppDatabase>) -> Result<(), String> {
+    let mut connection = state.0.lock().map_err(|_| "数据库锁定失败".to_string())?;
+    storage::clear_all_in_connection(&mut connection)
+}
+
 #[tauri::command]
 pub fn set_source_enabled(
     document_id: i64,

@@ -23,9 +23,9 @@ Evidence:
 - repo:src/lib/adapters.ts
 
 Decision:
-Remote-code detection runs before the declarative exemption, because a source can carry both markers
-and the engine that would run is the remote one. Live sources are exempt: their relative paths are
-repaired against a base URL, so judging them by raw fields races the repair.
+Remote-code detection runs before the declarative exemption: a source can carry both markers, and the
+engine that would run is the remote one. Live sources are exempt — their relative paths are repaired
+against a base URL, so raw fields race the repair.
 
 ## MC-DEC-20261008-e1000003 — A `csp_` prefix is not evidence of remote code
 
@@ -51,9 +51,9 @@ Evidence:
 - repo:src/features/config/config-center.tsx
 
 Decision:
-Import, autosave, and the merge each prune, and a document that already existed needs the
-once-per-document startup pass. Filter the source snapshot with the text, since it describes the
-unpruned text and otherwise the two halves disagree. The startup pass must be idempotent or it loops.
+Import, autosave and the merge each prune, and a pre-existing document needs the once-per-document
+startup pass. Filter the source snapshot with the text, or the two halves disagree. The pass must be
+idempotent or it loops.
 
 ## MC-DEC-20261008-e1000005 — Coerce `ext` identically and name the failing field
 
@@ -66,5 +66,6 @@ Evidence:
 
 Decision:
 Sites and lives must not drift on the same field: a live entry carrying `{"sp":"Huya"}` once failed the
-whole configuration because only one schema stringified objects. Name the field on a schema failure,
-since a Zod path is all there is.
+whole configuration, because only one schema stringified objects. Name the field on failure, since a Zod
+path is all there is.
+

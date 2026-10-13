@@ -152,6 +152,7 @@ import { cn, errorMessage } from "@/lib/utils";
 import {
   activateConfigDocument,
   cancelSourceTest,
+  clearAllConfigDocuments,
   exportConfigFile,
   fetchConfigUrl,
   forgetSourceTestRun,
@@ -287,6 +288,7 @@ export function ConfigCenter() {
   const setConfigDocument = useAppStore((state) => state.setConfigDocument);
   const setSourceTestResult = useAppStore((state) => state.setSourceTestResult);
   const setConfigDocuments = useAppStore((state) => state.setConfigDocuments);
+  const clearConfigDocument = useAppStore((state) => state.clearConfigDocument);
   const [query, setQuery] = useState("");
   /**
    * The source list's filter, held in the store so it survives a restart.
@@ -853,6 +855,19 @@ export function ConfigCenter() {
    * most likely to click again.
    */
   const [isRemoving, setIsRemoving] = useState(false);
+  /**
+   * Which step of the 清空所有配置 confirmation is open, if any.
+   *
+   * **Two steps, not one, and that is the user's requirement.** Clearing the configuration deletes the
+   * file they imported, and re-importing it is the only way back — so the first dialog states what will
+   * be lost and the second asks again. A single confirm is the shape people click through; the second
+   * step is what makes the intent deliberate rather than reflexive.
+   *
+   * `null` means neither is open.
+   */
+  const [clearStep, setClearStep] = useState<"confirm" | "final" | null>(null);
+  /** Whether the clear is running, so its button reports that instead of looking inert. */
+  const [isClearing, setIsClearing] = useState(false);
 
   const performRemoveSources = useCallback(
     async (keys: string[]) => {
@@ -906,6 +921,70 @@ export function ConfigCenter() {
     setRemoveRequest(null);
     await performRemoveSources(request.keys);
   };
+
+  /**
+   * Removes every configuration, in one transaction, and resets the page to its empty state.
+   *
+   * **Why the local state is reset rather than reloaded.** The Rust side deletes the rows and the
+   * activation pointer; what the page holds is a mirror of them, and re-reading would mean a round trip
+   * that can fail after the deletion already happened — leaving the list showing sources that no longer
+   * exist. Resetting is therefore the accurate description of what the database now contains, not an
+   * optimistic guess. `clearConfigDocument` is the same store action the app uses on startup when no
+   * document is found, so the empty state is one that is already known to render.
+   *
+   * **What deliberately survives:** favourites, footprints and playback progress. The user asked to
+   * clear the configuration, not to lose what they had collected, and a favourite pointing at a source
+   * that is gone reports itself as unresolvable rather than vanishing.
+   *
+   * The editor draft is dropped too. Leaving text in the import box that the page no longer reflects
+   * would make the next 合并 look like it was importing on top of something.
+   */
+  const performClearAll = useCallback(async () => {
+    setIsClearing(true);
+    try {
+      await clearAllConfigDocuments();
+      clearConfigDocument();
+      // **`clearConfigDocument` does not empty the document list, and the database now has none.**
+      // Leaving the mirror populated made the header keep claiming a document and left 清空所有配置
+      // enabled with nothing to clear — measured in a real browser: after the clear the list read
+      // 0 个源 while `configDocuments` still held one entry. The store action is scoped to the active
+      // document, so the list is emptied explicitly here.
+      setConfigDocuments([]);
+      // The merge summary describes a document that no longer exists.
+      setLastMergeSummary(null);
+      setImportText("");
+      setRawDraft(null);
+      setRawStatus(null);
+      setInspectedSourceKey(null);
+      setMultiRepo(null);
+      setClearStep(null);
+      setParseState({
+        type: "success",
+        title: "配置已清空",
+        message:
+          "所有配置文档与源都已删除，可以导入新的配置了。收藏、足迹与观看进度保留。",
+      });
+      toast({
+        variant: "success",
+        title: "配置已清空",
+        description: "收藏、足迹与观看进度未受影响。",
+      });
+    } catch (error) {
+      setClearStep(null);
+      setParseState({
+        type: "error",
+        title: "清空失败",
+        message: errorMessage(error, "无法清空配置"),
+      });
+      toast({
+        variant: "error",
+        title: "清空失败",
+        description: errorMessage(error, "无法清空配置"),
+      });
+    } finally {
+      setIsClearing(false);
+    }
+  }, [clearConfigDocument, setConfigDocuments, toast]);
   /**
    * Single tests the user has abandoned, by source key.
    *
@@ -2205,6 +2284,20 @@ export function ConfigCenter() {
               {lastMergeSummary.unchanged}
             </span>
           )}
+          {/* The one destructive action on this page, and the only place it is offered.
+              Disabled when there is nothing to clear, so it cannot be pressed to no effect — the same
+              rule the storage tab's clear buttons follow. */}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="shrink-0 gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+            disabled={sources.length === 0 && !rawConfig.trim() && configDocuments.length === 0}
+            onClick={() => setClearStep("confirm")}
+          >
+            <Trash2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+            清空所有配置
+          </Button>
         </section>
 
         {relativeLiveSources.length > 0 && !activeDocument?.sourceBaseUrl && (
@@ -2576,15 +2669,30 @@ export function ConfigCenter() {
                         <EmptyMedia variant="icon">
                           <Search className="size-4" data-icon="inline-start" aria-hidden="true" />
                         </EmptyMedia>
+                        {/* **"Nothing to show" and "nothing matches" are different problems, and the
+                            order of these checks decides which one the user is told about.**
+                            The page opens with a filter already applied — `defaultSourceFilter` keeps
+                            `executions: ["enabled"]` so the list is not a wall of sources with no
+                            adapter — which means `isFilterUnfiltered` is false from the first render.
+                            Testing the filter first therefore made the "当前配置没有源" branch
+                            unreachable, and a configuration with no sources at all was reported as
+                            "调整关键词或筛选条件后重试": advice to adjust a filter that can never
+                            produce a row. Measured after 清空所有配置, where the list is genuinely
+                            empty and the message blamed the user's filtering.
+                            An empty configuration is the more specific fact, so it is tested first. */}
                         <EmptyTitle>
-                          {isFilterUnfiltered(sourceFilter) && !query.trim()
+                          {sources.length === 0
                             ? "当前配置没有源"
-                            : "没有匹配的源"}
+                            : isFilterUnfiltered(sourceFilter) && !query.trim()
+                              ? "列表里没有源"
+                              : "没有匹配的源"}
                         </EmptyTitle>
                         <EmptyDescription>
-                          {isFilterUnfiltered(sourceFilter) && !query.trim()
+                          {sources.length === 0
                             ? "导入一份配置后，源会出现在这里。"
-                            : "调整关键词或筛选条件后重试。"}
+                            : isFilterUnfiltered(sourceFilter) && !query.trim()
+                              ? "这份配置里确实没有可用的源。"
+                              : "调整关键词或筛选条件后重试。"}
                         </EmptyDescription>
                       </EmptyHeader>
                     </Empty>
@@ -3246,6 +3354,109 @@ export function ConfigCenter() {
                 <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
               )}
               {isRemoving ? "正在删除…" : "确认删除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 清空所有配置 — step one of two.
+          It names what is lost *and* what is kept, because the fear this dialog has to answer is
+          "will this take my favourites with it", and the honest answer is no. */}
+      <Dialog
+        open={clearStep === "confirm"}
+        onOpenChange={(open) => {
+          if (!open && !isClearing) setClearStep(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>清空所有配置？</DialogTitle>
+            <DialogDescription asChild>
+              <div className="flex flex-col gap-3 text-sm">
+                <p>
+                  将删除当前的全部配置：
+                  <span className="font-semibold text-foreground">
+                    {configDocuments.length}
+                  </span>{" "}
+                  份配置文档、
+                  <span className="font-semibold text-foreground">{sources.length}</span>{" "}
+                  个源，以及原始配置与归一化配置。
+                </p>
+                <ul className="list-disc space-y-1 pl-5 text-xs text-muted-foreground">
+                  <li>删除后列表和原始配置都会变空，回到首次启动的样子。</li>
+                  <li>
+                    <span className="text-foreground">收藏、足迹与观看进度保留</span>
+                    ，它们不属于配置。
+                  </li>
+                  <li>
+                    收藏里指向已删除源的影视会显示为无法解析；重新导入后即可恢复。
+                  </li>
+                  <li>此操作不能撤销，除非你手上还有原始配置文件。</li>
+                </ul>
+                <p className="text-xs text-muted-foreground">
+                  下一步还会再确认一次。
+                </p>
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isClearing}
+              onClick={() => setClearStep(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              className="gap-1.5"
+              disabled={isClearing}
+              onClick={() => setClearStep("final")}
+            >
+              继续
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 清空所有配置 — step two of two.
+          Deliberately plainer than the first: the reasoning was given there, and repeating it would
+          make the second step feel like the same dialog rather than a distinct confirmation. */}
+      <Dialog
+        open={clearStep === "final"}
+        onOpenChange={(open) => {
+          if (!open && !isClearing) setClearStep(null);
+        }}
+      >
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>最后确认</DialogTitle>
+            <DialogDescription>
+              再次确认：{sources.length} 个源与全部配置文档将被永久删除。此操作不能撤销。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isClearing}
+              onClick={() => setClearStep(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              className="gap-1.5"
+              disabled={isClearing}
+              onClick={() => void performClearAll()}
+            >
+              {isClearing && (
+                <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+              )}
+              {isClearing ? "正在清空…" : "确认清空"}
             </Button>
           </DialogFooter>
         </DialogContent>

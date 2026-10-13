@@ -3,6 +3,7 @@ import { CircleAlert, Download, LoaderCircle, RefreshCw, RotateCw } from "lucide
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { APP_CODE_NAME, APP_NAME, formatVersion } from "@/lib/app-meta";
 import { ReleaseNotes } from "@/features/update/release-notes-view";
 import {
   canCheckForUpdates,
@@ -41,10 +42,13 @@ export function AppUpdatePanel({ currentVersion }: { currentVersion: string }) {
         <div className="flex min-w-0 flex-col gap-1">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-foreground">
-              Moseek 拾影
+              {APP_CODE_NAME} {APP_NAME}
             </span>
+            {/* No `v` prefix. It reads as noise beside a version, and the update banner naming
+                `v1.0.1` while the badge beside it said `v1.0.0` made the two look like different
+                kinds of value. `formatVersion` is the one place that decides the spelling. */}
             <Badge variant="secondary" className="tabular-nums">
-              v{currentVersion}
+              {formatVersion(currentVersion)}
             </Badge>
           </div>
           <p className="text-xs text-muted-foreground" aria-live="polite">
@@ -57,7 +61,7 @@ export function AppUpdatePanel({ currentVersion }: { currentVersion: string }) {
                   : downloading
                     ? "正在下载更新…"
                     : available
-                      ? `发现新版本 v${available.version}`
+                      ? `发现新版本 ${formatVersion(available.version)}`
                       : upToDate
                         ? "已是最新版本"
                         : "尚未检查更新"}

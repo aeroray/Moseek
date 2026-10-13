@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SettingsView } from "@/features/settings/settings-view";
+import { APP_VERSION } from "@/lib/app-meta";
 
 // The settings page is the one place a user goes to answer "what can I change?". Every control on
 // it therefore has to change something: a switch that moves and does nothing is worse than no
@@ -295,6 +296,17 @@ describe("settings page", () => {
       const tab = screen.getByRole("tab", { name: label });
       expect(tab.querySelector(`.${iconClass}`), label).toBeTruthy();
     }
+  });
+
+  it("shows the version with no v prefix", () => {
+    // The badge read `v1.0.0` while the update banner read `v1.0.1` — the same kind of value spelled
+    // two ways, and the prefix is noise beside a number the label already identifies.
+    renderSettings();
+    openTab("关于");
+
+    const version = APP_VERSION;
+    expect(screen.getByText(version, { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(`v${version}`)).not.toBeInTheDocument();
   });
 
   it("keeps the page from scrolling as a whole, like the configuration centre", () => {

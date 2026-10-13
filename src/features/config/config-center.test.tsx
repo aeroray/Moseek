@@ -8,6 +8,7 @@ import { ConfigCenter } from "@/features/config/config-center";
 import {
   activateConfigDocument,
   cancelSourceTest as cancelSourceTestCommand,
+  clearAllConfigDocuments,
   exportConfigFile,
   fetchConfigUrl,
   forgetSourceTestRun as forgetSourceTestRunCommand,
@@ -38,6 +39,7 @@ vi.mock("@/lib/tauri", () => ({
   updateSourceTest: vi.fn(),
   activateConfigDocument: vi.fn(),
   deleteConfigDocument: vi.fn(),
+  clearAllConfigDocuments: vi.fn(async () => undefined),
   saveConfigDocument: vi.fn(),
   replaceAllConfigDocuments: vi.fn(async (input) => ({
     id: 1,
@@ -3888,5 +3890,202 @@ describe("config center", () => {
     // All 120 matches are rendered, with no "显示全部" in the way.
     expect(screen.getByRole("button", { name: "编辑 匹配源 119" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "显示全部" })).not.toBeInTheDocument();
+  });
+
+  /**
+   * 清空所有配置 — the one destructive action on this page.
+   *
+   * The user's requirement was explicit: it must take two confirmations, because it deletes the
+   * configuration file they imported and re-importing it is the only way back.
+   */
+  describe("clearing every configuration", () => {
+    /** Opens both confirmation steps and presses the final button. */
+    function clearEverything() {
+      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+      fireEvent.click(screen.getByRole("button", { name: "继续" }));
+      fireEvent.click(screen.getByRole("button", { name: "确认清空" }));
+    }
+
+    it("asks twice before deleting anything", async () => {
+      renderCenter();
+      vi.mocked(clearAllConfigDocuments).mockClear();
+
+      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+
+      // Step one names what is lost and what is kept.
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+      expect(screen.getByText("清空所有配置？")).toBeInTheDocument();
+      expect(screen.getByText(/收藏、足迹与观看进度保留/)).toBeInTheDocument();
+      // **Nothing has been deleted yet.** Pressing the first button must not call the command.
+      expect(clearAllConfigDocuments).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole("button", { name: "继续" }));
+
+      // Step two is a distinct dialog, not the same one re-rendered.
+      expect(screen.getByText("最后确认")).toBeInTheDocument();
+      expect(clearAllConfigDocuments).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when either step is cancelled", async () => {
+      renderCenter();
+      vi.mocked(clearAllConfigDocuments).mockClear();
+
+      // Cancel at step one.
+      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+      fireEvent.click(screen.getByRole("button", { name: "取消" }));
+      expect(clearAllConfigDocuments).not.toHaveBeenCalled();
+
+      // Cancel at step two — the dangerous one to get wrong, because the user has already
+      // committed once and might reasonably change their mind.
+      fireEvent.click(screen.getByRole("button", { name: "清空所有配置" }));
+      fireEvent.click(screen.getByRole("button", { name: "继续" }));
+      fireEvent.click(screen.getByRole("button", { name: "取消" }));
+      expect(clearAllConfigDocuments).not.toHaveBeenCalled();
+      expect(useAppStore.getState().sources).toHaveLength(3);
+    });
+
+    it("empties the list, the raw configuration and the documents together", async () => {
+      renderCenter();
+      vi.mocked(clearAllConfigDocuments).mockClear();
+
+      clearEverything();
+
+      await waitFor(() => expect(clearAllConfigDocuments).toHaveBeenCalledTimes(1));
+      await waitFor(() => {
+        const state = useAppStore.getState();
+        // **All four, because the page reads all four.** Clearing only the list would leave the
+        // 原始配置 tab showing a document that no longer exists; leaving `configDocuments` populated
+        // made the header keep claiming one and left the clear button enabled with nothing left to
+        // clear — both measured in a real browser before this assertion existed.
+        expect(state.sources).toHaveLength(0);
+        expect(state.rawConfig).toBe("");
+        expect(state.normalizedConfig).toBe("");
+        expect(state.activeConfigId).toBeNull();
+        expect(state.configDocuments).toHaveLength(0);
+      });
+    });
+
+    it("keeps the user's own content, which is not part of the configuration", async () => {
+      renderCenter();
+      act(() => {
+        useAppStore.setState({
+          favorites: [
+            {
+              key: "ok:1",
+              item: {
+                id: "1",
+                sourceKey: "ok",
+                sourceName: "可用的源",
+                name: "收藏的作品",
+                poster: "",
+                description: "",
+                year: "",
+                area: "",
+                categories: [],
+                actors: [],
+                directors: [],
+                playLines: [],
+              },
+              sourceKey: "ok",
+              sourceName: "可用的源",
+              savedAt: "2026-01-01T00:00:00.000Z",
+              progress: null,
+            },
+          ],
+          liveFavorites: [
+            {
+              key: "ok:1",
+              channel: {
+                id: "1",
+                name: "收藏的频道",
+                groupId: "g1",
+                groupName: "默认",
+                logoUrl: "",
+                streamUrl: "https://example.com/live.m3u8",
+                streamUrls: ["https://example.com/live.m3u8"],
+                mediaKind: "hls",
+                sourceKey: "ok",
+              },
+              sourceKey: "ok",
+              sourceName: "可用的源",
+              savedAt: "2026-01-01T00:00:00.000Z",
+            },
+          ],
+          // Seconds watched, keyed by `${sourceKey}:${itemId}`.
+          playbackProgress: { "ok:1": 120 },
+        });
+      });
+      vi.mocked(clearAllConfigDocuments).mockClear();
+
+      clearEverything();
+      await waitFor(() => expect(clearAllConfigDocuments).toHaveBeenCalledTimes(1));
+
+      const state = useAppStore.getState();
+      // The button says 清空所有配置, and that is exactly what it must do — no more.
+      expect(state.favorites).toHaveLength(1);
+      expect(state.liveFavorites).toHaveLength(1);
+      expect(state.playbackProgress["ok:1"]).toBe(120);
+    });
+
+    it("offers the button only when there is something to clear", async () => {
+      // A control that cannot do anything teaches the user the app ignores them, which is the rule
+      // the storage tab's clear buttons already follow.
+      renderCenter();
+      const button = () => screen.getByRole("button", { name: "清空所有配置" });
+      expect(button()).toBeEnabled();
+
+      act(() => {
+        useAppStore.setState({
+          sources: [],
+          rawConfig: "",
+          normalizedConfig: "",
+          configDocuments: [],
+        });
+      });
+
+      expect(button()).toBeDisabled();
+    });
+
+    it("says the configuration is empty, not that the filter is too narrow", async () => {
+      // **Two different problems, and the page used to report the wrong one.** The list opens with
+      // `executions: ["enabled"]` already applied, so `isFilterUnfiltered` is false from the first
+      // render and the "当前配置没有源" branch was unreachable. A configuration with no sources was
+      // therefore told to "调整关键词或筛选条件后重试" — advice to adjust a filter that cannot
+      // produce a row. Measured in a real browser straight after 清空所有配置.
+      renderCenter();
+      act(() => {
+        useAppStore.setState({
+          sources: [],
+          rawConfig: "",
+          normalizedConfig: "",
+          configDocuments: [],
+        });
+      });
+
+      expect(screen.getByText("当前配置没有源")).toBeInTheDocument();
+      expect(screen.getByText(/导入一份配置后/)).toBeInTheDocument();
+      expect(screen.queryByText("调整关键词或筛选条件后重试。")).not.toBeInTheDocument();
+    });
+
+    it("still blames the filter when a filter is what emptied the list", async () => {
+      // The other half: with sources present but filtered out, the filter really is the cause and the
+      // message must say so. Without this the fix above could regress into always claiming an empty
+      // configuration.
+      renderCenter({ sources: [supported] });
+      act(() => {
+        useAppStore.setState({
+          sourceFilter: { adapters: [], executions: [], statuses: [], enabled: [] },
+          isSourceFilterOpen: false,
+        });
+      });
+
+      fireEvent.change(screen.getByLabelText("搜索源名称或 API"), {
+        target: { value: "绝对不存在的关键字" },
+      });
+
+      expect(screen.getByText("没有匹配的源")).toBeInTheDocument();
+      expect(screen.getByText("调整关键词或筛选条件后重试。")).toBeInTheDocument();
+      expect(screen.queryByText("当前配置没有源")).not.toBeInTheDocument();
+    });
   });
 });

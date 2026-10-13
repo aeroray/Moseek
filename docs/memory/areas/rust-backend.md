@@ -64,3 +64,17 @@ Evidence:
 Decision:
 Keep incremental compilation off for the dev and test profiles: Windows antivirus intermittently denies
 writes under `target/debug/incremental`, and rustc panics with an ICE rather than degrading.
+
+## MC-DEC-20261008-f1000006 — Clearing deletes configuration only
+
+Status: active
+Scope: area:rust-backend
+Subject: MC-SUBJ-20261008-a1000007
+Facet: lifecycle
+Evidence:
+- repo:src-tauri/src/config/storage.rs
+
+Decision:
+`clear_all_in_connection` drops every document, `sources`, and the activation pointer in one
+transaction. Favourites and footprints survive — they live elsewhere. Two UI confirmations precede it,
+and the frontend mirror must be emptied too, or the header keeps claiming a document.

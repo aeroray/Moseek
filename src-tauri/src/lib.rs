@@ -51,6 +51,7 @@ pub fn run() {
             config::commands::find_config_duplicate,
             config::commands::activate_config_document,
             config::commands::delete_config_document,
+            config::commands::clear_all_config_documents,
             config::commands::set_source_enabled,
             config::commands::remove_sources,
             config::commands::update_source_test,
