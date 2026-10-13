@@ -47,6 +47,9 @@ describe("buildImportPreview", () => {
   it("marks an entry that cannot run, and says why, without hiding it", () => {
     // **Hiding it would make the import silently smaller than the file that was loaded** — the exact
     // complaint this page has already produced once. The entry is real; it just cannot run.
+    //
+    // It is listed but *unusable*, and the dialog keeps it unticked and disables its box: a switch that
+    // can be turned on implies importing it would make it work.
     const preview = buildImportPreview(CONFIG);
     const broken = preview.candidates.find((c) => c.key === "缺地址");
 

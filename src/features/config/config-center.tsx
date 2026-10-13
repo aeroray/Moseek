@@ -17,6 +17,7 @@ import {
   Check,
   CircleAlert,
   ChevronDown,
+  ChevronRight,
   Code2,
   CircleCheck,
   CircleX,
@@ -347,6 +348,16 @@ export function ConfigCenter() {
    */
   const [deselectedEntryIds, setDeselectedEntryIds] = useState<Set<string>>(new Set());
   /**
+   * Which groups the user has collapsed.
+   *
+   * All open on arrival, because the file has just been read and the list is the answer to "what is in
+   * it". The control exists for the case the user reported: a configuration with 130 解析服务 makes the
+   * group they actually care about a scroll away.
+   */
+  const [collapsedImportKinds, setCollapsedImportKinds] = useState<Set<ImportCandidate["kind"]>>(
+    new Set(),
+  );
+  /**
    * Whether the import dialog is open, readable from an effect without making it a dependency.
    *
    * The document-reset effect has to know this, and depending on `importOpen` directly would re-run it
@@ -555,9 +566,19 @@ export function ConfigCenter() {
    */
   const loadImportText = useCallback((text: string, baseUrl: string | null) => {
     setImportText(text);
-    setImportPreview(text.trim() ? buildImportPreview(text, baseUrl) : null);
-    // A different file is a different set of entries, so tick marks never carry across.
-    setDeselectedEntryIds(new Set());
+    const preview = text.trim() ? buildImportPreview(text, baseUrl) : null;
+    setImportPreview(preview);
+    // **Unusable entries start unticked**, and cannot be ticked — see the list component. Seeding the
+    // deselected set here rather than filtering at commit time means the count on the button, the
+    // number in each group heading, and the file that gets written are all derived from one fact.
+    setDeselectedEntryIds(
+      new Set(
+        (preview?.candidates ?? [])
+          .filter((candidate) => !candidate.usable)
+          .map((candidate) => candidate.id),
+      ),
+    );
+    setCollapsedImportKinds(new Set());
   }, []);
 
   /** The ids of the entries the user is keeping. */
@@ -579,13 +600,18 @@ export function ConfigCenter() {
     });
   }, []);
 
-  /** Ticks or unticks every entry of one kind, which is what the section header's box does. */
+  /**
+   * Ticks or unticks a whole group.
+   *
+   * **Unusable entries are skipped in both directions.** They start unticked and the row's box is
+   * disabled, so a group-level control that ticked them anyway would contradict the row it sits above.
+   */
   const setKindSelected = useCallback(
     (kind: ImportCandidate["kind"], next: boolean) => {
       setDeselectedEntryIds((current) => {
         const updated = new Set(current);
         for (const candidate of importPreview?.candidates ?? []) {
-          if (candidate.kind !== kind) continue;
+          if (candidate.kind !== kind || !candidate.usable) continue;
           if (next) updated.delete(candidate.id);
           else updated.add(candidate.id);
         }
@@ -594,6 +620,15 @@ export function ConfigCenter() {
     },
     [importPreview],
   );
+
+  const toggleImportKind = useCallback((kind: ImportCandidate["kind"]) => {
+    setCollapsedImportKinds((current) => {
+      const updated = new Set(current);
+      if (updated.has(kind)) updated.delete(kind);
+      else updated.add(kind);
+      return updated;
+    });
+  }, []);
 
   // Reset the editors when the active document changes, or when its stored content changes
   // (live-source recovery, base URL repair, source toggles). A base URL change on its own
@@ -1418,7 +1453,7 @@ export function ConfigCenter() {
     event.target.value = "";
   };
 
-  const handleFileDrop = async (event: DragEvent<HTMLDivElement>) => {
+  const handleFileDrop = async (event: DragEvent<HTMLElement>) => {
     event.preventDefault();
     setIsDraggingFile(false);
     const file = event.dataTransfer.files?.[0];
@@ -3114,38 +3149,35 @@ export function ConfigCenter() {
                 discarded immediately — the document keeps the centre configuration's own name. Asking
                 for a value that cannot be used is worse than not asking: it implies the import
                 creates something separate, which is exactly the model this page removed. */}
-            <div className="grid grid-cols-2 gap-1 rounded-md bg-muted/50 p-1">
-              <Button
-                type="button"
-                variant={importMode === "remote" ? "secondary" : "ghost"}
-                size="sm"
-                className="gap-2"
-                onClick={() => {
-                  setImportMode("remote");
-                  setIsDraggingFile(false);
-                  setParseState({ type: "idle", message: "" });
-                }}
-              >
-                <Globe2 className="size-4" data-icon="inline-start" aria-hidden="true" />
-                远程 URL
-              </Button>
-              <Button
-                type="button"
-                variant={importMode === "local" ? "secondary" : "ghost"}
-                size="sm"
-                className="gap-2"
-                onClick={() => {
-                  setImportMode("local");
-                  setIsDraggingFile(false);
-                  setParseState({ type: "idle", message: "" });
-                }}
-              >
-                <FileUp className="size-4" data-icon="inline-start" aria-hidden="true" />
-                本地文件
-              </Button>
-            </div>
+
+            {/* **The page's own tab component, not a pair of Buttons.** Two buttons styled to look like
+                tabs were a second, slightly different implementation of something the app already has:
+                the same view was drawn with `bg-muted/50` plus `variant="secondary"` instead of the
+                shared `TabsList`/`TabsTrigger`, so its metrics and its focus ring did not match the
+                tabs a user sees two clicks away in 原始配置. */}
+            <Tabs
+              value={importMode}
+              onValueChange={(value) => {
+                setImportMode(value as "remote" | "local");
+                setIsDraggingFile(false);
+                setParseState({ type: "idle", message: "" });
+              }}
+              className="shrink-0"
+            >
+              <TabsList>
+                <TabsTrigger value="remote" className="gap-1.5">
+                  <Globe2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                  远程 URL
+                </TabsTrigger>
+                <TabsTrigger value="local" className="gap-1.5">
+                  <FileUp className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                  本地文件
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+
             {importMode === "remote" ? (
-              <div className="flex min-h-20 shrink-0 flex-col justify-center gap-2 rounded-md border bg-muted/20 p-3">
+              <div className="flex shrink-0 flex-col gap-2">
                 <div className="flex items-center gap-2">
                   <Input
                     type="url"
@@ -3157,27 +3189,30 @@ export function ConfigCenter() {
                   />
                   <Button
                     type="button"
-                    variant="secondary"
                     size="sm"
                     className="shrink-0 gap-1.5"
                     onClick={handleFetchRemote}
                     disabled={isFetchingRemote || !sourceInput.trim()}
                   >
-                    <Globe2 className="size-4" data-icon="inline-start" aria-hidden="true" />
-                    {isFetchingRemote ? "请求中..." : "获取配置"}
+                    <Globe2 className="size-3.5" data-icon="inline-start" aria-hidden="true" />
+                    {isFetchingRemote ? "请求中…" : "获取配置"}
                   </Button>
                 </div>
+                {/* Stated here rather than as a line under both tabs: it is true of a remote
+                    configuration and meaningless for a local file. */}
                 <p className="text-xs text-muted-foreground">
-                  远程配置中的 ./ 相对直播和资源路径会按配置 URL
-                  的目录解析；本地文件不会猜测远程基址。
+                  配置里的 ./ 相对地址会按这个 URL 的目录解析。
                 </p>
               </div>
             ) : (
-              <div
-                className={cn(
-                  "flex h-20 shrink-0 items-center justify-between gap-4 rounded-md border border-dashed bg-muted/20 p-4 transition-colors",
-                  isDraggingFile && "border-primary bg-accent/40",
-                )}
+              /* A drop zone that is one control, not a panel with a button in it.
+                 The previous version put a bordered `Button` inside a bordered dashed box — two nested
+                 boxes for one action, and the inner button's own border sat a few pixels from the
+                 outer one. The whole area is now the target: it is a button, it accepts a drop, and it
+                 names the file once there is one. */
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
                 onDragOver={(event) => {
                   event.preventDefault();
                   event.dataTransfer.dropEffect = "copy";
@@ -3185,32 +3220,27 @@ export function ConfigCenter() {
                 }}
                 onDragLeave={() => setIsDraggingFile(false)}
                 onDrop={handleFileDrop}
+                className={cn(
+                  "flex h-16 shrink-0 items-center gap-3 rounded-lg border border-dashed border-border/80 bg-card/40 px-4 text-left transition-colors",
+                  "hover:border-primary/50 hover:bg-accent/30 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+                  isDraggingFile && "border-primary bg-accent/40",
+                )}
               >
-                <div className="flex min-w-0 items-center gap-3">
-                  <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground">
-                    <FileUp data-icon="inline-start" aria-hidden="true" />
-                  </div>
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">
-                      {selectedFileName || "拖拽 JSON / JSON5 文件到这里"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {selectedFileName
-                        ? "文件内容已载入编辑区"
-                        : "也可以点击右侧选择文件"}
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="shrink-0 gap-2"
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <FileUp data-icon="inline-start" aria-hidden="true" />
-                  选择文件
-                </Button>
-              </div>
+                <FileUp
+                  className="size-4 shrink-0 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span className="truncate text-sm text-foreground">
+                    {selectedFileName || "选择配置文件"}
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    {selectedFileName
+                      ? "已读取，下面列出它包含的资源"
+                      : "点击选择，或把 JSON / JSON5 文件拖到这里"}
+                  </span>
+                </span>
+              </button>
             )}
 
             {/* A 多仓 address lists OTHER configurations rather than being one. Rendering the list is
@@ -3303,11 +3333,11 @@ export function ConfigCenter() {
                 </ScrollArea>
               </div>
             )}
-            <p className="-mt-2 shrink-0 text-xs text-muted-foreground">
-              {importMode === "remote"
-                ? "远程请求由 Rust 请求层执行。"
-                : "支持拖入或选择本地 JSON / JSON5 文件，内容会自动载入。"}
-            </p>
+            {/* The two explanatory lines that sat here are gone. "远程请求由 Rust 请求层执行" describes
+                an implementation detail the user cannot act on, and "支持拖入或选择本地 JSON / JSON5
+                文件" restated what the drop zone's own second line already says. The one fact worth
+                keeping — that a remote configuration's `./` paths resolve against its URL — is stated
+                where it matters, beside the address field, and only on the tab it applies to. */}
             <input
               ref={fileInputRef}
               type="file"
@@ -3326,8 +3356,10 @@ export function ConfigCenter() {
                 <ImportCandidateList
                   preview={importPreview}
                   deselectedIds={deselectedEntryIds}
+                  collapsedKinds={collapsedImportKinds}
                   onToggle={toggleEntry}
                   onSetKind={setKindSelected}
+                  onToggleKind={toggleImportKind}
                 />
               ) : (
                 <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/20 p-6">
@@ -3868,25 +3900,33 @@ export function ConfigCenter() {
 /**
  * What an imported configuration contains, as a list the user ticks.
  *
- * Grouped by 影视源 / 直播源 / 解析服务 — the same three words the 原始配置 tab uses and the same three
- * the file itself is organised into, so a user who has looked at their own configuration once already
- * knows the vocabulary.
+ * **Laid out like 原始配置's section list**, which the user asked for by name: a bordered box per group
+ * with a chevron heading, so the two views of the same document read the same way. Collapsing was the
+ * specific request — a configuration can carry 130 解析服务, and without it the group the user came for
+ * is a scroll away.
  *
- * **Unusable entries are listed rather than hidden.** They are in the file the user chose, and hiding
- * them would make the import silently smaller than what it loaded — the same complaint this page has
- * already produced once. They are unticked by default, named with the reason, and can still be brought
- * in deliberately: the entry is real, it just cannot run.
+ * Grouped by 影视源 / 直播源 / 解析服务 — the words 原始配置 uses and the words the file is organised
+ * into, so a user who has looked at their own configuration once already knows them.
+ *
+ * **An unusable entry is listed but cannot be ticked.** It is in the file the user chose, so hiding it
+ * would make the import silently smaller than what was loaded — the complaint this page has already
+ * produced once. But it cannot run, so offering a switch implies it could be made to work by importing
+ * it. It starts unticked, its box is disabled, and the group control skips it in both directions.
  */
 function ImportCandidateList({
   preview,
   deselectedIds,
+  collapsedKinds,
   onToggle,
   onSetKind,
+  onToggleKind,
 }: {
   preview: ImportPreview;
   deselectedIds: ReadonlySet<string>;
+  collapsedKinds: ReadonlySet<ImportCandidate["kind"]>;
   onToggle: (id: string, next: boolean) => void;
   onSetKind: (kind: ImportCandidate["kind"], next: boolean) => void;
+  onToggleKind: (kind: ImportCandidate["kind"]) => void;
 }) {
   const kinds = ["site", "live", "parser"] as const;
 
@@ -3901,7 +3941,7 @@ function ImportCandidateList({
           {preview.counts.unusable > 0 && (
             <>
               ，<span className="font-medium tabular-nums text-foreground">{preview.counts.unusable}</span>{" "}
-              个暂时不能用
+              个暂时不能用（已取消勾选）
             </>
           )}
         </span>
@@ -3910,72 +3950,130 @@ function ImportCandidateList({
         )}
       </div>
 
-      <ScrollArea className="min-h-0 flex-1 rounded-md border">
-        <div className="flex flex-col gap-4 p-3">
+      <ScrollArea className="min-h-0 flex-1">
+        <div className="flex flex-col gap-2 pr-3">
           {kinds.map((kind) => {
             const entries = preview.candidates.filter((candidate) => candidate.kind === kind);
             if (entries.length === 0) return null;
+            const usable = entries.filter((entry) => entry.usable);
             const selectedCount = entries.filter((entry) => !deselectedIds.has(entry.id)).length;
-            const allSelected = selectedCount === entries.length;
+            const allSelected = usable.length > 0 && usable.every((e) => !deselectedIds.has(e.id));
+            const someSelected = usable.some((e) => !deselectedIds.has(e.id));
+            const isOpen = !collapsedKinds.has(kind);
 
             return (
-              <section key={kind} className="flex flex-col gap-1.5">
-                <div className="flex items-center gap-2 px-0.5">
+              <section
+                key={kind}
+                className="rounded-lg border border-border/70 bg-card/40"
+              >
+                {/* The heading is a button, exactly as in 原始配置: the chevron, the name, the counts.
+                    The checkbox sits outside it — a box inside a button is two controls in one hit
+                    target, and clicking the row to select would conflict with clicking it to fold. */}
+                <div className="flex items-center gap-2 px-2 py-2.5">
                   <Checkbox
-                    checked={allSelected ? true : selectedCount > 0 ? "indeterminate" : false}
+                    checked={allSelected ? true : someSelected ? "indeterminate" : false}
+                    disabled={usable.length === 0}
                     onCheckedChange={() => onSetKind(kind, !allSelected)}
                     aria-label={`全选${IMPORT_KIND_LABELS[kind]}`}
                   />
-                  <h3 className="text-sm font-medium text-foreground">
-                    {IMPORT_KIND_LABELS[kind]}
-                  </h3>
-                  <span className="text-xs text-muted-foreground tabular-nums">
-                    {selectedCount} / {entries.length}
-                  </span>
+                  <button
+                    type="button"
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    aria-expanded={isOpen}
+                    onClick={() => onToggleKind(kind)}
+                  >
+                    {isOpen ? (
+                      <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    ) : (
+                      <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    )}
+                    <span className="text-sm font-medium text-foreground">
+                      {IMPORT_KIND_LABELS[kind]}
+                    </span>
+                    <Badge variant="secondary" className="tabular-nums">
+                      {selectedCount} / {entries.length}
+                    </Badge>
+                    {!isOpen && (
+                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                        {entries
+                          .slice(0, 4)
+                          .map((entry) => entry.name)
+                          .join("、")}
+                        {entries.length > 4 ? "…" : ""}
+                      </span>
+                    )}
+                  </button>
                 </div>
-                <ul className="flex flex-col">
-                  {entries.map((entry) => (
-                    <li key={entry.id}>
-                      {/* The whole row is the control, not just the box: a name and an address are
-                          what the user is deciding about, so clicking either toggles it. */}
-                      <label className="flex cursor-pointer items-start gap-2.5 rounded px-0.5 py-1.5 transition-colors hover:bg-accent/40">
-                        <Checkbox
-                          checked={!deselectedIds.has(entry.id)}
-                          onCheckedChange={(checked) => onToggle(entry.id, checked === true)}
-                          className="mt-0.5"
-                          aria-label={entry.name}
-                        />
-                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-                          <span className="flex flex-wrap items-center gap-2">
-                            <span className="truncate text-sm text-foreground">{entry.name}</span>
-                            {!entry.usable && (
-                              <Badge
-                                variant="outline"
-                                className="shrink-0 border-destructive/30 bg-destructive/10 px-1 py-0 text-[10px] font-normal leading-4 text-destructive"
-                              >
-                                不可用
-                              </Badge>
-                            )}
-                          </span>
-                          <span className="truncate font-mono text-[11px] text-muted-foreground">
-                            {entry.address || "没有地址"}
-                          </span>
-                          {!entry.usable && entry.note && (
-                            <span className="text-[11px] leading-4 text-muted-foreground">
-                              {entry.note}
-                            </span>
-                          )}
-                        </span>
-                      </label>
-                    </li>
-                  ))}
-                </ul>
+
+                {isOpen && (
+                  <ul className="flex flex-col border-t border-border/60 py-1">
+                    {entries.map((entry) => (
+                      <li key={entry.id}>
+                        {/* A tickable row is a label, so the whole row is the target. An unusable one is
+                            not: the box is disabled, and wrapping it in a label would make the row look
+                            clickable while nothing happened. */}
+                        {entry.usable ? (
+                          <label className="flex cursor-pointer items-start gap-2.5 rounded px-2 py-1.5 transition-colors hover:bg-accent/40">
+                            <Checkbox
+                              checked={!deselectedIds.has(entry.id)}
+                              onCheckedChange={(checked) => onToggle(entry.id, checked === true)}
+                              className="mt-0.5"
+                              aria-label={entry.name}
+                            />                            <ImportEntryText entry={entry} />
+                          </label>
+                        ) : (
+                          <div className="flex items-start gap-2.5 px-2 py-1.5 opacity-70">
+                            <Checkbox
+                              checked={false}
+                              disabled
+                              className="mt-0.5 cursor-not-allowed"
+                              aria-label={`${entry.name}（不可用）`}
+                            />
+                            <ImportEntryText entry={entry} />
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </section>
             );
           })}
         </div>
       </ScrollArea>
     </div>
+  );
+}
+
+/** The name, address and — when it cannot run — the reason, shared by both row shapes. */
+function ImportEntryText({ entry }: { entry: ImportCandidate }) {
+  return (
+    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+      <span className="flex flex-wrap items-center gap-2">
+        <span
+          className={cn(
+            "truncate text-sm",
+            entry.usable ? "text-foreground" : "text-muted-foreground",
+          )}
+        >
+          {entry.name}
+        </span>
+        {!entry.usable && (
+          <Badge
+            variant="outline"
+            className="shrink-0 border-destructive/30 bg-destructive/10 px-1 py-0 text-[10px] font-normal leading-4 text-destructive"
+          >
+            不可用
+          </Badge>
+        )}
+      </span>
+      <span className="truncate font-mono text-[11px] text-muted-foreground">
+        {entry.address || "没有地址"}
+      </span>
+      {!entry.usable && entry.note && (
+        <span className="text-[11px] leading-4 text-muted-foreground">{entry.note}</span>
+      )}
+    </span>
   );
 }
 

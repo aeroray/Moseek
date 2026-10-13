@@ -3098,6 +3098,125 @@ describe("config center", () => {
     expect(screen.getByText("好源")).toBeInTheDocument();
   });
 
+  /**
+   * The import dialog's list, as the user meets it.
+   *
+   * Three things were asked for by name, and each is asserted here rather than inferred from the
+   * preview module: folding, an unusable entry that cannot be ticked, and a count that follows both.
+   */
+  describe("the import list", () => {
+    /** Opens the dialog with a file that has one usable and one unusable entry per kind. */
+    async function openWith(text: string) {
+      vi.mocked(fetchConfigUrl).mockResolvedValue({ text, kind: "config", note: null, pageTitle: null });
+      fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+      const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+      fireEvent.change(input, { target: { value: "https://imported.example/config.json" } });
+      fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
+      await screen.findByRole("button", { name: /^导入 \d+ 个资源$/ });
+    }
+
+    const MIXED = JSON.stringify({
+      sites: [
+        { key: "好", name: "好源", api: "https://ok.example/api.php/provide/vod" },
+        { key: "坏", name: "坏源" },
+      ],
+      lives: [{ name: "直播", url: "https://live.example/a.m3u" }],
+    });
+
+    it("folds a group away and back, and says what is inside while folded", async () => {
+      // The request: a configuration with 130 解析服务 puts the group you came for a scroll away.
+      renderCenter();
+      await openWith(MIXED);
+
+      const heading = screen.getByRole("button", { name: /影视源/ });
+      expect(heading).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText("好源")).toBeInTheDocument();
+
+      fireEvent.click(heading);
+
+      expect(screen.getByRole("button", { name: /影视源/ })).toHaveAttribute("aria-expanded", "false");
+      expect(screen.queryByText("好源")).not.toBeInTheDocument();
+      // A folded group is not a blank line: the names preview inside it, so folding is not hiding.
+      expect(screen.getByRole("button", { name: /影视源/ })).toHaveTextContent("好源");
+
+      fireEvent.click(screen.getByRole("button", { name: /影视源/ }));
+      expect(screen.getByText("好源")).toBeInTheDocument();
+    });
+
+    it("leaves an unusable entry visible but untickable, and unticked", async () => {
+      // A switch that can be turned on implies importing the entry would make it work. It cannot.
+      renderCenter();
+      await openWith(MIXED);
+
+      expect(screen.getByText("坏源")).toBeInTheDocument();
+      const box = screen.getByRole("checkbox", { name: "坏源（不可用）" });
+      expect(box).toBeDisabled();
+      expect(box).toHaveAttribute("aria-checked", "false");
+    });
+
+    it("counts only the entries it will actually import", async () => {
+      // The commit button's number is the promise the user acts on. An unusable entry is in the file
+      // but not in the import, so it must not be counted — 2 usable entries plus 1 live.
+      renderCenter();
+      await openWith(MIXED);
+
+      expect(screen.getByRole("button", { name: "导入 2 个资源" })).toBeInTheDocument();
+    });
+
+    it("does not let a group control tick what a row refuses to tick", async () => {
+      // The group box and the row box disagreeing is the kind of contradiction that makes a user stop
+      // trusting both.
+      renderCenter();
+      await openWith(MIXED);
+
+      const groupBox = screen.getByRole("checkbox", { name: "全选影视源" });
+      // **Checked, not indeterminate.** The group has one usable entry and one that is not, and the
+      // unusable one is not part of the question: every entry this control can act on is selected, so
+      // it reports selected. An indeterminate reading would suggest a choice was still open.
+      expect(groupBox).toHaveAttribute("aria-checked", "true");
+
+      // Unticking it takes the usable entry with it and leaves the live source.
+      fireEvent.click(groupBox);
+      expect(screen.getByRole("button", { name: "导入 1 个资源" })).toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "坏源（不可用）" })).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+
+      // Ticking it back does NOT reach the unusable entry: it stays unticked.
+      fireEvent.click(screen.getByRole("checkbox", { name: "全选影视源" }));
+      expect(screen.getByRole("button", { name: "导入 2 个资源" })).toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "坏源（不可用）" })).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+    });
+
+    it("says so rather than offering a commit when nothing usable is selected", async () => {
+      renderCenter();
+      await openWith(MIXED);
+
+      // Untick everything that can be ticked.
+      fireEvent.click(screen.getByRole("checkbox", { name: "全选影视源" }));
+      fireEvent.click(screen.getByRole("checkbox", { name: "全选直播源" }));
+
+      const commit = screen.getByRole("button", { name: "请至少选择一个" });
+      expect(commit).toBeDisabled();
+    });
+
+    it("starts with every group open, so the config that was just read is what you see", async () => {
+      renderCenter();
+      await openWith(MIXED);
+
+      for (const group of ["影视源", "直播源"]) {
+        expect(screen.getByRole("button", { name: new RegExp(group) })).toHaveAttribute(
+          "aria-expanded",
+          "true",
+        );
+      }
+    });
+  });
+
   it("cleans a document that was stored before the rule existed", async () => {
     // **Pruning on write is not enough.** A database written by an older version — or simply not
     // edited since — keeps its blocked entries in the raw text forever, because nothing passes

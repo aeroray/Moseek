@@ -65,5 +65,6 @@ Evidence:
 - repo:src/features/config/config-import-preview.ts
 
 Decision:
-The import dialog lists the file's entries — name, address, tick box, in 影视源/直播源/解析服务 groups —
-and imports the ticked subset. Build the preview where the text is set, never in a separate effect.
+The import dialog lists the file's entries — name, address, tick box, grouped by kind — and imports the
+ticked subset. An unusable entry stays listed, unticked, its box disabled. Build the preview where the
+text is set, never in a separate effect.
