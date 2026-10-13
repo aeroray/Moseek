@@ -45,6 +45,7 @@ import { JsonEditor } from "@/components/json-editor";
 import { ConfigVisualEditor } from "@/features/config/config-visual-editor";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { ButtonGroup } from "@/components/ui/button-group";
 import { SearchInput } from "@/components/search-input";
@@ -101,6 +102,13 @@ import {
   stripExportExtras,
 } from "@/features/config/config-extras";
 import { buildExportConfigText } from "@/features/config/config-export";
+import {
+  IMPORT_KIND_LABELS,
+  buildImportPreview,
+  keepSelectedEntries,
+  type ImportCandidate,
+  type ImportPreview,
+} from "@/features/config/config-import-preview";
 import {
   absolutizeRelativeSites,
   mergeRawConfigs,
@@ -313,7 +321,39 @@ export function ConfigCenter() {
     null,
   );
   const [importOpen, setImportOpen] = useState(false);
+  /**
+   * The configuration text an import would commit.
+   *
+   * Still the buffer every path writes into — remote fetch, file drop, paste — but no longer shown to
+   * the user: the dialog renders `importPreview` instead, because a JSON editor is not a choice anyone
+   * can make who does not already read JSON.
+   */
   const [importText, setImportText] = useState("");
+  /**
+   * What the current text contains, in the form the user picks from.
+   *
+   * Derived rather than stored: it is a pure function of the text, kept in state only so the id of the
+   * selected entries survives a re-render. Recomputing on every keystroke is fine — the text only
+   * changes when a file or an address arrives.
+   */
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  /**
+   * Which entries the user unticked, by candidate id.
+   *
+   * **Holds the DESELECTED ones, not the selected ones.** A new import has everything ticked, so an
+   * empty set is the correct starting state and there is no moment where a fresh file appears with
+   * nothing selected. Storing the complement would need every import to enumerate the whole file up
+   * front, and a bug there silently imports nothing.
+   */
+  const [deselectedEntryIds, setDeselectedEntryIds] = useState<Set<string>>(new Set());
+  /**
+   * Whether the import dialog is open, readable from an effect without making it a dependency.
+   *
+   * The document-reset effect has to know this, and depending on `importOpen` directly would re-run it
+   * on every open and close — which is precisely the reset it is being asked to skip.
+   */
+  const importOpenRef = useRef(false);
+  importOpenRef.current = importOpen;
   const [rawDraft, setRawDraft] = useState<string | null>(null);
   /**
    * Which view the 原始配置 tab is in.
@@ -502,6 +542,59 @@ export function ConfigCenter() {
     setSourceBaseUrlDraft(sourceBaseUrl ?? "");
   }, [activeDocument?.id, activeDocument?.sourceBaseUrl]);
 
+  /**
+   * Loads text into the dialog and builds its preview in the same step.
+   *
+   * **The preview is built here rather than in an effect on `importText`, and that is the fix for a real
+   * race.** An effect made the two values independent: a document-reset effect fires on `rawConfig`
+   * changing, and it can land between `setImportText(newText)` and the preview effect that was queued
+   * against the OLD text. Measured in a test that imports a two-source file over a document that already
+   * held one: the dialog listed one source, the commit button read 导入 1 个资源, and pressing it
+   * imported a file the user had never chosen. Building both together makes that ordering impossible —
+   * there is no window in which one has moved and the other has not.
+   */
+  const loadImportText = useCallback((text: string, baseUrl: string | null) => {
+    setImportText(text);
+    setImportPreview(text.trim() ? buildImportPreview(text, baseUrl) : null);
+    // A different file is a different set of entries, so tick marks never carry across.
+    setDeselectedEntryIds(new Set());
+  }, []);
+
+  /** The ids of the entries the user is keeping. */
+  const selectedEntryIds = useMemo(() => {
+    if (!importPreview) return new Set<string>();
+    return new Set(
+      importPreview.candidates
+        .filter((candidate) => !deselectedEntryIds.has(candidate.id))
+        .map((candidate) => candidate.id),
+    );
+  }, [importPreview, deselectedEntryIds]);
+
+  const toggleEntry = useCallback((id: string, next: boolean) => {
+    setDeselectedEntryIds((current) => {
+      const updated = new Set(current);
+      if (next) updated.delete(id);
+      else updated.add(id);
+      return updated;
+    });
+  }, []);
+
+  /** Ticks or unticks every entry of one kind, which is what the section header's box does. */
+  const setKindSelected = useCallback(
+    (kind: ImportCandidate["kind"], next: boolean) => {
+      setDeselectedEntryIds((current) => {
+        const updated = new Set(current);
+        for (const candidate of importPreview?.candidates ?? []) {
+          if (candidate.kind !== kind) continue;
+          if (next) updated.delete(candidate.id);
+          else updated.add(candidate.id);
+        }
+        return updated;
+      });
+    },
+    [importPreview],
+  );
+
   // Reset the editors when the active document changes, or when its stored content changes
   // (live-source recovery, base URL repair, source toggles). A base URL change on its own
   // must not reset them: the remote import flow sets the base URL right before loading the
@@ -512,8 +605,14 @@ export function ConfigCenter() {
     if (!shouldResetDrafts(draftSourceRef.current, next)) return;
     draftSourceRef.current = next;
     setRawDraft(rawConfig);
-    setImportText(rawConfig);
-  }, [activeConfigId, configBaseUrl, rawConfig]);
+    // **Not while the import dialog is open.** This effect exists to point the page's editors at the
+    // stored document, and the dialog's buffer is a different thing: a pending import is text the user
+    // just fetched, and resetting it here replaced it with the document already open — so the preview
+    // listed the OLD configuration and pressing the button imported a file nobody chose. The dialog
+    // seeds its own buffer when it opens, so skipping this cannot leave it empty.
+    if (importOpenRef.current) return;
+    loadImportText(rawConfig, configBaseUrl ?? null);
+  }, [activeConfigId, configBaseUrl, rawConfig, loadImportText]);
 
   /**
    * Removes entries Moseek can never run from a document that was stored before that rule existed.
@@ -815,7 +914,7 @@ export function ConfigCenter() {
     setSourceInput("");
     setConfigBaseUrl(undefined);
     setSelectedFileName("");
-    setImportText("");
+    loadImportText("", null);
     setParseState({ type: "idle", message: "" });
     setImportOpen(true);
   };
@@ -951,7 +1050,7 @@ export function ConfigCenter() {
       setConfigDocuments([]);
       // The merge summary describes a document that no longer exists.
       setLastMergeSummary(null);
-      setImportText("");
+      loadImportText("", null);
       setRawDraft(null);
       setRawStatus(null);
       setInspectedSourceKey(null);
@@ -1303,7 +1402,9 @@ export function ConfigCenter() {
     setConfigBaseUrl(undefined);
     setSelectedFileName(file.name);
     setIsDraggingFile(false);
-    setImportText(await file.text());
+    // A local file has no remote base, so its relative paths are left as written — which is what the
+    // dialog's own copy tells the user.
+    loadImportText(await file.text(), null);
     setParseState({
       type: "idle",
       message: "",
@@ -1398,14 +1499,19 @@ export function ConfigCenter() {
           ? `已自动修正：${repaired.changes.join("、")}`
           : null;
 
-      setImportText(text);
-      setParseState({
-        type: "success",
-        message:
-          [source.note, repairNote].filter(Boolean).join("；") +
-          (source.note || repairNote ? "；" : "") +
-          "远程配置已载入；其中 ./ 相对资源路径会按这个 URL 自动解析，请点击解析配置生成报告。",
-      });
+      // The base URL is passed here rather than read from state: `setConfigBaseUrl` above has not been
+      // committed yet, and the preview needs the address that resolves this file's relative paths.
+      loadImportText(text, sourceInput.trim());
+      // **No "已载入" banner.** The list below is the confirmation: it names every resource that
+      // arrived, which is more than a sentence saying something arrived. The message is reserved for
+      // what the list cannot show — a note about what the address actually served, and what was
+      // repaired. Setting it unconditionally said "解析完成" under a list that had already said it.
+      const notes = [source.note, repairNote].filter(Boolean);
+      setParseState(
+        notes.length > 0
+          ? { type: "success", message: notes.join("；") }
+          : { type: "idle", message: "" },
+      );
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "远程配置请求失败";
@@ -1600,11 +1706,11 @@ export function ConfigCenter() {
         setParseState({ type: "error", message: source.note });
         return;
       }
-      setImportText(source.text);
-      setParseState({
-        type: "success",
-        message: `${source.note ? `${source.note}；` : ""}已载入「${url}」。`,
-      });
+      loadImportText(source.text, new URL(url).toString());
+      // Same as the single-address path: the list is the confirmation, so only an unusual note is said.
+      setParseState(
+        source.note ? { type: "success", message: source.note } : { type: "idle", message: "" },
+      );
     } catch (error) {
       setParseState({
         type: "error",
@@ -1664,50 +1770,6 @@ export function ConfigCenter() {
     } finally {
       setIsApplyingBaseUrl(false);
     }
-  };
-
-  const handleFormatConfig = () => {
-    if (!importText.trim()) return;
-    const result = formatConfigText(importText);
-    if (!result.ok) {
-      const issue = result.issue;
-      const position = issue?.line
-        ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
-        : "";
-      setParseState({
-        type: "error",
-        message: `格式化失败${position}：${issue?.message ?? "未知解析错误"}`,
-      });
-      return;
-    }
-    setImportText(result.text);
-    setParseState({
-      type: "success",
-      title: "格式化完成",
-      message: "配置已按 JSON5 结构重新排版，请点击解析配置生成报告。",
-    });
-  };
-
-  const handleRepairConfig = () => {
-    if (!importText.trim()) return;
-    const result = repairConfigText(importText);
-    if (!result.ok) {
-      const issue = result.issue;
-      const position = issue?.line
-        ? `（第 ${issue.line} 行，第 ${issue.column ?? 0} 列）`
-        : "";
-      setParseState({
-        type: "error",
-        message: `修正失败${position}：${issue?.message ?? "未找到安全的自动修正方式"}`,
-      });
-      return;
-    }
-    setImportText(result.text);
-    setParseState({
-      type: "success",
-      title: "修正完成",
-      message: `${result.changes.join("、")}。请点击解析配置生成报告。`,
-    });
   };
 
   /**
@@ -2201,9 +2263,23 @@ export function ConfigCenter() {
     }
   };
 
+  /**
+   * Commits the import the user confirmed.
+   *
+   * **The text is filtered by the selection before anything else looks at it**, so every downstream
+   * step — the merge, the prune, the write, the `parses` it carries — works on the entries the user
+   * chose. Filtering after the merge would be too late: by then the unticked entries are already in the
+   * centre configuration and there is nothing left to distinguish them.
+   *
+   * The parse still runs, and failing it is still reported. It should not fail — the preview parsed the
+   * same text — but a message is better than a silent no-op if the two ever disagree.
+   */
   const handleParse = async () => {
     setIsParsing(true);
-    const result = parseConfigText(importText, configBaseUrl);
+    const selectedText = importPreview
+      ? keepSelectedEntries(importPreview.text, importPreview.candidates, selectedEntryIds)
+      : importText;
+    const result = parseConfigText(selectedText, configBaseUrl);
 
     if (!result.ok) {
       const issue = result.issues[0];
@@ -2227,7 +2303,7 @@ export function ConfigCenter() {
       // No duplicate check: importing merges, so a second copy of something already present is
       // deduplicated rather than turned into another document. The prompt that used to guard
       // against that had nothing left to protect.
-      await commitParsedConfig(result);
+      await commitParsedConfig(result, { rawOverride: selectedText });
     } catch (error) {
       saveParseError(error);
     } finally {
@@ -3029,8 +3105,8 @@ export function ConfigCenter() {
           <DialogHeader className="shrink-0">
             <DialogTitle>导入配置</DialogTitle>
             <DialogDescription>
-              选择本地文件、获取远程
-              URL，或直接粘贴配置文本。当前只解析和分类，不执行远程依赖。
+              从一条链接或一个文件导入资源。读到的内容会列在下面，可以只导入其中几个；需要远程脚本或
+              JAR 的条目 Moseek 不会执行，也不会带进来。
             </DialogDescription>
           </DialogHeader>
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
@@ -3239,43 +3315,44 @@ export function ConfigCenter() {
               className="hidden"
               onChange={handleFilePick}
             />
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-              <div className="flex shrink-0 items-center justify-between gap-3 rounded-t-md border border-b-0 bg-muted/20 px-3 py-2">
-                <span className="text-xs font-medium text-muted-foreground">
-                  JSON 配置
-                </span>
-                <div className="flex items-center gap-1">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="gap-1.5"
-                    onClick={handleFormatConfig}
-                    disabled={!importText.trim()}
-                  >
-                    <Braces className="size-4" data-icon="inline-start" aria-hidden="true" />
-                    格式化
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="gap-1.5"
-                    onClick={handleRepairConfig}
-                    disabled={!importText.trim()}
-                  >
-                    <WandSparkles className="size-4" data-icon="inline-start" aria-hidden="true" />
-                    修正配置
-                  </Button>
+            {/* **The list, not the text.** What an import offers is a choice about what to bring in,
+                and the only surface where that choice can be made is one that shows what is in the
+                file. An editor showed the bytes, which the intended user cannot evaluate, and then
+                asked them to press 合并进中心配置 — a decision about a document they had no way to
+                judge. Every source is listed with its name and address, ticked by default, and the
+                grouping is the one the source list itself uses. */}
+            {importPreview ? (
+              importPreview.ok ? (
+                <ImportCandidateList
+                  preview={importPreview}
+                  deselectedIds={deselectedEntryIds}
+                  onToggle={toggleEntry}
+                  onSetKind={setKindSelected}
+                />
+              ) : (
+                <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/20 p-6">
+                  <div className="max-w-md text-center">
+                    <AlertTriangle
+                      className="mx-auto size-5 text-destructive"
+                      aria-hidden="true"
+                    />
+                    <p className="mt-3 text-sm font-medium text-foreground">
+                      这份配置读不出来
+                    </p>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                      {importPreview.error}
+                      {importPreview.errorPath
+                        ? `（字段 ${importPreview.errorPath}）`
+                        : ""}
+                    </p>
+                  </div>
                 </div>
+              )
+            ) : (
+              <div className="flex min-h-0 flex-1 items-center justify-center rounded-md border border-dashed bg-muted/20 p-6 text-center text-sm text-muted-foreground">
+                填入一个地址或选择一个文件，这里会列出它包含的资源。
               </div>
-              <JsonEditor
-                value={importText}
-                onChange={setImportText}
-                className="min-h-0 min-w-0 flex-1 w-full rounded-t-none border-t-0"
-                aria-label="配置文本"
-              />
-            </div>
+            )}
             {parseState.type !== "idle" && (
               <Alert
                 variant={
@@ -3299,6 +3376,9 @@ export function ConfigCenter() {
             )}
           </div>
           <DialogFooter className="shrink-0">
+            {/* The count is stated here, where the commit happens, rather than only in the list's
+                header: the button and the number it acts on belong together, and "导入 12 个" is a
+                clearer promise than "合并进中心配置". */}
             <Button
               type="button"
               variant="outline"
@@ -3312,10 +3392,18 @@ export function ConfigCenter() {
               size="sm"
               className="gap-1.5"
               onClick={handleParse}
-              disabled={isParsing || !importText.trim()}
+              disabled={
+                isParsing ||
+                !importPreview?.ok ||
+                selectedEntryIds.size === 0
+              }
             >
               <FileJson className="size-4" data-icon="inline-start" aria-hidden="true" />
-              {isParsing ? "合并中..." : "合并进中心配置"}
+              {isParsing
+                ? "导入中…"
+                : selectedEntryIds.size === 0
+                  ? "请至少选择一个"
+                  : `导入 ${selectedEntryIds.size} 个资源`}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -3777,12 +3865,125 @@ export function ConfigCenter() {
   );
 }
 
+/**
+ * What an imported configuration contains, as a list the user ticks.
+ *
+ * Grouped by 影视源 / 直播源 / 解析服务 — the same three words the 原始配置 tab uses and the same three
+ * the file itself is organised into, so a user who has looked at their own configuration once already
+ * knows the vocabulary.
+ *
+ * **Unusable entries are listed rather than hidden.** They are in the file the user chose, and hiding
+ * them would make the import silently smaller than what it loaded — the same complaint this page has
+ * already produced once. They are unticked by default, named with the reason, and can still be brought
+ * in deliberately: the entry is real, it just cannot run.
+ */
+function ImportCandidateList({
+  preview,
+  deselectedIds,
+  onToggle,
+  onSetKind,
+}: {
+  preview: ImportPreview;
+  deselectedIds: ReadonlySet<string>;
+  onToggle: (id: string, next: boolean) => void;
+  onSetKind: (kind: ImportCandidate["kind"], next: boolean) => void;
+}) {
+  const kinds = ["site", "live", "parser"] as const;
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <span className="text-muted-foreground">
+          共 <span className="font-medium tabular-nums text-foreground">{preview.counts.total}</span>{" "}
+          个资源，其中{" "}
+          <span className="font-medium tabular-nums text-foreground">{preview.counts.usable}</span>{" "}
+          个可用
+          {preview.counts.unusable > 0 && (
+            <>
+              ，<span className="font-medium tabular-nums text-foreground">{preview.counts.unusable}</span>{" "}
+              个暂时不能用
+            </>
+          )}
+        </span>
+        {preview.repairNote && (
+          <span className="text-muted-foreground">{preview.repairNote}</span>
+        )}
+      </div>
+
+      <ScrollArea className="min-h-0 flex-1 rounded-md border">
+        <div className="flex flex-col gap-4 p-3">
+          {kinds.map((kind) => {
+            const entries = preview.candidates.filter((candidate) => candidate.kind === kind);
+            if (entries.length === 0) return null;
+            const selectedCount = entries.filter((entry) => !deselectedIds.has(entry.id)).length;
+            const allSelected = selectedCount === entries.length;
+
+            return (
+              <section key={kind} className="flex flex-col gap-1.5">
+                <div className="flex items-center gap-2 px-0.5">
+                  <Checkbox
+                    checked={allSelected ? true : selectedCount > 0 ? "indeterminate" : false}
+                    onCheckedChange={() => onSetKind(kind, !allSelected)}
+                    aria-label={`全选${IMPORT_KIND_LABELS[kind]}`}
+                  />
+                  <h3 className="text-sm font-medium text-foreground">
+                    {IMPORT_KIND_LABELS[kind]}
+                  </h3>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {selectedCount} / {entries.length}
+                  </span>
+                </div>
+                <ul className="flex flex-col">
+                  {entries.map((entry) => (
+                    <li key={entry.id}>
+                      {/* The whole row is the control, not just the box: a name and an address are
+                          what the user is deciding about, so clicking either toggles it. */}
+                      <label className="flex cursor-pointer items-start gap-2.5 rounded px-0.5 py-1.5 transition-colors hover:bg-accent/40">
+                        <Checkbox
+                          checked={!deselectedIds.has(entry.id)}
+                          onCheckedChange={(checked) => onToggle(entry.id, checked === true)}
+                          className="mt-0.5"
+                          aria-label={entry.name}
+                        />
+                        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span className="truncate text-sm text-foreground">{entry.name}</span>
+                            {!entry.usable && (
+                              <Badge
+                                variant="outline"
+                                className="shrink-0 border-destructive/30 bg-destructive/10 px-1 py-0 text-[10px] font-normal leading-4 text-destructive"
+                              >
+                                不可用
+                              </Badge>
+                            )}
+                          </span>
+                          <span className="truncate font-mono text-[11px] text-muted-foreground">
+                            {entry.address || "没有地址"}
+                          </span>
+                          {!entry.usable && entry.note && (
+                            <span className="text-[11px] leading-4 text-muted-foreground">
+                              {entry.note}
+                            </span>
+                          )}
+                        </span>
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            );
+          })}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
+
 function isRelativeConfiguredUrl(value: string) {
   const trimmed = value.trim();
   if (!trimmed || /^[a-z][a-z\d+.-]*:/i.test(trimmed)) return false;
   return (
-    trimmed.startsWith("/") ||
-    trimmed.startsWith("./") ||
+    trimmed.startsWith("/") ||    trimmed.startsWith("./") ||
     trimmed.startsWith("../") ||
     trimmed.includes("/")
   );

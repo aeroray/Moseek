@@ -55,3 +55,15 @@ Import, autosave and the merge each prune; a pre-existing document needs the onc
 pass, which must be idempotent or it loops. Filter the source snapshot with the text, or the two halves
 disagree.
 
+## MC-DEC-20261008-e1000008 — Import shows a list, not an editor
+
+Status: active
+Scope: area:config-pipeline
+Subject: MC-SUBJ-20261008-a1000003
+Facet: interface
+Evidence:
+- repo:src/features/config/config-import-preview.ts
+
+Decision:
+The import dialog lists the file's entries — name, address, tick box, in 影视源/直播源/解析服务 groups —
+and imports the ticked subset. Build the preview where the text is set, never in a separate effect.

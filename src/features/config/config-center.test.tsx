@@ -284,12 +284,15 @@ function adapterCard() {
 }
 
 /**
- * Opens the import dialog, loads configuration text through the remote-fetch control and confirms
- * the merge.
+ * Opens the import dialog, loads configuration text through the remote-fetch control and confirms the
+ * import.
  *
- * The dialog's text editor is CodeMirror, which `fireEvent.change` cannot drive, so the test uses
- * the remote path: a real input whose fetch is mocked. That is also the path a user takes when
- * importing by URL, so the test still exercises the real controls rather than component internals.
+ * **The dialog no longer contains an editor** — it lists what the file holds and lets the user tick
+ * entries — so the wait is for the list rather than for a textarea. The remote path is still what drives
+ * it: a real input whose fetch is mocked, which is also the path a user takes when importing by URL, so
+ * this exercises the real controls rather than component internals.
+ *
+ * The confirmation button is named after its count (`导入 3 个资源`), so it is matched on the verb.
  */
 async function importConfigText(text: string, baseUrl = "https://imported.example/config.json") {
   // The fetch command returns a shape now, not a bare string: several real addresses serve a picture
@@ -299,10 +302,9 @@ async function importConfigText(text: string, baseUrl = "https://imported.exampl
   const input = await screen.findByPlaceholderText("https://example.com/config.json5");
   fireEvent.change(input, { target: { value: baseUrl } });
   fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
-  await waitFor(() => {
-    expect(screen.getByLabelText("配置文本")).toBeInTheDocument();
-  });
-  fireEvent.click(screen.getByRole("button", { name: /合并进中心配置/ }));
+  // The preview is built asynchronously, and the button reads 请至少选择一个 until it exists.
+  const confirm = await screen.findByRole("button", { name: /^导入 \d+ 个资源$/ });
+  fireEvent.click(confirm);
   await waitFor(() => {
     expect(replaceAllConfigDocuments).toHaveBeenCalled();
   });
@@ -3071,17 +3073,29 @@ describe("config center", () => {
   it("says how many sources it discarded, so a smaller file is never a surprise", async () => {
     // Importing is the moment the user hands over a file; getting back something smaller without a
     // word about it is exactly the kind of silent change this page must not make.
+    //
+    // **The sentence moved, the requirement did not.** It used to appear in the result banner after the
+    // merge; it now appears in the dialog, above the list, while the user is still deciding — which is
+    // earlier and therefore better: the entry is not in the list they are about to confirm, and they can
+    // see that before pressing anything rather than after.
     renderCenter();
-    await importConfigText(
-      JSON.stringify({
-        sites: [
-          { key: "好源", name: "好源", type: 1, api: "https://new.example/api.php/provide/vod" },
-          { key: "drpy源", name: "drpy 源", api: "https://x.example/lib/drpy2.min.js" },
-        ],
-      }),
-    );
+    const text = JSON.stringify({
+      sites: [
+        { key: "好源", name: "好源", type: 1, api: "https://new.example/api.php/provide/vod" },
+        { key: "drpy源", name: "drpy 源", api: "https://x.example/lib/drpy2.min.js" },
+      ],
+    });
+    vi.mocked(fetchConfigUrl).mockResolvedValue({ text, kind: "config", note: null, pageTitle: null });
+    fireEvent.click(screen.getByRole("button", { name: /导入配置/ }));
+    const input = await screen.findByPlaceholderText("https://example.com/config.json5");
+    fireEvent.change(input, { target: { value: "https://imported.example/config.json" } });
+    fireEvent.click(screen.getByRole("button", { name: /获取配置/ }));
 
-    expect(await screen.findByText(/已丢弃 1 个无法适配的源/)).toBeInTheDocument();
+    // Stated in the dialog, in the user's words: what was left out and why.
+    expect(await screen.findByText(/已移除 1 个需要远程脚本或 JAR 的条目/)).toBeInTheDocument();
+    // And the entry itself is absent from the list, so the count and the rows cannot disagree.
+    expect(screen.queryByText("drpy 源")).not.toBeInTheDocument();
+    expect(screen.getByText("好源")).toBeInTheDocument();
   });
 
   it("cleans a document that was stored before the rule existed", async () => {
