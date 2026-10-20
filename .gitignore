@@ -17,3 +17,9 @@ src-tauri/gen/
 .env
 .env.*
 !.env.example
+
+# Point-in-time audit output, not project documentation.
+# A dated review folder is stale the moment its findings are fixed, and the reports quote the
+# vulnerable code that was replaced. Durable outcomes belong in docs/memory/, where they are
+# loaded deliberately; a `docs/reviews/` tree would be read as current truth and be wrong.
+docs/reviews/

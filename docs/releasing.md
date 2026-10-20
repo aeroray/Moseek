@@ -18,16 +18,18 @@ C:\Users\PC\.tauri\moseek-updater.key.pub   ← 公钥，已写进 src-tauri/tau
 | Name | Value |
 |---|---|
 | `TAURI_SIGNING_PRIVATE_KEY` | 私钥文件的**全部内容**（含 `untrusted comment:` 那一行，多行一起复制） |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | `moseek-updater` |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 密钥口令——**存在密码管理器里，不要写进本文件** |
 
 `GITHUB_TOKEN` 不用配，工作流自动拿到。
 
-> **密码为什么不是空的。** 密钥生成时设了密码 `moseek-updater`，这是有意的：Tauri CLI 只在
+> **为什么口令不写在这份文档里。** 这个仓库是公开的，而口令是任何一份逃出这台机器的私钥副本（备份、云同步的家目录、支持包）上唯一的保护。写在这里等于公开它。口令请与 `moseek-updater.key` 一起备份到密码管理器。
+
+> **密码为什么不能是空的。** 密钥生成时设了密码，这是有意的：Tauri CLI 只在
 > `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **非空**时才使用它，空字符串在 shell 里等同于「没设置」
 > （实测：PowerShell 根本不会把空字符串传给子进程），于是 CLI 会转去**交互式提示输入密码**——
 > 在 CI 上就是一个永远等不到输入的构建。给密钥设密码让本地与 CI 走同一条路径。
 
-> **私钥丢了就无法再发布可用的更新**：已装用户只接受用这把私钥签名的安装包，换新密钥必须让用户手动重装一次。请把 `moseek-updater.key` 与密码一起备份到安全的地方。
+> **私钥丢了就无法再发布可用的更新**：已装用户只接受用这把私钥签名的安装包，换新密钥必须让用户手动重装一次。请把 `moseek-updater.key` 与口令一起备份到安全的地方。
 
 ### 2. 确认仓库地址
 
@@ -100,9 +102,10 @@ git push origin v0.2.0
 ## 本地构建（不打标签）
 
 ```bash
-# 需要私钥才能产出签名，否则 updater 无法使用
+# 需要私钥才能产出签名，否则 updater 无法使用。
+# 口令从环境变量读，绝不写死在命令里——这条命令会进 shell 历史。
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content "$env:USERPROFILE\.tauri\moseek-updater.key" -Raw
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "moseek-updater"
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = Read-Host "签名口令" -MaskInput
 pnpm tauri build
 ```
 

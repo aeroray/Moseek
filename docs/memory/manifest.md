@@ -106,6 +106,7 @@ Discover optional memory without loading it. Entries here are not default loads.
 
 ## Explicit only
 - archive/
+- changelog.md (loaded by the "Change history / recap" task above; not a default load)
 
 ## Context budget
 - brief.md: 500 tokens max
