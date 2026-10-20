@@ -52,7 +52,10 @@ tauri = { version = "2", features = [] }
 # Supplies the native save dialog for "download this poster" and for exporting a configuration.
 # Without a native picker the webview could only drop the file somewhere the user never chose.
 tauri-plugin-dialog = "2"
-tauri-plugin-opener = "2"
+# No `tauri-plugin-opener`: it was wired but never called, and its default capability granted
+# `open_url` for **any** host plus `reveal_item_in_dir`. Nothing in `src/` invoked it, so it was
+# pure blast radius — a render-side compromise could have launched the default browser at an
+# attacker's page. Re-adding it means scoping the permission, not restoring `opener:default`.
 # In-app updates from GitHub Releases. The plugin verifies a minisign signature over the downloaded
 # installer against the public key in `tauri.conf.json`, so a tampered or substituted asset fails
 # verification instead of being installed.

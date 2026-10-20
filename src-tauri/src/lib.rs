@@ -29,7 +29,6 @@ fn healthcheck() -> &'static str {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
@@ -71,11 +70,11 @@ pub fn run() {
             live::get_epg,
             resolver::fetch_media_resource,
             resolver::probe_media_container,
+            resolver::resolve_media_element_url,
             resolver::stream_media_resource,
             resolver::cancel_media_stream,
             resolver::resolve_playback,
             resolver::probe_stream_urls,
-            resolver::sniff_with_companion,
             download::download_image,
         ])
         .run(tauri::generate_context!())

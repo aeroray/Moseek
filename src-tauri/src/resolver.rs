@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::IpAddr, time::Duration, time::Instant};
+use std::{collections::HashMap, time::Duration, time::Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use futures_util::future::{join_all, select_ok};
@@ -7,9 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::policy::{
-    fetch_media_bytes, fetch_media_prefix, fetch_text_following_redirects,
-    fetch_text_following_redirects_with_headers, fetch_text_with_headers, fetch_text_with_method,
-    open_media_response, validate_public_destination, validate_remote_url,
+    fetch_media_bytes, fetch_media_prefix, fetch_media_prefix_with_deadline,
+    fetch_text_following_redirects, fetch_text_following_redirects_with_headers,
+    fetch_text_with_headers, fetch_text_with_method, open_media_response,
+    validate_public_destination, validate_remote_url,
 };
 
 #[derive(Clone, Deserialize)]
@@ -147,6 +148,11 @@ fn classify_media_container(body: &[u8], content_type: Option<&str>) -> (String,
 /// frequently carries no extension — the channel this exists for is a bare `/douyu/431460` that
 /// 301-redirects to an FLV. The bytes cannot lie, and the redirect is followed here exactly as the
 /// player would follow it, so the verdict describes what playback will actually receive.
+///
+/// The read is bounded here rather than left to the shared fetch: the player calls this
+/// fire-and-forget for every ambiguous live channel, and on a streaming client a server that
+/// answers 200 and drips one byte at a time would otherwise hold the task and its socket for the
+/// life of the process. A sniff reads a prefix and hangs up, so a total deadline is exactly right.
 #[tauri::command]
 pub async fn probe_media_container(
     url: String,
@@ -154,7 +160,7 @@ pub async fn probe_media_container(
 ) -> Result<MediaContainerProbe, String> {
     let parsed_url = Url::parse(&url).map_err(|error| error.to_string())?;
     let header_pairs = headers.unwrap_or_default().into_iter().collect::<Vec<_>>();
-    let (body, content_type, final_url) = fetch_media_prefix(
+    let (body, content_type, final_url) = fetch_media_prefix_with_deadline(
         parsed_url,
         CONTAINER_PROBE_BYTES,
         "媒体容器探测",
@@ -169,6 +175,29 @@ pub async fn probe_media_container(
         probed_bytes: body.len(),
         message,
     })
+}
+
+/// The address a media element is allowed to load: the redirect-final form, walked hop by hop.
+///
+/// The native `<video>` path assigns `video.src` a remote address, which means the WebView — not
+/// Rust — opens that connection, follows its redirects and reads its bytes. This command is the
+/// last moment the policy can see the address at all, so the whole redirect chain is resolved
+/// under the gate first and the element is handed the address it ends at.
+///
+/// This is a mitigation, not a fix: it closes the ordinary one-hop case, and the element can still
+/// be redirected on its own later request (a host that treats the WebView's User-Agent differently
+/// can answer 302 to a private address). The complete fix is a `moseek-media://` handler that
+/// forwards `Range` through [`open_media_response`], so the element never names a remote origin.
+#[tauri::command]
+pub async fn resolve_media_element_url(url: String) -> Result<String, String> {
+    let parsed = Url::parse(&url).map_err(|error| error.to_string())?;
+    validate_remote_url(&parsed)?;
+    let (_prefix, _content_type, final_url) =
+        fetch_media_prefix_with_deadline(parsed, CONTAINER_PROBE_BYTES, "媒体地址", &[]).await?;
+    // The final hop is re-checked rather than trusted: `open_media_response` validates every hop
+    // on the way, and this catches a regression in that loop at the boundary the element sees.
+    validate_remote_url(&final_url)?;
+    Ok(final_url.to_string())
 }
 
 /// Live media streams currently open, so the frontend can stop one it no longer wants.
@@ -280,7 +309,6 @@ const PROBE_MAX_BYTES: usize = 4 * 1024;
 /// refusing to open a socket per entry in a list of hundreds.
 const MAX_PROBE_URLS: usize = 32;
 
-const DEFAULT_SNIFFER_COMPANION_URL: &str = "http://127.0.0.1:57573/sniffer";
 const MAX_PARSE_REQUEST_BODY_BYTES: usize = 128 * 1024;
 const MAX_MEDIA_RESOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MIN_MEDIA_RESOURCE_BYTES: usize = 64 * 1024;
@@ -476,6 +504,25 @@ async fn resolve_with_services(
 /// `Referer` — on its own the same address answers 404 — which is what a browser would send and is
 /// therefore exactly what the scan must send to predict what the player would get.
 async fn scan_episode_page(url: &Url) -> Option<PlaybackResolution> {
+    // **The deadline covers the whole scan, not only its first fetch.**
+    //
+    // It used to wrap `fetch_text_following_redirects` alone, so the HTTP work was bounded and the
+    // parsing was not: `resolution_from_page` ran afterwards, outside any deadline, on markup the
+    // upstream controls. The scanners are linear now and cap their output, so the old worst case
+    // (quadratic de-duplication over a megabyte of addresses) is gone — but "the expensive part is
+    // fast" is a property of today's code, not a guarantee, and this runs on every episode open. A
+    // total budget is the guarantee.
+    tokio::time::timeout(
+        Duration::from_millis(PAGE_SCAN_TIMEOUT_MS),
+        scan_episode_page_inner(url),
+    )
+    .await
+    .ok()
+    .flatten()
+}
+
+/// The scan itself, run under the caller's total deadline.
+async fn scan_episode_page_inner(url: &Url) -> Option<PlaybackResolution> {
     let fetched = tokio::time::timeout(
         Duration::from_millis(PAGE_SCAN_TIMEOUT_MS),
         // Redirects are followed because this is predicting what the player would fetch, exactly
@@ -660,73 +707,6 @@ fn probe_media_kind(body: &[u8]) -> &'static str {
     } else {
         "unknown"
     }
-}
-
-#[tauri::command]
-pub async fn sniff_with_companion(
-    target_url: String,
-    companion_url: Option<String>,
-    timeout_ms: Option<u64>,
-) -> Result<PlaybackResolution, String> {
-    let target = Url::parse(&target_url).map_err(|error| error.to_string())?;
-    validate_remote_url(&target)?;
-    let companion = Url::parse(
-        companion_url
-            .as_deref()
-            .unwrap_or(DEFAULT_SNIFFER_COMPANION_URL),
-    )
-    .map_err(|error| format!("本地嗅探伴侣地址无效：{error}"))?;
-    validate_companion_url(&companion)?;
-    let timeout = timeout_ms.unwrap_or(15_000).clamp(1_000, 60_000);
-    let mut endpoint = companion;
-    endpoint
-        .query_pairs_mut()
-        .append_pair("url", target.as_str())
-        .append_pair("mode", "0")
-        .append_pair("timeout", &timeout.to_string());
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_millis(timeout + 1_000))
-        .redirect(reqwest::redirect::Policy::none())
-        .user_agent("Moseek/0.1")
-        .build()
-        .map_err(|error| error.to_string())?;
-    let mut response = client
-        .get(endpoint)
-        .send()
-        .await
-        .map_err(|error| format!("本地嗅探伴侣不可用：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("本地嗅探伴侣返回错误：{error}"))?;
-    if response
-        .content_length()
-        .is_some_and(|size| size > 2 * 1024 * 1024)
-    {
-        return Err("本地嗅探伴侣响应超过 2 MB 限制".to_string());
-    }
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("读取本地嗅探结果失败：{error}"))?
-    {
-        if body.len().saturating_add(chunk.len()) > 2 * 1024 * 1024 {
-            return Err("本地嗅探伴侣响应超过 2 MB 限制".to_string());
-        }
-        body.extend_from_slice(&chunk);
-    }
-    let body = String::from_utf8(body).map_err(|_| "本地嗅探结果不是有效 UTF-8".to_string())?;
-    let resolved_url = extract_resolved_url(&body)
-        .ok_or_else(|| "本地嗅探伴侣未返回可识别的 HTTP 播放地址".to_string())?;
-    let resolved =
-        Url::parse(&resolved_url).map_err(|error| format!("本地嗅探结果地址无效：{error}"))?;
-    validate_remote_url(&resolved)?;
-    Ok(PlaybackResolution {
-        url: resolved.to_string(),
-        media_kind: media_kind(resolved.as_str()).to_string(),
-        adapter_id: "local-sniffer".to_string(),
-        parse_service_id: None,
-    })
 }
 
 /// Builds the request address for one parser service.
@@ -923,30 +903,6 @@ fn media_kind(url: &str) -> &'static str {
     }
 }
 
-fn validate_companion_url(url: &Url) -> Result<(), String> {
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err("本地嗅探伴侣只允许 HTTP 或 HTTPS 地址".to_string());
-    }
-    let host = url
-        .host_str()
-        .ok_or_else(|| "本地嗅探伴侣地址缺少主机名".to_string())?;
-    let normalized = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    let is_loopback = normalized == "localhost"
-        || normalized == "::1"
-        || normalized
-            .parse::<IpAddr>()
-            .map(|address| address.is_loopback())
-            .unwrap_or(false);
-    if !is_loopback {
-        return Err("本地嗅探伴侣只允许配置在 localhost 或回环 IP 上".to_string());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -971,7 +927,7 @@ mod tests {
 
     use super::{
         build_parser_request, classify_media_container, is_supported_parser_method, media_kind,
-        parser_parameter_name, url_encode, validate_companion_url, value_url, MAX_PARSE_SERVICES,
+        parser_parameter_name, url_encode, value_url, MAX_PARSE_SERVICES,
     };
 
     #[test]
@@ -1151,13 +1107,6 @@ mod tests {
             "supported",
             "PUT"
         )));
-    }
-
-    #[test]
-    fn companion_policy_only_allows_loopback_hosts() {
-        assert!(validate_companion_url(&"http://127.0.0.1:57573/sniffer".parse().unwrap()).is_ok());
-        assert!(validate_companion_url(&"http://localhost:57573/sniffer".parse().unwrap()).is_ok());
-        assert!(validate_companion_url(&"https://example.com/sniffer".parse().unwrap()).is_err());
     }
 
     #[test]

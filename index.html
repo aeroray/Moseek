@@ -6,12 +6,14 @@
     <meta name="theme-color" content="#0a0c10" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <title>Moseek · 拾影 · 万千影视，一拾即得</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
-      rel="stylesheet"
-    />
+    <!-- No webfont link here, on purpose.
+         This used to load IBM Plex Sans and Space Grotesk from fonts.googleapis.com, which made
+         the WebView contact a CDN before a single line of Rust could run — the one thing the
+         network policy exists to prevent — and left first paint depending on how that connection
+         failed on mainland-China networks. `--font-sans` in `src/index.css` still names both
+         families first, so a machine that has them installed still uses them; everything else
+         falls through to the system UI font. Reinstating them means self-hosting the .woff2 files
+         and adding @font-face rules, never a remote stylesheet. -->
   </head>
   <body>
     <div id="root"></div>

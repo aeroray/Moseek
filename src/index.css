@@ -53,6 +53,11 @@
   --status-blocked: oklch(0.58 0.2 25);
   --status-blocked-bg: oklch(0.95 0.04 25);
   --status-blocked-border: oklch(0.82 0.12 25);
+  /* The two named faces are no longer downloaded: `index.html` used to load them from
+     fonts.googleapis.com, which made the WebView contact a CDN outside the Rust network policy.
+     Keeping them first costs nothing — a machine that has them installed still renders them —
+     and everything else falls through to the system UI font. Self-host them here with @font-face
+     if the branded look is wanted back; never reinstate the remote stylesheet. */
   --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-display: "Space Grotesk", "IBM Plex Sans", -apple-system, sans-serif;
   /* Monospace for ids, URLs and code. The CJK-capable families come BEFORE the generic `monospace`

@@ -25,6 +25,15 @@ const DNS_TIMEOUT: Duration = Duration::from_secs(8);
 /// an unbounded amount into a message that is displayed to the user.
 const ERROR_BODY_MAX_BYTES: usize = 4 * 1024;
 
+/// How long the error body of a media response may take to arrive.
+///
+/// A streaming client's deadline is a *gap* between reads, so the byte cap alone bounds what is
+/// kept but not how long it takes to keep it: a server answering `403` and then dripping one byte
+/// every 19 seconds satisfies the gap deadline forever and never reaches the byte cap. Every
+/// streaming caller drains this body, so the hold is reachable from every one of them — an error
+/// page is worth a few seconds of waiting, not the life of the process.
+const ERROR_BODY_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Flattens an error page into one line.
 ///
 /// The useful sentence is usually *inside* a tag rather than on a line of its own —
@@ -191,6 +200,19 @@ pub(crate) async fn fetch_text_following_redirects(
         .await
 }
 
+/// Decodes a fetched body as text, tolerating the encodings these sites actually serve.
+///
+/// `String::from_utf8` rejected a GBK page outright, which reported our own encoding guess as the
+/// page's fault: the bytes were fine and only the assumption was wrong. Configuration import has
+/// always gone through `config::decode`, and a source that answers an HTML page in GBK was the one
+/// remaining path that could not read what it was given. The resource name is kept in the message
+/// because several fetches share this helper and the caller's wording names what failed.
+fn decode_text_body(body: Vec<u8>, resource_name: &str) -> Result<String, String> {
+    crate::config::decode::decode_text(&body).map_err(|_| {
+        format!("{resource_name}无法解码为文本（既不是 UTF-8，也不是 GBK/Big5）")
+    })
+}
+
 /// The same fetch, with caller headers.
 ///
 /// Needed because a player frame is routinely hotlink-protected: measured on the real
@@ -214,7 +236,7 @@ pub(crate) async fn fetch_text_following_redirects_with_headers(
         max_redirects,
     )
     .await?;
-    String::from_utf8(body).map_err(|_| format!("{resource_name}不是有效的 UTF-8 文本"))
+    decode_text_body(body, resource_name)
 }
 
 pub(crate) async fn fetch_text_with_method(
@@ -228,7 +250,7 @@ pub(crate) async fn fetch_text_with_method(
     validate_remote_url(&url)?;
     let body =
         fetch_bytes_with_request(url, method, max_bytes, resource_name, headers, body).await?;
-    String::from_utf8(body).map_err(|_| format!("{resource_name}不是有效的 UTF-8 文本"))
+    decode_text_body(body, resource_name)
 }
 
 /// How long a live stream may stay silent between two reads before it is treated as dead.
@@ -285,6 +307,131 @@ fn redirect_headers(headers: &mut Vec<(String, String)>, from: &Url, to: &Url) {
     }
 }
 
+/// The address a redirect points at, after every rule the next hop must satisfy.
+///
+/// Pulled out of both redirect loops so the rules live in one place and can be asserted without a
+/// network. The loops had carried identical copies of the join and the self-redirect guard, and a
+/// rule added to one copy but not the other is exactly how the TLS downgrade went unnoticed.
+fn redirect_target(current_url: &Url, location: &str, resource_name: &str) -> Result<Url, String> {
+    let next_url = current_url
+        .join(location)
+        .map_err(|error| format!("{resource_name}重定向地址无法解析：{error}"))?;
+    // An empty Location resolves back to the current URL, which would otherwise spin until the
+    // redirect budget runs out and be reported as "too many redirects" even though only one hop
+    // was ever attempted.
+    if next_url == *current_url {
+        return Err(format!(
+            "{resource_name}的重定向没有指向新地址（Location 为空或指向自身），该地址当前不可用"
+        ));
+    }
+    // An https address that hands back a plaintext follow-up is never legitimate: either the
+    // redirect is broken or someone in the path rewrote it, and following it would put a manifest
+    // or a configuration document on a channel a network attacker can edit. Plain `http` sources
+    // are ordinary in this ecosystem, so the scheme is never refused — only the transition away
+    // from TLS.
+    if current_url.scheme() == "https" && next_url.scheme() == "http" {
+        return Err(format!(
+            "{resource_name}的地址试图从 HTTPS 降级到 HTTP，已拒绝"
+        ));
+    }
+    Ok(next_url)
+}
+
+/// Runs a read under a wall-clock deadline, reporting the overrun as `None`.
+async fn within<T>(work: impl std::future::Future<Output = T>, deadline: Duration) -> Option<T> {
+    tokio::time::timeout(deadline, work).await.ok()
+}
+
+/// Drains a text body under a deadline, yielding whatever had arrived when it ran out.
+///
+/// A partial error page is still better than nothing, and a body that cannot be read at all leaves
+/// the status-only message, which is a truthful diagnosis either way. What must not happen is the
+/// status message arriving only after the process has been held for hours.
+async fn drain_within(work: impl std::future::Future<Output = String>, deadline: Duration) -> String {
+    within(work, deadline).await.unwrap_or_default()
+}
+
+/// Reads a bounded error body under a deadline.
+///
+/// Both bounds matter. The byte cap stops a hostile upstream from filling memory, and the deadline
+/// stops a `403` that drips one byte every twenty seconds from keeping the task — and its socket —
+/// alive: every arriving byte resets the streaming client's gap deadline, so only a wall-clock
+/// budget ends it. Reachable from every streaming caller, which is why the bound lives here.
+async fn read_error_body(response: reqwest::Response) -> String {
+    read_error_body_within(response, ERROR_BODY_TIMEOUT).await
+}
+
+/// [`read_error_body`] with the budget as a parameter, so the two layers can be told apart in a
+/// test: the byte cap is the loop's own, the deadline is [`drain_within`]'s.
+async fn read_error_body_within(response: reqwest::Response, deadline: Duration) -> String {
+    let drain = async move {
+        let mut response = response;
+        let mut detail = String::new();
+        while let Some(chunk) = response.chunk().await.ok().flatten() {
+            if detail.len().saturating_add(chunk.len()) > ERROR_BODY_MAX_BYTES {
+                break;
+            }
+            detail.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        detail
+    };
+    drain_within(drain, deadline).await
+}
+
+/// How long reading a prefix may take, once a response is open.
+///
+/// Starts after `open_media_response` returns, which is the point: the request half already has
+/// its own bounds (connect timeout, DNS deadline, gap deadline), while the *read* half has none.
+/// A server that answers `200` and then drips one byte every nineteen seconds satisfies the
+/// streaming gap deadline forever and would reach the 64 KiB cap in roughly two weeks.
+const PREFIX_BODY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The result type of a media prefix read.
+type MediaPrefix = (Vec<u8>, Option<String>, Url);
+
+/// Ends a prefix read at the deadline, turning an overrun into the message the user sees.
+///
+/// Split out from [`fetch_media_prefix_with_deadline`] so the bound can be asserted against a
+/// future that never resolves — which is what a dripping upstream looks like to this code, and
+/// what a test cannot otherwise produce without a cooperating server.
+async fn guard_prefix_read(
+    read: impl std::future::Future<Output = Result<MediaPrefix, String>>,
+    resource_name: &str,
+) -> Result<MediaPrefix, String> {
+    guard_prefix_read_within(read, resource_name, PREFIX_BODY_TIMEOUT).await
+}
+
+/// [`guard_prefix_read`] with the budget as a parameter, so a test does not wait the real 15 s.
+async fn guard_prefix_read_within(
+    read: impl std::future::Future<Output = Result<MediaPrefix, String>>,
+    resource_name: &str,
+    deadline: Duration,
+) -> Result<MediaPrefix, String> {
+    match within(read, deadline).await {
+        Some(result) => result,
+        None => Err(format!(
+            "{resource_name}超时（{} 秒）",
+            deadline.as_secs()
+        )),
+    }
+}
+
+/// Reads the leading bytes of a media response, with a deadline on the read itself.
+///
+/// Kept separate from [`fetch_media_prefix`], which the live path shares and which must not be
+/// given a total budget: a running stream is precisely the case a total deadline gets wrong. This
+/// is the form for callers that only ever want a prefix — the container sniff, and the gate in
+/// front of a media element — where the read has to end even if the upstream never stops talking.
+pub(crate) async fn fetch_media_prefix_with_deadline(
+    url: Url,
+    max_bytes: usize,
+    resource_name: &str,
+    headers: &[(String, String)],
+) -> Result<MediaPrefix, String> {
+    let read = fetch_media_prefix(url, max_bytes, resource_name, headers);
+    guard_prefix_read(read, resource_name).await
+}
+
 /// Opens a media response and hands back the body as a stream, following bounded redirects.
 ///
 /// Used by both the container sniff and live playback, so the redirect, policy and error-status
@@ -317,30 +464,17 @@ pub(crate) async fn open_media_response(
                 .to_str()
                 .map_err(|error| format!("{resource_name}重定向地址无效：{error}"))?
                 .to_string();
-            let next_url = current_url
-                .join(&location)
-                .map_err(|error| format!("{resource_name}重定向地址无法解析：{error}"))?;
-            if next_url == current_url {
-                return Err(format!(
-                    "{resource_name}的重定向没有指向新地址（Location 为空或指向自身），该地址当前不可用"
-                ));
-            }
+            let next_url = redirect_target(&current_url, &location, resource_name)?;
             redirect_headers(&mut headers, &current_url, &next_url);
             current_url = next_url;
             continue;
         }
         if !response.status().is_success() {
-            // Read a bounded error body, for the same reason `fetch_response_bytes` does: the
-            // status alone does not say *why*, and a region block states it only in the body.
+            // The body is read because the status alone does not say *why*: a region block states
+            // it only in the body. Bounded in both size and time, since every streaming caller
+            // reaches this path and a dripping body would otherwise outlive the request.
             let status = response.status();
-            let mut response = response;
-            let mut detail = String::new();
-            while let Ok(Some(chunk)) = response.chunk().await {
-                if detail.len().saturating_add(chunk.len()) > ERROR_BODY_MAX_BYTES {
-                    break;
-                }
-                detail.push_str(&String::from_utf8_lossy(&chunk));
-            }
+            let detail = read_error_body(response).await;
             let trimmed = detail.trim();
             return Err(if trimmed.is_empty() {
                 format!("{resource_name}返回错误状态：HTTP {}", status.as_u16())
@@ -366,12 +500,16 @@ pub(crate) async fn open_media_response(
 /// `video/x-flv` body, and the 512 KiB budget failed the same way after 5 630 ms. Identifying a
 /// container needs a few bytes, not the whole stream, so the read stops as soon as the window is
 /// full — which is also what keeps a container sniff to one round trip instead of a timeout.
+///
+/// This function itself carries no total deadline, deliberately: it is the inner half shared with
+/// the live path, which must not be given one. Callers that only ever want a prefix use
+/// [`fetch_media_prefix_with_deadline`] instead.
 pub(crate) async fn fetch_media_prefix(
     url: Url,
     max_bytes: usize,
     resource_name: &str,
     headers: &[(String, String)],
-) -> Result<(Vec<u8>, Option<String>, Url), String> {
+) -> Result<MediaPrefix, String> {
     let (mut response, final_url) = open_media_response(url, resource_name, headers).await?;
     let content_type = response
         .headers()
@@ -539,17 +677,7 @@ async fn fetch_response_bytes(
                 .ok_or_else(|| format!("{resource_name}重定向缺少目标地址"))?
                 .to_str()
                 .map_err(|error| format!("{resource_name}重定向地址无效：{error}"))?;
-            let next_url = current_url
-                .join(location)
-                .map_err(|error| format!("{resource_name}重定向地址无法解析：{error}"))?;
-            // An empty Location resolves back to the current URL, which would otherwise spin
-            // until the redirect budget runs out and be reported as "too many redirects" even
-            // though only one hop was ever attempted.
-            if next_url == current_url {
-                return Err(format!(
-                    "{resource_name}的重定向没有指向新地址（Location 为空或指向自身），该地址当前不可用"
-                ));
-            }
+            let next_url = redirect_target(&current_url, location, resource_name)?;
             redirect_headers(&mut headers, &current_url, &next_url);
             current_url = next_url;
             continue;
@@ -561,14 +689,10 @@ async fn fetch_response_bytes(
         // only ever say "拒绝访问" and point the user at the wrong cause.
         if !response.status().is_success() {
             let status = response.status();
-            let mut detail = String::new();
-            while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
-                // Enough for an error page; anything longer is not an explanation.
-                if detail.len().saturating_add(chunk.len()) > ERROR_BODY_MAX_BYTES {
-                    break;
-                }
-                detail.push_str(&String::from_utf8_lossy(&chunk));
-            }
+            // The same time-and-size bound as the media path. This client is buffered, so its own
+            // deadline covers the exchange, but the body is drained here rather than by reqwest,
+            // and one shared bound keeps the two error messages from drifting apart.
+            let detail = read_error_body(response).await;
             let trimmed = detail.trim();
             return Err(if trimmed.is_empty() {
                 format!("{resource_name}返回错误状态：HTTP {}", status.as_u16())
@@ -730,25 +854,83 @@ fn is_disallowed_host(host: &str) -> bool {
     }
 }
 
+/// The IPv4 address a transitional IPv6 form carries, if it carries one.
+///
+/// Every mechanism below reaches an IPv4 destination from an address that looks like ordinary
+/// global IPv6, so the only honest way to apply the v4 rule is to unwrap the address first. A
+/// poisoned resolver, or a host on a 6to4 or NAT64 path, otherwise turns `2002:7f00:1::` into a
+/// request to `127.0.0.1` that the v6 checks never see.
+fn embedded_ipv4(segments: &[u16; 8]) -> Option<std::net::Ipv4Addr> {
+    let high = |index: usize| (segments[index] >> 8) as u8;
+    let low = |index: usize| (segments[index] & 0x00ff) as u8;
+    let tail = std::net::Ipv4Addr::new(high(6), low(6), high(7), low(7));
+    if segments[0] == 0x2002 {
+        // 2002::/16 — 6to4: the IPv4 address is bits 16..48.
+        return Some(std::net::Ipv4Addr::new(high(1), low(1), high(2), low(2)));
+    }
+    if segments[0] == 0x2001 && segments[1] == 0x0000 {
+        // 2001:0::/32 — Teredo: the client IPv4 address is the inverse of bits 96..128.
+        let octets = tail.octets();
+        return Some(std::net::Ipv4Addr::new(
+            !octets[0], !octets[1], !octets[2], !octets[3],
+        ));
+    }
+    if segments[0] == 0x0064
+        && segments[1] == 0xff9b
+        && segments[2..6].iter().all(|segment| *segment == 0)
+    {
+        // 64:ff9b::/96 — NAT64 well-known prefix: the low 32 bits are the IPv4 address.
+        return Some(tail);
+    }
+    if segments[..6].iter().all(|segment| *segment == 0) && tail.octets() != [0, 0, 0, 0] {
+        // ::/96 — deprecated IPv4-compatible addresses. The IPv4-mapped form (::ffff:0:0/96)
+        // carries segments[5] == 0xffff and is therefore excluded here rather than handled twice:
+        // `to_ipv4_mapped` already covers it at the call site.
+        return Some(tail);
+    }
+    None
+}
+
 fn is_disallowed_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => {
+            let octets = address.octets();
             address.is_loopback()
                 || address.is_private()
                 || address.is_link_local()
                 || address.is_unspecified()
                 || address.is_multicast()
                 || address.is_broadcast()
+                // RFC 6598 shared address space. Cloud metadata lives here too — Alibaba Cloud
+                // answers 100.100.100.200 — and some ISPs place the host's own on-link
+                // mobile-broadband segment inside it.
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                // 192.0.0.0/24 IETF protocol assignments.
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+                // 0.0.0.0/8 "this network"; several stacks treat it as the local host.
+                || octets[0] == 0
+                // 240.0.0.0/4 reserved, and 255.255.255.255 is already covered by `broadcast`.
+                || octets[0] >= 240
+            // Deliberately NOT blocked: 198.18.0.0/15. Clash/Mihomo TUN mode answers every
+            // hostname with an address from that pool, so refusing it would break those users
+            // outright — the range is a proxy's own on-link fake, not a remote destination.
         }
         IpAddr::V6(address) => {
+            let segments = address.segments();
             address
                 .to_ipv4_mapped()
                 .is_some_and(|mapped| is_disallowed_ip(IpAddr::V4(mapped)))
+                // Whatever IPv4 destination a transition mechanism carries is judged by the same
+                // v4 rule, rather than trusted because it is wrapped in a public-looking v6.
+                || embedded_ipv4(&segments).is_some_and(|v4| is_disallowed_ip(IpAddr::V4(v4)))
                 || address.is_loopback()
                 || address.is_unspecified()
                 || address.is_multicast()
-                || (address.segments()[0] & 0xffc0 == 0xfe80)
-                || (address.segments()[0] & 0xfe00 == 0xfc00)
+                || (segments[0] & 0xffc0 == 0xfe80)
+                || (segments[0] & 0xfe00 == 0xfc00)
+                // 2001:db8::/32 documentation prefix: never routable, so reaching it means the
+                // resolver was poisoned.
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
         }
     }
 }
@@ -788,9 +970,11 @@ mod tests {
         assert_eq!(same_origin.len(), 1);
     }
 
+    use std::net::IpAddr;
+
     use super::{
-        collapse_whitespace, is_disallowed_ip, resolve_allowed_addresses, resolve_host,
-        validate_remote_url, DNS_TIMEOUT,
+        collapse_whitespace, embedded_ipv4, is_disallowed_ip, resolve_allowed_addresses,
+        resolve_host, validate_remote_url, DNS_TIMEOUT,
     };
 
     #[test]
@@ -940,5 +1124,248 @@ mod tests {
         // Falling through to an empty string would leave the diagnosis saying only "HTTP 403".
         let flattened = collapse_whitespace("<html><body></body></html>");
         assert!(!flattened.is_empty());
+    }
+
+    /// The ranges `Ipv4Addr`'s own predicates do not cover. Each one is a place a hostile
+    /// configuration can point the app at, and the Alibaba Cloud metadata address is the concrete
+    /// one: it lives in RFC 6598 shared space, which `is_private` does not consider private.
+    #[test]
+    fn non_public_ipv4_ranges_are_refused() {
+        for literal in [
+            "100.64.0.1",      // start of RFC 6598
+            "100.100.100.200", // Alibaba Cloud instance metadata
+            "100.127.255.255", // end of RFC 6598
+            "192.0.0.1",       // 192.0.0.0/24 IETF protocol assignments
+            "0.0.0.0",         // 0.0.0.0/8
+            "0.1.2.3",         // 0.0.0.0/8, not just the unspecified address
+            "240.0.0.1",       // 240.0.0.0/4 reserved
+            "255.255.255.255", // the broadcast that ends that range
+        ] {
+            let address: IpAddr = literal.parse().unwrap();
+            assert!(is_disallowed_ip(address), "{literal} should be refused");
+        }
+    }
+
+    /// The deliberate omission. Clash/Mihomo TUN mode answers **every** hostname with an address
+    /// from this pool, so adding it to the deny-list would make the app unable to reach anything
+    /// on those machines — a far worse outcome than the gap it would close.
+    #[test]
+    fn the_clash_fake_ip_pool_stays_allowed() {
+        for literal in ["198.18.0.1", "198.19.255.255"] {
+            let address: IpAddr = literal.parse().unwrap();
+            assert!(
+                !is_disallowed_ip(address),
+                "{literal} must stay reachable: it is Clash/Mihomo TUN's fake-IP pool"
+            );
+        }
+    }
+
+    /// Every transition mechanism that carries an IPv4 destination is judged by the same v4 rule.
+    /// Each of these looks like ordinary global IPv6 and is not caught by `to_ipv4_mapped`.
+    #[test]
+    fn an_ipv6_address_is_judged_by_the_ipv4_it_embeds() {
+        for literal in [
+            "2002:7f00:1::",      // 6to4 wrapping 127.0.0.1
+            "2002:a9fe:a9fe::",   // 6to4 wrapping 169.254.169.254
+            "64:ff9b::a9fe:a9fe", // NAT64 -> 169.254.169.254
+            "64:ff9b::7f00:1",    // NAT64 -> 127.0.0.1
+            "::7f00:1",           // deprecated IPv4-compatible -> 127.0.0.1
+            "::a9fe:a9fe",        // deprecated IPv4-compatible -> 169.254.169.254
+            "2001:db8::1",        // documentation prefix: never routable
+        ] {
+            let address: IpAddr = literal.parse().unwrap();
+            assert!(is_disallowed_ip(address), "{literal} should be refused");
+        }
+        // Teredo stores the client address inverted, so 127.0.0.1 is carried as 128.255.255.254.
+        let teredo: IpAddr = "2001:0:0:0:0:0:80ff:fffe".parse().unwrap();
+        assert!(is_disallowed_ip(teredo), "Teredo wrapping 127.0.0.1");
+    }
+
+    /// The unwrapping must not turn into a blanket refusal: a genuine public destination is still
+    /// reachable through every mechanism that can carry one, and ordinary global v6 stays open.
+    #[test]
+    fn public_addresses_stay_allowed_after_the_range_check() {
+        for literal in [
+            "93.184.216.34",
+            "8.8.8.8",
+            "1.1.1.1",
+            "100.63.255.255", // just below RFC 6598
+            "100.128.0.0",    // just above it
+            "192.0.1.1",      // just past 192.0.0.0/24
+        ] {
+            let address: IpAddr = literal.parse().unwrap();
+            assert!(
+                !is_disallowed_ip(address),
+                "{literal} is public and must stay reachable"
+            );
+        }
+        for literal in [
+            "2606:4700:4700::1111", // Cloudflare, ordinary global v6
+            "2002:5db8:d822::",     // 6to4 wrapping 93.184.216.34, a public address
+            "64:ff9b::5db8:d822",   // NAT64 wrapping the same public address
+        ] {
+            let address: IpAddr = literal.parse().unwrap();
+            assert!(
+                !is_disallowed_ip(address),
+                "{literal} is public and must stay reachable"
+            );
+        }
+    }
+
+    /// The helper is asserted directly because `is_disallowed_ip` alone cannot show *which* IPv4 an
+    /// address was unwrapped to — and a wrong offset would still refuse the address while
+    /// misjudging every other one built on the same prefix.
+    #[test]
+    fn the_embedded_ipv4_is_read_from_the_right_offsets() {
+        let segments = |literal: &str| match literal.parse::<IpAddr>().unwrap() {
+            IpAddr::V6(address) => address.segments(),
+            IpAddr::V4(_) => panic!("{literal} is not IPv6"),
+        };
+        assert_eq!(
+            embedded_ipv4(&segments("2002:5db8:d822::")).map(|v4| v4.to_string()),
+            Some("93.184.216.34".to_string())
+        );
+        assert_eq!(
+            embedded_ipv4(&segments("64:ff9b::a9fe:a9fe")).map(|v4| v4.to_string()),
+            Some("169.254.169.254".to_string())
+        );
+        assert_eq!(
+            embedded_ipv4(&segments("::7f00:1")).map(|v4| v4.to_string()),
+            Some("127.0.0.1".to_string())
+        );
+        // Teredo inverts the client address, so 127.0.0.1 is carried as 128.255.255.254.
+        assert_eq!(
+            embedded_ipv4(&segments("2001:0:0:0:0:0:80ff:fffe")).map(|v4| v4.to_string()),
+            Some("127.0.0.1".to_string())
+        );
+        // An ordinary global address embeds nothing, and must not be read as if it did.
+        assert_eq!(embedded_ipv4(&segments("2606:4700:4700::1111")), None);
+    }
+
+    /// A literal in one of the new ranges must be refused at the policy entry point, not only by
+    /// the helper: that is the path a configuration's URL actually takes.
+    #[test]
+    fn policy_refuses_the_newly_covered_literal_addresses() {
+        for url in [
+            "http://100.100.100.200/latest/meta-data/",
+            "http://192.0.0.1/a",
+            "http://0.1.2.3/a",
+            "http://240.0.0.1/a",
+            "http://[2002:7f00:1::]/a",
+            "http://[64:ff9b::a9fe:a9fe]/a",
+            "http://[::7f00:1]/a",
+        ] {
+            assert!(
+                validate_remote_url(&url.parse().unwrap()).is_err(),
+                "{url} should be refused"
+            );
+        }
+    }
+
+    /// An https → http redirect is the one hop that is never legitimate. Refusing it is what keeps
+    /// a manifest or a configuration document off a channel a network attacker can rewrite. The
+    /// rule lives in `redirect_target`, which **both** redirect loops call, so asserting it there
+    /// covers the media path and the configuration path at once.
+    #[test]
+    fn an_https_to_http_redirect_is_refused() {
+        let https: reqwest::Url = "https://example.com/a".parse().unwrap();
+        let plain: reqwest::Url = "http://example.com/a".parse().unwrap();
+        assert!(
+            super::redirect_target(&https, "http://example.com/b", "媒体资源").is_err(),
+            "an https source must not be downgraded to plaintext"
+        );
+        // A relative Location inherits the scheme, so it is not a downgrade.
+        assert_eq!(
+            super::redirect_target(&https, "/b", "媒体资源")
+                .unwrap()
+                .as_str(),
+            "https://example.com/b"
+        );
+        // Upgrading, and staying on plain http, are ordinary and must keep working: plain-http
+        // sources are the norm in this ecosystem.
+        assert_eq!(
+            super::redirect_target(&plain, "https://example.com/b", "媒体资源")
+                .unwrap()
+                .scheme(),
+            "https"
+        );
+        assert_eq!(
+            super::redirect_target(&plain, "http://cdn.example.com/b", "媒体资源")
+                .unwrap()
+                .scheme(),
+            "http"
+        );
+        // The self-redirect guard stays alongside it: an empty Location resolves to the same URL
+        // and must be reported as such, not spun through the redirect budget.
+        assert!(super::redirect_target(&https, "", "媒体资源").is_err());
+    }
+
+    /// The behaviours the two added bounds exist for. A never-resolving future is what a dripping
+    /// upstream looks like to this code, and it is the only way a unit test can stand in for one:
+    /// the real paths need a server that drips on cue, which no test here can host.
+    #[test]
+    fn a_read_that_outlives_its_deadline_is_abandoned() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            // A short deadline, so the assertion does not spend the real budget.
+            let short = std::time::Duration::from_millis(20);
+            let started = std::time::Instant::now();
+            let overran = super::within(std::future::pending::<()>(), short).await;
+            assert!(overran.is_none(), "a hanging read must be abandoned");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "the deadline, not the read, must decide when this ends"
+            );
+            // A read that finishes is returned unchanged, so the deadline is not a blanket failure.
+            assert_eq!(super::within(async { 7_u8 }, short).await, Some(7));
+
+            // The error-body drain yields an empty detail rather than hanging, so the caller falls
+            // back to the status-only message instead of never producing one.
+            let detail = super::drain_within(std::future::pending::<String>(), short).await;
+            assert_eq!(detail, "");
+
+            // The prefix guard is the same bound on the path the container sniff and the
+            // media-element gate take; an overrun must become an error, not a stuck task.
+            let guarded = super::guard_prefix_read_within(
+                std::future::pending::<Result<super::MediaPrefix, String>>(),
+                "媒体地址",
+                std::time::Duration::from_secs(3),
+            )
+            .await;
+            assert!(guarded.is_err(), "a prefix read must not outlive its budget");
+            assert!(
+                guarded.unwrap_err().contains("超时"),
+                "an overrun must say so in the message the user sees"
+            );
+        });
+    }
+
+    /// The constants themselves are part of the fix: a 15 s prefix budget and a 5 s error-body
+    /// budget are what the review asked for, and a silent change to either would be invisible.
+    #[test]
+    fn the_streaming_deadlines_are_bounded() {
+        assert_eq!(super::PREFIX_BODY_TIMEOUT.as_secs(), 15);
+        assert_eq!(super::ERROR_BODY_TIMEOUT.as_secs(), 5);
+        // The gap deadline stays larger than the read budget below it, so a live stream that is
+        // merely slow is not cut off before the budget meant to protect it.
+        assert!(super::STREAM_READ_TIMEOUT > super::PREFIX_BODY_TIMEOUT);
+    }
+
+    /// A GBK page is what these sources actually serve, and the defect was reporting our own
+    /// encoding guess as the page's fault. `String::from_utf8` rejected this outright.
+    #[test]
+    fn a_gbk_body_is_decoded_instead_of_rejected() {
+        let (gbk, _, had_errors) = encoding_rs::GB18030.encode("中文标题：测试");
+        assert!(!had_errors);
+        let decoded =
+            super::decode_text_body(gbk.into_owned(), "HTML 源响应").expect("GBK must decode");
+        assert_eq!(decoded, "中文标题：测试");
+        // A genuinely undecodable body still fails, and the message names the resource.
+        let error = super::decode_text_body(vec![0xff, 0xfe, 0x00], "HTML 源响应");
+        assert!(error.is_err());
+        assert!(error.unwrap_err().contains("HTML 源响应"));
     }
 }
