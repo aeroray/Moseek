@@ -94,21 +94,6 @@ pub(crate) fn create_tables(connection: &Connection) -> Result<(), String> {
                error_kind TEXT,
                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );
-             CREATE TABLE IF NOT EXISTS script_execution_logs (
-               id INTEGER PRIMARY KEY AUTOINCREMENT,
-               archive_id INTEGER,
-               entry TEXT NOT NULL,
-               status TEXT NOT NULL,
-               phase TEXT NOT NULL,
-               duration_ms INTEGER NOT NULL,
-               http_call_count INTEGER NOT NULL DEFAULT 0,
-               http_hosts_json TEXT NOT NULL DEFAULT '[]',
-               http_calls_json TEXT NOT NULL DEFAULT '[]',
-               error_kind TEXT,
-               timed_out INTEGER NOT NULL DEFAULT 0,
-               credential_lookup_failed INTEGER NOT NULL DEFAULT 0,
-               created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-             );
              CREATE TABLE IF NOT EXISTS app_settings (
                key TEXT PRIMARY KEY,
                value TEXT NOT NULL,
@@ -155,7 +140,7 @@ fn ensure_config_source_base_url_column(connection: &Connection) -> Result<(), S
     add_column_if_missing(connection, "config_documents", "source_base_url", "TEXT")
 }
 
-fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+fn has_column(connection: &Connection, table: &'static str, column: &'static str) -> Result<bool, String> {
     let mut statement = connection
         .prepare(&format!("PRAGMA table_info({table})"))
         .map_err(|error| error.to_string())?;
@@ -168,11 +153,19 @@ fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool
     columns
 }
 
+/// Adds a column when the table does not already have it.
+///
+/// **Every argument must be a literal from this file.** The DDL is assembled with `format!` because
+/// SQLite has no parameter form for identifiers, so `table`, `column` and `definition` cannot be
+/// bound — they are interpolated. That is safe only because every call site passes a `&'static str`
+/// written here; a value derived from imported configuration would be SQL injection, and this
+/// function cannot tell the difference. If a dynamic name is ever needed, replace this with a match
+/// over a fixed set of identifiers rather than passing the string through.
 fn add_column_if_missing(
     connection: &Connection,
-    table: &str,
-    column: &str,
-    definition: &str,
+    table: &'static str,
+    column: &'static str,
+    definition: &'static str,
 ) -> Result<(), String> {
     if !has_column(connection, table, column)? {
         connection
@@ -191,4 +184,80 @@ fn ensure_config_sources_column(connection: &Connection) -> Result<(), String> {
 
 fn ensure_sources_epg_column(connection: &Connection) -> Result<(), String> {
     add_column_if_missing(connection, "sources", "epg", "TEXT")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_exists(connection: &Connection, name: &str) -> bool {
+        connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count > 0)
+            .unwrap_or(false)
+    }
+
+    /// A fresh database must not contain the tables that back the removed 本地脚本档案 feature.
+    ///
+    /// This was a create-then-drop every launch: `create_tables` still issued
+    /// `CREATE TABLE IF NOT EXISTS script_execution_logs` and `run` dropped it immediately after, so
+    /// the schema described a capability the app does not have and every start did pointless work.
+    /// The drop stays (existing installs still hold the table); the creation is what had to go.
+    #[test]
+    fn a_fresh_database_never_creates_the_removed_archive_tables() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_tables(&connection).unwrap();
+        run(&connection).unwrap();
+
+        assert!(
+            !table_exists(&connection, "script_execution_logs"),
+            "the execution-log table backs a removed feature and must not be created"
+        );
+        assert!(
+            !table_exists(&connection, "script_archives"),
+            "the archive table backs a removed feature and must not be created"
+        );
+        // The tables the app actually uses must survive the same pass.
+        assert!(table_exists(&connection, "config_documents"));
+        assert!(table_exists(&connection, "app_settings"));
+    }
+
+    /// Upgrading an old install must still drop the tables, even though nothing creates them now.
+    ///
+    /// The `DROP TABLE IF EXISTS` in `run` is the only thing that removes them from a database written
+    /// by an earlier version, so removing the create without keeping the drop would leave the dead
+    /// schema on every existing machine.
+    #[test]
+    fn an_existing_database_still_has_the_archive_tables_removed() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_tables(&connection).unwrap();
+        // Simulate the schema an older build left behind.
+        connection
+            .execute_batch(
+                "CREATE TABLE script_execution_logs (id INTEGER PRIMARY KEY, entry TEXT);
+                 CREATE TABLE script_archives (id INTEGER PRIMARY KEY, name TEXT);",
+            )
+            .unwrap();
+
+        run(&connection).unwrap();
+
+        assert!(!table_exists(&connection, "script_execution_logs"));
+        assert!(!table_exists(&connection, "script_archives"));
+    }
+
+    /// Running the migrations twice must be a no-op, not an error.
+    ///
+    /// `add_column_if_missing` guards on `has_column`, and this pins that: a migration that threw on
+    /// the second start would make the app fail to open after it had already worked once.
+    #[test]
+    fn running_migrations_twice_is_harmless() {
+        let connection = Connection::open_in_memory().unwrap();
+        create_tables(&connection).unwrap();
+        run(&connection).unwrap();
+        run(&connection).expect("a second run must not fail");
+    }
 }

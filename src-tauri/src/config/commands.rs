@@ -486,23 +486,46 @@ pub async fn read_config_file(
         .into_path()
         .map_err(|error| format!("无法解析所选文件位置：{error}"))?;
 
-    let metadata =
-        std::fs::metadata(&path).map_err(|error| format!("无法读取文件信息：{error}"))?;
-    if metadata.len() > MAX_IMPORT_BYTES {
-        return Err(format!(
-            "文件过大（{} KB），超过可导入的上限（{} MiB）。",
-            metadata.len() / 1024,
-            MAX_IMPORT_BYTES / 1024 / 1024
-        ));
-    }
-
-    let text =
-        std::fs::read_to_string(&path).map_err(|error| format!("读取文件失败：{error}"))?;
+    let text = read_config_text(&path)?;
 
     Ok(Some(ImportedFile {
         path: path.to_string_lossy().into_owned(),
         text,
     }))
+}
+
+/// Reads a configuration file from disk as text, bounded and charset-aware.
+///
+/// Extracted from the command so the behaviour is testable without a native file dialog: the dialog
+/// is the only part of `read_config_file` that cannot run in a unit test, and the two defects this
+/// function fixes both lived on the far side of it.
+///
+/// **Two defects lived in the three lines this replaces:**
+///
+/// 1. `read_to_string` is strict UTF-8, so a GBK or Big5 configuration picked from disk failed with an
+///    OS-level "stream did not contain valid UTF-8" — while the same bytes fetched from a URL decoded
+///    cleanly through `decode::decode_text`. That module exists precisely because these files are not
+///    all UTF-8 ("the file is fine, we merely guessed the wrong encoding"), and the local path is the
+///    one a user with a downloaded `.json` actually takes.
+/// 2. the size cap was checked on `metadata()` and the file then re-read by path, so anything that
+///    grew in between was read anyway. Checking the buffer that was actually read is the only place
+///    the cap can be enforced.
+fn read_config_text(path: &std::path::Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("读取文件失败：{error}"))?;
+    if bytes.len() as u64 > MAX_IMPORT_BYTES {
+        return Err(format!(
+            "文件过大（{} KB），超过可导入的上限（{} MiB）。",
+            bytes.len() / 1024,
+            MAX_IMPORT_BYTES / 1024 / 1024
+        ));
+    }
+
+    // One decoder for both entry points: the URL path already uses this fallback chain, and two
+    // import paths that disagree about what a file contains is the bug class this project keeps
+    // fixing. The error names the encodings rather than the OS.
+    let text = decode::decode_text(&bytes)?;
+
+    Ok(text)
 }
 
 /// What fetching a configuration address produced.
@@ -611,4 +634,94 @@ pub fn replace_all_config_documents(
     transaction.commit().map_err(|error| error.to_string())?;
     storage::load_config_document(&connection, document_id)?
         .ok_or_else(|| "中心配置保存后无法读取".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes bytes to a uniquely named temp file and removes it when the guard drops.
+    struct TempFile(std::path::PathBuf);
+
+    impl TempFile {
+        fn new(extension: &str, bytes: &[u8]) -> Self {
+            // Unique per call, so tests running in parallel cannot share a path.
+            let unique = format!(
+                "moseek-read-config-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_nanos())
+                    .unwrap_or_default()
+            );
+            let path = std::env::temp_dir().join(format!("{unique}.{extension}"));
+            std::fs::write(&path, bytes).expect("write the fixture");
+            Self(path)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// Picking a GBK file from disk must decode it, exactly as the URL path does.
+    ///
+    /// This is the defect the user reported: the same configuration imported cleanly from a URL and
+    /// failed from disk with "stream did not contain valid UTF-8", because this path used
+    /// `read_to_string` while the fetch path had the encoding fallback.
+    #[test]
+    fn reads_a_gbk_file_that_utf8_would_reject() {
+        let document = "{\"sites\":[{\"key\":\"cctv\",\"name\":\"中央电视台综合频道\"}]}";
+        let (encoded, _, had_errors) = encoding_rs::GB18030.encode(document);
+        assert!(!had_errors);
+        assert!(
+            std::str::from_utf8(&encoded).is_err(),
+            "the fixture must not be valid UTF-8, or the fallback never runs"
+        );
+        let file = TempFile::new("json", &encoded);
+
+        let text = read_config_text(file.path()).expect("a GBK file decodes");
+        assert!(
+            text.contains("中央电视台综合频道"),
+            "the name must survive decoding, got: {text}"
+        );
+    }
+
+    /// A UTF-8 file must be returned byte-for-byte, BOM and all.
+    #[test]
+    fn reads_a_utf8_file_unchanged() {
+        let document = "{\"sites\":[],\"note\":\"中文\"}";
+        let file = TempFile::new("json", document.as_bytes());
+        assert_eq!(read_config_text(file.path()).unwrap(), document);
+    }
+
+    /// An oversized file is refused, and the error names the limit.
+    ///
+    /// The cap used to be checked against `metadata()` before a second read, which a file could change
+    /// between — so the limit was advisory. It is now measured on the bytes actually read.
+    #[test]
+    fn refuses_a_file_larger_than_the_import_limit() {
+        // One byte over the cap, without needing a 10 MiB fixture: the check compares length only.
+        let oversized = vec![b' '; (MAX_IMPORT_BYTES + 1) as usize];
+        let file = TempFile::new("json", &oversized);
+
+        let error = read_config_text(file.path()).expect_err("an oversized file must be refused");
+        assert!(
+            error.contains("超过可导入的上限"),
+            "the message must name the limit, got: {error}"
+        );
+    }
+
+    /// A missing file reports a read failure rather than panicking.
+    #[test]
+    fn reports_a_missing_file_as_an_error() {
+        let path = std::env::temp_dir().join("moseek-definitely-not-here-9271.json");
+        let error = read_config_text(&path).expect_err("a missing file is an error");
+        assert!(error.contains("读取文件失败"), "got: {error}");
+    }
 }

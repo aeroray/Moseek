@@ -235,16 +235,62 @@ pub fn decode_text(body: &[u8]) -> Result<String, String> {
         }
     }
 
-    // No BOM. GB18030 covers GBK and is a superset of it; Big5 covers the Taiwanese sites. The first
-    // one that decodes without error wins, and UTF-8 already failed by this point.
-    for encoding in [encoding_rs::GB18030, encoding_rs::BIG5] {
-        let (text, _, had_errors) = encoding.decode(body);
-        if !had_errors {
-            return Ok(text.to_string());
-        }
+    // No BOM. Both remaining candidates are legacy double-byte tables, and **"it decoded" is not
+    // evidence**: Big5's pair space (lead A1-F9, trail 40-7E/A1-FE) is a subset of GBK's (lead 81-FE,
+    // trail 40-FE), so GB18030 accepts a Big5 document without a single error. The old code tried
+    // GB18030 first and therefore never reached BIG5 for any real Big5 file — a Taiwanese
+    // configuration imported as garbled source names and addresses, passed the shape check because
+    // the leading `{` survives, and was never reported.
+    //
+    // The discriminator is asymmetric, and measuring it (not assuming it) is what made this fix
+    // correct. On this crate's `encoding_rs`, with real documents in each encoding:
+    //
+    //   Big5 bytes read as GB18030 → "𦞾芖筿跌𦞾侯𦞾繵笵"  — always contains implausible characters
+    //   GB bytes read as BIG5      → "笢栝萇弝怢軘磁ⅰ耋"   — may contain none at all
+    //
+    // So "the GB18030 reading contains implausible characters" is reliable evidence that the bytes are
+    // Big5. The reverse is not reliable, and treating it as if it were (requiring both readings to be
+    // clean before choosing) rejected perfectly ordinary short GBK configurations — which is what an
+    // earlier version of this fix did. Hence: only the GB18030 reading is inspected for garbage, and
+    // it loses only when garbage is actually found.
+    let (gb_text, _, gb_errors) = encoding_rs::GB18030.decode(body);
+    if !gb_errors && implausible_char_count(&gb_text) == 0 {
+        // The GB18030 reading is clean, so it is the answer whether the bytes are GBK or plain ASCII.
+        // This is the common path for this ecosystem and must stay a pass-through.
+        return Ok(gb_text.into_owned());
     }
 
-    Err("配置内容既不是 UTF-8，也无法按 GB18030 / Big5 / UTF-16 解码。".to_string())
+    // The GB18030 reading either errored or produced characters no real document contains: the bytes
+    // are Big5. (A Big5 document is exactly the case that lands here, by measurement above.)
+    let (big5_text, _, big5_errors) = encoding_rs::BIG5.decode(body);
+    if !big5_errors && implausible_char_count(&big5_text) == 0 {
+        return Ok(big5_text.into_owned());
+    }
+
+    // Neither table produced something a document could plausibly contain. Saying so is better than
+    // storing a configuration with corrupted source names the user will only notice later.
+    Err("配置内容既不是 UTF-8，也无法按 GB18030 / Big5 / UTF-16 正确解码。请在源地址确认编码，或另存为 UTF-8 后再导入。".to_string())
+}
+
+/// Characters a real document would not contain, used to tell a correct legacy decode from a wrong one.
+///
+/// Counts: kana appearing in what is otherwise Chinese text (Big5 read as GBK lands there), Private
+/// Use Area code points (an unmatched Big5 trail byte is mapped there by GB18030), rare CJK extension
+/// blocks, and the replacement character. A correct reading of a Chinese configuration is zero.
+///
+/// Deliberately not counting fullwidth punctuation or common ideographs: both encodings legitimately
+/// produce those, so counting them would make the wrong reading look as good as the right one.
+fn implausible_char_count(text: &str) -> usize {
+    text.chars()
+        .filter(|character| {
+            let code = *character as u32;
+            (0x3040..=0x30FF).contains(&code)        // hiragana / katakana
+                || (0xE000..=0xF8FF).contains(&code) // Private Use Area
+                || (0x3400..=0x4DBF).contains(&code) // CJK Extension A (rare in UI text)
+                || (0x20000..=0x2FA1F).contains(&code) // CJK Extensions B+ 
+                || code == 0xFFFD // replacement character
+        })
+        .count()
 }
 
 /// Decodes base64 that may carry whitespace or a trailing fragment, returning None on anything that
@@ -400,6 +446,66 @@ mod tests {
         // sequence, so trying it first would silently mojibake perfectly good UTF-8.
         let text = "{\"name\":\"中文\"}";
         assert_eq!(decode_text(text.as_bytes()).unwrap(), text);
+    }
+
+    /// A Big5 configuration must decode as Big5, not as GB18030 mojibake.
+    ///
+    /// This is the reported defect. Big5's pair space is a subset of GBK's, so GB18030 decodes a Big5
+    /// document **without a single error** — the old "first encoding that succeeds wins" loop therefore
+    /// never reached `BIG5`, and a Taiwanese source imported with garbled names. Measured on this
+    /// crate's `encoding_rs`: these bytes read as 台灣電視台綜合頻道 under Big5, and as
+    /// `𦞾芖筿跌𦞾侯𦞾繵笵` under GB18030.
+    #[test]
+    fn decodes_big5_rather_than_mojibake() {
+        let document = "{\"sites\":[{\"key\":\"ttv\",\"name\":\"台灣電視台綜合頻道\",\"api\":\"https://tv.example/api\"}]}";
+        let (encoded, _, had_errors) = encoding_rs::BIG5.encode(document);
+        assert!(!had_errors);
+        assert!(
+            std::str::from_utf8(&encoded).is_err(),
+            "the fixture must not be valid UTF-8, or the fallback never runs"
+        );
+        // GB18030 also accepts these bytes without error — that is the trap this test exists for.
+        let (as_gb, _, gb_errors) = encoding_rs::GB18030.decode(&encoded);
+        assert!(
+            !gb_errors,
+            "the fixture must be the case where 'it decoded' is not evidence"
+        );
+        assert_ne!(as_gb, document, "GB18030 must genuinely misread it");
+
+        let text = decode_text(&encoded).expect("a Big5 configuration decodes");
+        assert!(
+            text.contains("台灣電視台綜合頻道"),
+            "Big5 must be chosen over GB18030, got: {text}"
+        );
+    }
+
+    /// A GB18030 configuration must still decode as GB18030.
+    ///
+    /// The fix above must not flip the common case: most configurations in this ecosystem are
+    /// simplified Chinese in GBK/GB18030, and reading those as Big5 is what the ordering was there to
+    /// prevent. Measured: these bytes read as 中央電視台綜合頻道 under GB18030 and as
+    /// `笢栝萇弝怢軘磁ⅰ耋` under Big5.
+    #[test]
+    fn still_decodes_gb18030_when_that_is_what_it_is() {
+        let document = "{\"sites\":[{\"key\":\"cctv\",\"name\":\"中央电视台综合频道\",\"api\":\"https://tv.example/api\"}]}";
+        let (encoded, _, had_errors) = encoding_rs::GB18030.encode(document);
+        assert!(!had_errors);
+
+        let text = decode_text(&encoded).expect("a GB18030 configuration decodes");
+        assert!(
+            text.contains("中央电视台综合频道"),
+            "GB18030 must win for GB18030 bytes, got: {text}"
+        );
+    }
+
+    /// A document with no CJK at all carries no evidence either way, and must not error.
+    ///
+    /// Both tables read pure ASCII identically, so both candidates are "clean" and the shape check
+    /// decides. If this started refusing, every English-only configuration would stop importing.
+    #[test]
+    fn an_ascii_only_document_still_decodes() {
+        let document = "{\"sites\":[{\"key\":\"a\",\"name\":\"Test\",\"api\":\"https://example.com/api\"}]}";
+        assert_eq!(decode_text(document.as_bytes()).unwrap(), document);
     }
 
     #[test]
