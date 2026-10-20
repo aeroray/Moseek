@@ -17,7 +17,7 @@ Sites and lives must not drift on the same field: a live entry carrying `{"sp":"
 whole configuration, because only one schema stringified objects. Name the failing field — a Zod path is
 all there is.
 
-## MC-DEC-20261008-e1000007 — `null` means absent, everywhere in the schema
+## MC-DEC-20261008-e1000007 — `null` means absent
 
 Status: active
 Scope: area:config-schema
@@ -25,11 +25,11 @@ Subject: MC-SUBJ-20261008-a1000003
 Facet: data-model
 Evidence:
 - repo:src/features/config/config-schema.ts
+Exception-To: MC-DEC-20261008-155a7632
 
 Decision:
-One preprocess normalises `null` to `undefined` for every optional field. `.optional()` accepts only a
-missing key, but the exporter serialises source records, so Moseek could not re-import its own export.
-Fix the pattern, not the one field reported.
+One preprocess normalises `null` to `undefined` for every optional field. `.optional()` takes only a
+missing key, so the exporter's `null`s made Moseek unable to re-import its own export.
 
 ## MC-DEC-20261008-b1000004 — Export rebuilds from the list, not a stored snapshot
 
@@ -59,7 +59,7 @@ Favourites and the theme move through 设置 as `moseek-data.json`; a configurat
 `moseek`, `schemaVersion`, `configDialect` and `blockedFields` are excluded from the visual editor's
 其他设置. The legacy `moseek` reader stays, for old exports.
 
-## MC-DEC-20261008-b1000006 — Read a live entry's `channels` lines
+## MC-DEC-20261008-b1000006 — Read a live entry's `channels`
 
 Status: active
 Scope: area:config-schema
@@ -67,7 +67,8 @@ Subject: MC-SUBJ-20261008-a1000003
 Facet: behavior
 Evidence:
 - repo:src/features/config/config-parser.ts
+Exception-To: MC-DEC-20261008-3b9c0ef4
 
 Decision:
-A live entry may use `channels[].urls[]` rather than `url`: take the first line yielding an `http(s)`
-address, decoding `proxy://do=live&ext=<base64>`. Keep the field unmodelled.
+A live entry may carry `channels[].urls[]` instead of `url`. Take the first line yielding an `http(s)`
+address and keep the field unmodelled.
