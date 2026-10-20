@@ -55,26 +55,33 @@ C:\Users\PC\.tauri\moseek-updater-password.txt   ← 口令，同上，不要提
 
 ```bash
 # 1. 改版本号（三处一起改：package.json / Cargo.toml / tauri.conf.json）
-node scripts/sync-version.mjs 0.2.0
+node scripts/sync-version.mjs 1.0.0
 
 # 2. 写这一版的发布说明（文件名必须与标签一致）
-#    编辑 docs/releases/v0.2.0.md
+#    编辑 docs/releases/v1.0.0.md —— 只有发版时才需要这个文件
+#    目录约定见 docs/releases/README.md
 
 # 3. 提交
 git add -A
-git commit -m "Release v0.2.0"
+git commit -m "Release v1.0.0"
 
 # 4. 打标签并推送（推送标签即触发发布）
-git tag v0.2.0
+git tag v1.0.0
 git push origin main
-git push origin v0.2.0
+git push origin v1.0.0
 ```
+
+> **发布说明是发版动作的一部分，不是长期文档。** 目前项目尚未正式发版，`docs/releases/`
+> 里除了一份约定说明之外是空的。等到真正要发版时再写那唯一一份 `<标签>.md`——在此之前
+> 不需要预先准备，工作流也不会因为目录为空而误触发（它只在推送 `v*` 标签时运行）。
 
 工作流会：校验版本号与标签一致 → 读取发布说明 → 构建并签名安装包 → 创建 GitHub Release → 上传 `latest.json`。
 
-**三个平台行并行构建**：Windows 产出 NSIS 安装包，macOS 按架构各出一份（`aarch64-apple-darwin` 给 Apple 芯片，`x86_64-apple-darwin` 给 Intel）。它们不会互相覆盖 `latest.json` —— tauri-action 会先读回已有清单，再合并进自己那一条平台记录。
+**两个平台行并行构建**：Windows 产出 NSIS 安装包，macOS 只出 Apple 芯片那一份（`aarch64-apple-darwin`）。它们不会互相覆盖 `latest.json` —— tauri-action 会先读回已有清单，再合并进自己那一条平台记录。
 
-`latest.json` 里的平台键按架构分开（`darwin-aarch64`、`darwin-x86_64`），所以 macOS 必须分两个架构构建，通用二进制反而无法告诉 Intel 机器该取哪一片。
+**不支持 Intel Mac，这是有意的。** 工作流里没有 `x86_64-apple-darwin` 这一行：多一个架构就要多一条工具链、多一个待验证产物、多一条升级清单记录，而这个项目没有 Intel 机器可测。`latest.json` 因此只会有 `darwin-aarch64` 一个 macOS 键——Intel Mac 看到的是「没有更新」，而不是一个装上去用不了的包。
+
+如果以后要加回 Intel：在 `release.yml` 的 matrix 里恢复 `x86_64-apple-darwin` 那一行即可，其余步骤不需要改（`targets: ${{ matrix.target }}` 和 `args` 都会自动带上）。
 
 ### 关于签名
 
@@ -119,4 +126,4 @@ pnpm tauri build
 不用传 `--bundles`：产出哪些包由平台配置决定，CLI 会自动读 `tauri.windows.conf.json` 或 `tauri.macos.conf.json`。
 
 - Windows 产物：`src-tauri/target/release/bundle/nsis/`，含 `Moseek_<版本>_x64-setup.exe` 与同名 `.sig`。
-- macOS 产物：`src-tauri/target/release/bundle/dmg/` 与 `.../macos/`。在 Apple 芯片上要给 Intel 出包时加 `--target x86_64-apple-darwin`。
+- macOS 产物：`src-tauri/target/release/bundle/dmg/` 与 `.../macos/`（Apple 芯片）。

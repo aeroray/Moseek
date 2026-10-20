@@ -23,12 +23,16 @@ permissions:
 
 jobs:
   release:
-    # One row per artifact that ships. The macOS rows are split by architecture because the updater
-    # manifest keys them separately (`darwin-aarch64` and `darwin-x86_64`), and a universal binary
-    # would not tell an Intel Mac which slice to take.
+    # One row per artifact that ships: Windows, and macOS **Apple silicon only**.
+    #
+    # There is deliberately no `x86_64-apple-darwin` row. Intel Macs are not a target for this
+    # project, and shipping a build for them would mean carrying a second toolchain, a second
+    # verified artifact and a second updater manifest entry for a platform nobody can test here.
+    # The updater manifest therefore only ever carries `darwin-aarch64`, so an Intel Mac sees no
+    # update rather than an update that would install the wrong slice.
     #
     # The rows do not clobber each other's `latest.json`: tauri-action reads the existing manifest and
-    # merges its own platform entries into it (`upload-version-json.ts`), which is what makes a matrix
+    # merges its own platform entry into it (`upload-version-json.ts`), which is what makes a matrix
     # safe here rather than a last-writer-wins race.
     strategy:
       fail-fast: false
@@ -38,8 +42,6 @@ jobs:
             target: ""
           - platform: macos-latest
             target: aarch64-apple-darwin
-          - platform: macos-latest
-            target: x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     env:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}

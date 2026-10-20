@@ -28,7 +28,7 @@ refused.**
 
 ## Download
 
-Windows installer (NSIS), or a macOS `.dmg`, from
+Windows installer (NSIS), or a macOS `.dmg` (Apple silicon only), from
 [Releases](https://github.com/aeroray/Moseek/releases). The app checks for updates on GitHub Releases
 and offers them in-app.
 
@@ -60,7 +60,7 @@ Other scripts: `pnpm test` (unit tests), `pnpm lint`, `pnpm typecheck`, `pnpm bu
 
 ## Scope
 
-- Desktop only — Windows and macOS (Apple silicon and Intel builds). No mobile platforms.
+- Desktop only — Windows and macOS (Apple silicon only). No mobile platforms.
 - No sources are bundled. You need your own configuration file, obtained legitimately.
 
 ## Tech stack

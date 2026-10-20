@@ -20,7 +20,7 @@
 
 ## 下载
 
-到 [Releases](https://github.com/aeroray/Moseek/releases) 下载 Windows 安装包（NSIS）或 macOS 的 `.dmg`。应用内置自动更新，新版本发布后会自动提示。
+到 [Releases](https://github.com/aeroray/Moseek/releases) 下载 Windows 安装包（NSIS）或 macOS 的 `.dmg`（仅 Apple 芯片）。应用内置自动更新，新版本发布后会自动提示。
 
 > **macOS 用户**：安装包只做了 ad-hoc 签名、未做公证——免费开源项目不该为此承担 Apple 开发者年费。首次打开请**右键点应用 →「打开」**，或到**「系统设置 → 隐私与安全性」**里点「仍要打开」。之后即可正常启动。
 
@@ -42,7 +42,7 @@ pnpm tauri build   # 产出安装包（src-tauri/target/release/bundle/）
 
 ## 范围
 
-- 只做桌面端：Windows 与 macOS（Apple 芯片 / Intel 各自出包），不做移动端。
+- 只做桌面端：Windows 与 macOS（仅 Apple 芯片），不做移动端。
 - 不自带任何源；需要你自己的配置文件，请使用合法获得的。
 
 ## 技术栈

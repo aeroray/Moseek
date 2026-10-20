@@ -24,7 +24,8 @@ try {
   body = await readFile(notesPath, "utf8");
 } catch {
   throw new Error(
-    `找不到发布说明 ${notesPath}。请在打标签前写好它，否则这次发布将没有说明。`,
+    `找不到发布说明 ${notesPath}。请在打标签前写好它，否则这次发布将没有说明。\n` +
+      `（这个项目目前尚未正式发版，docs/releases/ 是空的；第一份说明在发版时再写。）`,
   );
 }
 
