@@ -8,7 +8,7 @@ The test is **"does something break if this file is missing"**, not "is it docum
 
 | Path | Tracked | Why |
 |---|---|---|
-| `memory/` | yes | `AGENTS.md`/`CLAUDE.md`/`GEMINI.md` tell every agent to read it. |
+| `memory/` | yes | Agent entry points tell every agent to read it. |
 | `releases/<tag>.md` | yes | **Build input** — `load-release-notes.mjs` fails the release when absent. |
 | `images/` | yes | Both READMEs embed `docs/images/library.png`. |
 | `releasing.md` | yes | Release procedure. Fixed by removing its secret, not the file. |
@@ -21,7 +21,7 @@ Memory is *current truth* agents load on purpose; a review is *evidence about a 
 **Two headline features had never worked.** 「接着看」gated its seek on `player.duration` inside
 Plyr's `ready` (fires before media; duration getter maps `NaN`/`Infinity` to `0`). 重试 bumped a token
 absent from the resolve effect's dependencies. **Both sat behind tests asserting a control exists
-rather than that it works — a feature whose test only proves rendering is not tested.**
+rather than that it works.**
 
 **The WebView was fetching media itself** — the native `<video>` branch assigned `source.url`
 directly, so the element resolved DNS and followed redirects outside the policy. Now gated by
@@ -44,5 +44,15 @@ is not proof it decoded correctly.
 
 **Removed:** `sniff_with_companion` and `opener:default` (both uncalled).
 
-**Process:** `policy.rs` was once corrupted by `Set-Content -Encoding utf8`, which
+**Process:** `policy.rs` was corrupted once by `Set-Content -Encoding utf8`, which
 `MC-CON-20261008-c1000006` forbids. Recovered via `git show HEAD:` plus replay.
+
+## 2026-10-20 — Updater signing key rotated
+
+The passphrase had been committed to this public repo, so the pair is compromised:
+new key, random passphrase at `~/.tauri/moseek-updater-password.txt`, public half in
+`tauri.conf.json`.
+
+**Operative for later work:** installs shipped before this commit verify against the
+*old* key baked into their version, so they will report the update cannot be verified
+and need a manual reinstall. Do not "fix" that by reverting the pubkey.

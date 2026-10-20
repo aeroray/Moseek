@@ -117,6 +117,6 @@ Discover optional memory without loading it. Entries here are not default loads.
 - rules/*.md: 400 tokens max per file, if present
 - profiles/*.md: 500 tokens max per file, if present
 - areas/*.md: 600 tokens max per file, if present
-- changelog.md: 800 tokens max, if present
+- changelog.md: 900 tokens max, if present
 - inbox.md: memory maintenance only
 - archive/: explicit only
