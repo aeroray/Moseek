@@ -3690,6 +3690,22 @@ export function ConfigCenter() {
  *    looking at a file whose count differs from their list, and "why" is the useful answer.
  *
  * Both start unticked, their boxes are disabled, and the group control skips them in both directions.
+ *
+ * **Not virtualised, and that is a measured decision rather than an omission.** 源列表 next to it is
+ * virtualised (`SourceTable`) because opening the import dialog against the owner's 358-source
+ * configuration blocked the main thread for 269 ms, with 18,623 DOM nodes in that table. This list has
+ * the same ROW COUNT and is not the same cost: measured in this project's jsdom, a row here is ~10 DOM
+ * nodes (a `<table>` row there is ~52), so all 358 rows are 3,727 nodes rather than 18,623. Splitting
+ * the open cost by row count showed 1.86 ms/row, i.e. ~630 ms of markup in jsdom at 358 rows — real,
+ * but addressed by the cheaper change below rather than by windowing.
+ *
+ * What actually cost the user time per interaction was the tick: 271 ms for one checkbox, because
+ * `deselectedIds` lives on the page and every row read it. Making each row its own memoised component
+ * (`ImportCandidateRow`) took that to 30.6 ms — measured, same harness — and the remaining gain from
+ * windowing would be a fraction of the mount, at the price of a scroll-position dependency shared by
+ * three separate group boxes. That is not worth it for a dialog that is opened, read and closed, and it
+ * could not be verified in jsdom (no layout engine), which is the one place this project's own rule
+ * (MC-DEC-20261008-9992d36c) says a layout change must be checked.
  */
 function ImportCandidateList({
   preview,
@@ -3818,32 +3834,13 @@ function ImportCandidateList({
                 {isOpen && (
                   <ul className="flex flex-col border-t border-border/60 py-1">
                     {entries.map((entry) => (
-                      <li key={entry.id}>
-                        {/* A tickable row is a label, so the whole row is the target. One that cannot
-                            be ticked is not: the box is disabled, and wrapping it in a label would make
-                            the row look clickable while nothing happened. */}
-                        {isSelectable(entry) ? (
-                          <label className="flex cursor-pointer items-start gap-2.5 rounded px-2 py-1.5 transition-colors hover:bg-accent/40">
-                            <Checkbox
-                              checked={!deselectedIds.has(entry.id)}
-                              onCheckedChange={(checked) => onToggle(entry.id, checked === true)}
-                              className="mt-0.5"
-                              aria-label={entry.name}
-                            />
-                            <ImportEntryText entry={entry} />
-                          </label>
-                        ) : (
-                          <div className="flex items-start gap-2.5 px-2 py-1.5 opacity-70">
-                            <Checkbox
-                              checked={false}
-                              disabled
-                              className="mt-0.5 cursor-not-allowed"
-                              aria-label={`${entry.name}（${entry.duplicate ? "重复" : "不可用"}）`}
-                            />
-                            <ImportEntryText entry={entry} />
-                          </div>
-                        )}
-                      </li>
+                      <ImportCandidateRow
+                        key={entry.id}
+                        entry={entry}
+                        checked={!deselectedIds.has(entry.id)}
+                        selectable={isSelectable(entry)}
+                        onToggle={onToggle}
+                      />
                     ))}
                   </ul>
                 )}
@@ -3855,6 +3852,62 @@ function ImportCandidateList({
     </div>
   );
 }
+
+/**
+ * One importable entry, as a row.
+ *
+ * **Extracted and memoised for one measured reason: ticking one box re-rendered all 358 rows.**
+ * Measured in this project's jsdom against a 358-site configuration, a single checkbox click cost
+ * **271 ms**, because `deselectedIds` lives on the page and every row reads it, so one tick re-rendered
+ * the whole list. The list itself is not heavy — measured at 10.4 DOM nodes per row (a `<table>` row in
+ * 源列表 is ~52, and its 18,623 nodes at 358 rows was what forced virtualisation there), so mounting the
+ * list is not the problem; re-rendering it on every tick was.
+ *
+ * `memo` only helps because every prop is referentially stable: `entry` is an element of
+ * `preview.candidates` (rebuilt only when a new file is loaded), `checked` and `selectable` are the two
+ * primitives that decide this row's appearance, and `onToggle` is a `useCallback` with no dependencies.
+ * That combination makes a tick re-render exactly the two rows whose `checked` flipped.
+ */
+const ImportCandidateRow = memo(function ImportCandidateRow({
+  entry,
+  checked,
+  selectable,
+  onToggle,
+}: {
+  entry: ImportCandidate;
+  checked: boolean;
+  selectable: boolean;
+  onToggle: (id: string, next: boolean) => void;
+}) {
+  // A tickable row is a label, so the whole row is the target. One that cannot be ticked is not: the
+  // box is disabled, and wrapping it in a label would make the row look clickable while nothing
+  // happened.
+  return (
+    <li>
+      {selectable ? (
+        <label className="flex cursor-pointer items-start gap-2.5 rounded px-2 py-1.5 transition-colors hover:bg-accent/40">
+          <Checkbox
+            checked={checked}
+            onCheckedChange={(next) => onToggle(entry.id, next === true)}
+            className="mt-0.5"
+            aria-label={entry.name}
+          />
+          <ImportEntryText entry={entry} />
+        </label>
+      ) : (
+        <div className="flex items-start gap-2.5 px-2 py-1.5 opacity-70">
+          <Checkbox
+            checked={false}
+            disabled
+            className="mt-0.5 cursor-not-allowed"
+            aria-label={`${entry.name}（${entry.duplicate ? "重复" : "不可用"}）`}
+          />
+          <ImportEntryText entry={entry} />
+        </div>
+      )}
+    </li>
+  );
+});
 
 /**
  * The name, address and — when it cannot be imported — the reason, shared by both row shapes.
@@ -4188,7 +4241,15 @@ function SourceTestBadge({ source }: { source: SourceRecord }) {
   );
 }
 
-/** Names a probe in the words a user reads, rather than the operation's internal id. */
+/**
+ * Names a probe in the words a user reads, rather than the operation's internal id.
+ *
+ * **`playback` and `playbackAddress` are two different things and must not share a label.** The
+ * `playback` operation actually requests the address (that is the live-source probe in `live.rs`),
+ * while `playbackAddress` only checks that the address is well formed and policy-legal and never
+ * contacts it. Listing both as 解析播放地址 would tell the user a dead address had been proven
+ * playable, which is the specific misreading the Rust side renamed the operation to prevent.
+ */
 function operationLabel(operation: string) {
   return (
     {
@@ -4196,6 +4257,9 @@ function operationLabel(operation: string) {
       category: "读取分类",
       detail: "读取详情",
       playback: "解析播放地址",
+      // The address was validated, not fetched. Saying so in the label is the whole point: this
+      // operation sits in the same list as `catalog` and `detail`, which do fetch.
+      playbackAddress: "播放地址校验（未请求该地址）",
       search: "搜索",
     }[operation] ?? operation
   );

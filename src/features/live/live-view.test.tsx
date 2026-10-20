@@ -241,16 +241,47 @@ describe("LiveView EPG rendering", () => {
       sources: [liveSource()],
       liveFavorites: [],
       autoEpgEnabled: false,
+      // Footprints are written by the view now, so a leftover record from an earlier test would be
+      // read as one this test produced. Reset with the rest of the store the suite owns.
+      history: [],
     });
   });
 
-  it("records a footprint when a channel starts playing", async () => {
-    // Watching a channel is something the user did, so it belongs on the timeline. Without this
-    // the footprint page only ever knew about films and series.
+  it("does not record a footprint just because the view opened", async () => {
+    // **Opening the live workspace is not watching anything.** The catalog effect auto-selects
+    // `channels[0]`, so recording on *selection* wrote a footprint for a channel nobody had seen —
+    // every single time the view was opened, and again on each 上一个/下一个 press. Footprints keep
+    // only the most recent 200 records, so those invented entries also pushed real ones out.
+    //
+    // The watch page takes the opposite position deliberately and says why (`player-view.tsx`
+    // 「打开页面不等于观看」), and the footprint page's own wording promises a record of what was
+    // watched. This is the assertion that fails when recording moves back to selection time.
     render(<LiveView />);
 
     await waitFor(() => {
       expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+    // The player is mounted and has been handed a channel, but it has not reported playing.
+    expect(useAppStore.getState().history).toEqual([]);
+  });
+
+  it("records a footprint once the player reports it is playing", async () => {
+    // The other half: the record must still happen, and it must happen on the `playing` status —
+    // the earliest moment a picture is actually on screen. Recording nothing would be as wrong as
+    // recording at selection time; only a decoded frame means the user watched the channel.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+    expect(useAppStore.getState().history).toEqual([]);
+
+    const onStatus = (globalThis as Record<string, unknown>).__playerOnStatus as (
+      status: string,
+      message?: string,
+    ) => void;
+    await act(async () => {
+      onStatus("playing");
     });
 
     const history = useAppStore.getState().history;
@@ -260,8 +291,9 @@ describe("LiveView EPG rendering", () => {
     expect(history[0].channel.name).toBe("City News");
   });
 
-  it("records a footprint when the user switches channels", async () => {
-    // Switching is the other way a channel gets watched, and it must not be missed.
+  it("records a footprint when the user switches channels and the new one plays", async () => {
+    // Switching is the other way a channel gets watched. It is still gated on playback: the switch
+    // alone must not write the record, because the new address may never produce a frame.
     loadLiveCatalog.mockResolvedValue({
       data: twoGroupCatalog,
       mode: "remote",
@@ -269,18 +301,60 @@ describe("LiveView EPG rendering", () => {
     });
     render(<LiveView />);
     await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("CCTV-1 综合");
+    });
+
+    const onStatus = () =>
+      (globalThis as Record<string, unknown>).__playerOnStatus as (
+        status: string,
+        message?: string,
+      ) => void;
+    await act(async () => {
+      onStatus()("playing");
+    });
+    await waitFor(() => {
       expect(useAppStore.getState().history).toHaveLength(1);
     });
 
+    // A fresh timeline, so the assertion is about the next channel rather than the first one.
     useAppStore.setState({ history: [] });
     fireEvent.click(screen.getByLabelText("下一个频道"));
 
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("CCTV-2 财经");
+    });
+    // The switch alone records nothing; the player stub has not reported playing for the new channel.
+    expect(useAppStore.getState().history).toEqual([]);
+
+    await act(async () => {
+      onStatus()("playing");
+    });
     await waitFor(() => {
       expect(useAppStore.getState().history.length).toBeGreaterThan(0);
     });
     const record = useAppStore.getState().history[0];
     if (record.kind !== "live") throw new Error("expected a live footprint");
     expect(record.channel.name).toBe("CCTV-2 财经");
+  });
+
+  it("records one footprint per channel, not one per playing status", async () => {
+    // `playing` is re-reported on recovery (the watchdog gives up and a slow fragment then lands),
+    // and each report must not push another copy of the same channel onto the timeline.
+    render(<LiveView />);
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("City News");
+    });
+    const onStatus = (globalThis as Record<string, unknown>).__playerOnStatus as (
+      status: string,
+      message?: string,
+    ) => void;
+    await act(async () => {
+      onStatus("playing");
+      onStatus("playing");
+      onStatus("playing");
+    });
+
+    expect(useAppStore.getState().history).toHaveLength(1);
   });
 
   it("renders the program guide returned by the adapter", async () => {
@@ -972,5 +1046,83 @@ describe("LiveView search scope", () => {
     // The list must still span every group.
     expect(screen.getByText("3 个频道")).toBeInTheDocument();
     expect(screen.getByLabelText("频道分组")).toHaveTextContent("全部分组");
+  });
+
+  it("steps into the visible list instead of the whole catalog while searching", async () => {
+    // **The defect these lock.** `stepChannel` computed the next channel from the *unfiltered*
+    // `channels` and `selectedIndex`, while the list on screen is `filteredChannels`. Under a search
+    // the two orders diverge, so 下一个 jumped to a channel that was not in the list at all: the
+    // highlight disappeared and the workspace appeared to have lost the selection.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    // CCTV-1 is playing and stays selected when the query changes — typing a search does not stop
+    // playback. It is simply no longer in the visible list.
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("CCTV-1 综合");
+    });
+
+    search("湖南");
+    await waitFor(() => {
+      expect(channelListText()).toContain("湖南卫视高清");
+    });
+    expect(channelListText()).not.toContain("CCTV-1 综合");
+
+    fireEvent.click(screen.getByLabelText("下一个频道"));
+
+    // Whichever way it enters, the destination is a channel the user can see. Moving to the next
+    // entry of the unfiltered catalog would land on CCTV-2, which the search has hidden.
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("湖南卫视高清");
+    });
+  });
+
+  it("disables the navigation controls at the ends of the visible list", async () => {
+    // The end of the list must be the end of the *visible* list. Under a search that leaves one
+    // channel, there is nowhere to step even though the catalog holds two more.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    search("湖南");
+    await waitFor(() => {
+      expect(channelListText()).toContain("湖南卫视高清");
+    });
+    fireEvent.click(screen.getByLabelText("下一个频道"));
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("湖南卫视高清");
+    });
+
+    // Now the selection is the only visible row, so both directions are exhausted.
+    expect(screen.getByLabelText("上一个频道")).toBeDisabled();
+    expect(screen.getByLabelText("下一个频道")).toBeDisabled();
+  });
+
+  it("steps within a narrowed group instead of jumping to a channel outside it", async () => {
+    // The same divergence the group filter creates: group A holds two of three channels, so stepping
+    // from the second must stop rather than move into group B's channel.
+    render(<LiveView />);
+
+    await waitFor(() => {
+      expect(channelListText()).toContain("CCTV-1 综合");
+    });
+    await selectGroup("央视频道");
+    await waitFor(() => {
+      expect(screen.getByText("2 / 3 个频道")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText("下一个频道"));
+    await waitFor(() => {
+      expect(screen.getByTestId("media-player")).toHaveTextContent("CCTV-2 财经");
+    });
+
+    // The second of the two visible channels is the last one: 湖南卫视高清 is filtered out, so there
+    // is no next step and it must not be reached.
+    expect(screen.getByLabelText("下一个频道")).toBeDisabled();
+    fireEvent.click(screen.getByLabelText("下一个频道"));
+    expect(screen.getByTestId("media-player")).toHaveTextContent("CCTV-2 财经");
   });
 });

@@ -2299,6 +2299,47 @@ describe("config center", () => {
     });
   });
 
+  it("names a validated-but-unfetched address differently from one it actually requested", () => {
+    // **Two operations, two words, and the difference is the promise.** `playbackAddress` only checks
+    // that an address is well formed and policy-legal — it never contacts it. It is listed in the same
+    // block as `catalog` and `detail`, which do fetch, so an unlabelled id would show as the raw
+    // English `playbackAddress`, and labelling it 解析播放地址 (what `playback` says) would tell the
+    // user a dead address had been proven playable. `playback` itself must keep its old label: the
+    // live-source probe under that id really does request the address.
+    const withOperations = source({
+      key: "ok",
+      name: "可用的源",
+      testStatus: "passed",
+      testOperations: [
+        { operation: "catalog", status: "passed", message: "内容列表已取得。", durationMs: 10 },
+        {
+          operation: "playbackAddress",
+          status: "passed",
+          message: "播放地址已通过 HTTP/HTTPS 安全策略。",
+          durationMs: 0,
+        },
+        { operation: "playback", status: "passed", message: "请求成功。", durationMs: 12 },
+      ],
+    });
+    renderCenter({ sources: [withOperations] });
+
+    const row = screen
+      .getAllByRole("row")
+      .find((r) => r.textContent?.includes("可用的源"));
+    fireEvent.click(row as HTMLElement);
+    const sheet = screen.getByRole("dialog");
+
+    // The new id is translated, and says plainly that no request was made.
+    expect(
+      within(sheet).getByText("播放地址校验（未请求该地址）"),
+    ).toBeInTheDocument();
+    // The raw id never reaches the user.
+    expect(within(sheet).queryByText("playbackAddress")).not.toBeInTheDocument();
+    // And the requesting operation keeps the label that now distinguishes it.
+    expect(within(sheet).getByText("解析播放地址")).toBeInTheDocument();
+    expect(within(sheet).getByText("获取内容列表")).toBeInTheDocument();
+  });
+
   it("ignores an old single test after cancellation and immediate restart", async () => {
     const pending: ((result: SourceTestResult) => void)[] = [];
     vi.mocked(testSourceCommand).mockImplementation(() => new Promise((resolve) => pending.push(resolve)));
@@ -2651,6 +2692,75 @@ describe("config center", () => {
           "true",
         );
       }
+    });
+
+    /**
+     * The size the list has to survive, asserted as behaviour rather than as a class name.
+     *
+     * **Why this test exists.** The dialog is opened against the owner's own configuration — 358 sites,
+     * 18,623 DOM nodes in the source table behind it — and the owner reported that opening it stalled
+     * the main thread. Two changes came out of the measurements: each row is now its own `memo`
+     * component, so a tick re-renders two rows instead of all 358 (measured 271 ms → 30.6 ms per tick),
+     * and the list is deliberately **not** virtualised, because its rows are ~10 DOM nodes each and
+     * every row is either a `<label>` or a plain box inside a per-group `<ul>` — windowing a page whose
+     * scroll position is shared by three separate group boxes would have to be re-measured in a real
+     * browser to be trusted, and the tick cost it would have addressed is already gone.
+     *
+     * What must stay true at that size is therefore: every row is present (nothing was silently
+     * windowed away in an environment that cannot measure), one tick leaves every OTHER row's checked
+     * state untouched, and a whole-group toggle still reaches every eligible row while skipping the
+     * ineligible one. Those are the three ways a memoisation change breaks a large list, and jsdom can
+     * assert all three.
+     */
+    it("keeps all 358 rows correct through a single tick and a group toggle", async () => {
+      const sites = Array.from({ length: 357 }, (_, index) => ({
+        key: `key-${index}`,
+        name: `影视源 ${index}`,
+        api: `https://cdn${index}.example/api.php/provide/vod`,
+      }));
+      // One unusable entry makes the group count differ from the row count, so the group control has
+      // something ineligible to skip — the case the earlier test covers at a size of two.
+      const text = JSON.stringify({ sites: [...sites, { key: "bad", name: "不可用影片源" }] });
+      renderCenter();
+      await openWith(text);
+
+      // Nothing was windowed away: the fallback for an environment with no layout engine is to render
+      // the list in full, and jsdom is exactly that environment.
+      const boxes = screen.getAllByRole("checkbox");
+      // 357 usable + 1 unusable rows, plus the group control itself.
+      expect(boxes).toHaveLength(359);
+      expect(screen.getByText("影视源 356")).toBeInTheDocument();
+
+      // One tick changes exactly one row.
+      const row = screen.getByRole("checkbox", { name: "影视源 7" });
+      expect(row).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(row);
+      expect(row).toHaveAttribute("aria-checked", "false");
+      // The neighbours, which share the same `deselectedIds` read, are untouched.
+      expect(screen.getByRole("checkbox", { name: "影视源 6" })).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByRole("checkbox", { name: "影视源 8" })).toHaveAttribute("aria-checked", "true");
+
+      // The count follows the one tick, and a group toggle reaches every eligible row but not the
+      // ineligible one — the same contract as the two-row version, now over 358 rows.
+      expect(screen.getByRole("button", { name: "导入 356 个源" })).toBeInTheDocument();
+      // Unticking one row left the group indeterminate-by-value but not selected, so this click ticks
+      // everything back. That path is what a real user takes after unticking one entry, and it is the
+      // one that has to touch 357 rows in a single commit.
+      fireEvent.click(screen.getByRole("checkbox", { name: "全选影视源" }));
+      expect(screen.getByRole("button", { name: "导入 357 个源" })).toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "影视源 6" })).toHaveAttribute("aria-checked", "true");
+      expect(screen.getByRole("checkbox", { name: "影视源 7" })).toHaveAttribute("aria-checked", "true");
+      // The ineligible row is still skipped in this direction, which is the contract the two-row test
+      // pins and this one re-checks at a size where an accidental "select all ids" would show up.
+      expect(screen.getByRole("checkbox", { name: "不可用影片源（不可用）" })).toHaveAttribute(
+        "aria-checked",
+        "false",
+      );
+
+      // And unticking the group takes every eligible row with it, leaving nothing importable.
+      fireEvent.click(screen.getByRole("checkbox", { name: "全选影视源" }));
+      expect(screen.getByRole("checkbox", { name: "影视源 6" })).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByRole("button", { name: "请至少选择一个" })).toBeDisabled();
     });
 
     /**

@@ -164,7 +164,11 @@ export function LiveView() {
     channels.find((channel) => channel.id === selectedChannelId) ??
     filteredChannels[0] ??
     channels[0];
-  const selectedIndex = channels.findIndex(
+  // **Stepping walks the list the user can actually see**, so its position is the filtered one. The
+  // navigation buttons and `stepChannel` both read this: computing the next channel from the unfiltered
+  // catalog jumped to a channel that was not on screen, which made the highlight vanish and looked like
+  // the list had reset itself. -1 means the selection is not visible under the current filter.
+  const filteredIndex = filteredChannels.findIndex(
     (channel) => channel.id === selectedChannel?.id,
   );
   // Providers identify the channel differently: an XMLTV guide keys on `tvg-id`, while a
@@ -341,26 +345,43 @@ export function LiveView() {
   };
 
   /**
-   * Records a footprint whenever the channel being watched changes.
+   * Records a footprint once the channel is actually **playing**.
    *
-   * An effect rather than a call inside `selectChannel`, because the channel that plays on entry
-   * is chosen by the catalog effect, not by the user — recording only in `selectChannel` missed
-   * the very first channel, which is the one most often watched. Keyed on the id so a catalog
-   * reload does not record the same channel again.
+   * **Selection is not watching.** The catalog effect auto-selects `channels[0]` the moment the
+   * workspace opens, so recording on selection wrote a footprint for a channel nobody had seen —
+   * once per view open, and again on every 上一个/下一个 press. `addLiveFootprint` keeps only the most
+   * recent 200 records, so those invented entries pushed real ones off the timeline; the footprint
+   * page's own wording promises a record of what was watched.
+   *
+   * The watch page takes the same position deliberately and records on its own `playing` status
+   * (`player-view.tsx`, 「打开页面不等于观看」) — "playing" is the first moment a picture is on screen,
+   * which is the earliest honest point to call a channel watched.
+   *
+   * Keyed on the channel id so the re-reports that arrive on recovery (a slow fragment landing after
+   * the watchdog gave up) do not stack copies of one channel. This is the same guard the previous
+   * selection-time version used, kept because the event can fire more than once.
    */
   const recordedChannelRef = useRef("");
-  useEffect(() => {
-    if (!selectedChannel) return;
-    if (recordedChannelRef.current === selectedChannel.id) return;
-    recordedChannelRef.current = selectedChannel.id;
-    addLiveFootprint(
-      selectedChannel,
-      liveSource?.name ?? selectedChannel.sourceKey,
-    );
-  }, [addLiveFootprint, liveSource?.name, selectedChannel]);
+  const recordFootprintFor = (channel: LiveChannel) => {
+    if (recordedChannelRef.current === channel.id) return;
+    recordedChannelRef.current = channel.id;
+    addLiveFootprint(channel, liveSource?.name ?? channel.sourceKey);
+  };
 
   const stepChannel = (direction: -1 | 1) => {
-    const next = channels[selectedIndex + direction];
+    // Stepping stays inside the visible list.
+    //
+    // **A search can leave the playing channel outside the list, and that is the case this branch is
+    // for.** Selecting a channel does not stop its playback when a query is typed, so `selectedChannel`
+    // can be a channel `filteredChannels` no longer contains. Stepping from there walks into the
+    // visible list from the near end instead of using an index that belongs to the unfiltered catalog —
+    // which is what sent 下一个 to a channel nobody could see.
+    const next =
+      filteredIndex < 0
+        ? direction > 0
+          ? filteredChannels[0]
+          : filteredChannels[filteredChannels.length - 1]
+        : filteredChannels[filteredIndex + direction];
     if (next) {
       // Stepping while browsing "全部分组" (or searching) must not silently narrow the list to
       // the next channel's group.
@@ -368,6 +389,19 @@ export function LiveView() {
       selectChannel(next);
     }
   };
+
+  /**
+   * Whether each navigation control has anywhere to go, derived from the visible list.
+   *
+   * When the playing channel is filtered out neither arrow has a neighbour to reach, but both are
+   * still useful: they are the only way back into the list the filter is showing. So they are enabled
+   * whenever the list is non-empty, and only the *ends* of an already-visible selection disable them.
+   */
+  const canStepPrevious =
+    filteredChannels.length > 0 && (filteredIndex < 0 || filteredIndex > 0);
+  const canStepNext =
+    filteredChannels.length > 0 &&
+    (filteredIndex < 0 || filteredIndex < filteredChannels.length - 1);
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-background">
@@ -485,7 +519,7 @@ export function LiveView() {
             size="icon-sm"
             className="text-muted-foreground"
             aria-label="上一个频道"
-            disabled={selectedIndex <= 0}
+            disabled={!canStepPrevious}
             onClick={() => stepChannel(-1)}
           >
             <ChevronLeft aria-hidden="true" />
@@ -496,9 +530,7 @@ export function LiveView() {
             size="icon-sm"
             className="text-muted-foreground"
             aria-label="下一个频道"
-            disabled={
-              selectedIndex < 0 || selectedIndex >= channels.length - 1
-            }
+            disabled={!canStepNext}
             onClick={() => stepChannel(1)}
           >
             <ChevronRight aria-hidden="true" />
@@ -617,11 +649,12 @@ export function LiveView() {
                     }
                     return;
                   }
-                  // Playback recovered. The failure note has to be cleared with it: the watchdog
-                  // can give up and a slow fragment can still arrive moments later, and leaving the
-                  // old text in place made 播放诊断 read "正在播放" beside a 前置提示 saying the
-                  // stream never delivered a segment.
-                  if (st === "playing") setDiagnostic(null);
+                  // **Only a playing channel is watched**, so this is where the footprint belongs.
+                  // See `recordFootprintFor` for why selection alone must not write one.
+                  if (st === "playing") {
+                    recordFootprintFor(selectedChannel);
+                    setDiagnostic(null);
+                  }
                 }}
               />
             ) : loadError ? (
