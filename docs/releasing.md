@@ -9,8 +9,9 @@
 签名密钥对已经生成在本机（**不在仓库里**）：
 
 ```
-C:\Users\PC\.tauri\moseek-updater.key       ← 私钥，不要提交、不要外传
-C:\Users\PC\.tauri\moseek-updater.key.pub   ← 公钥，已写进 src-tauri/tauri.conf.json
+C:\Users\PC\.tauri\moseek-updater.key            ← 私钥，不要提交、不要外传
+C:\Users\PC\.tauri\moseek-updater.key.pub        ← 公钥，已写进 src-tauri/tauri.conf.json
+C:\Users\PC\.tauri\moseek-updater-password.txt   ← 口令，同上，不要提交
 ```
 
 在仓库 **Settings → Secrets and variables → Actions** 里新建两个 Secret：
@@ -18,18 +19,24 @@ C:\Users\PC\.tauri\moseek-updater.key.pub   ← 公钥，已写进 src-tauri/tau
 | Name | Value |
 |---|---|
 | `TAURI_SIGNING_PRIVATE_KEY` | 私钥文件的**全部内容**（含 `untrusted comment:` 那一行，多行一起复制） |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 密钥口令——**存在密码管理器里，不要写进本文件** |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 本机 `moseek-updater-password.txt` 里的口令 |
 
 `GITHUB_TOKEN` 不用配，工作流自动拿到。
 
-> **为什么口令不写在这份文档里。** 这个仓库是公开的，而口令是任何一份逃出这台机器的私钥副本（备份、云同步的家目录、支持包）上唯一的保护。写在这里等于公开它。口令请与 `moseek-updater.key` 一起备份到密码管理器。
+> **口令为什么不写在这份文档里。** 这个仓库是公开的，而口令是任何一份逃出这台机器的私钥副本（备份、云同步的家目录、支持包）上唯一的保护。写在这里等于公开它。口令只在 `~/.tauri/moseek-updater-password.txt` 和你的密码管理器里。
+>
+> **这条规则是有代价换来的**：上一版把口令直接写在这份文档里，仓库又是公开的，等于把这把密钥的一半保护公开发布了。2026-10-20 因此轮换了整个密钥对。**永远不要把任何 Secret 的值写进仓库。**
 
-> **密码为什么不能是空的。** 密钥生成时设了密码，这是有意的：Tauri CLI 只在
-> `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **非空**时才使用它，空字符串在 shell 里等同于「没设置」
-> （实测：PowerShell 根本不会把空字符串传给子进程），于是 CLI 会转去**交互式提示输入密码**——
-> 在 CI 上就是一个永远等不到输入的构建。给密钥设密码让本地与 CI 走同一条路径。
+> **密码为什么不能是空的。** Tauri CLI 只在 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` **非空**时才使用它，空字符串在 shell 里等同于「没设置」（实测：PowerShell 根本不会把空字符串传给子进程），于是 CLI 会转去**交互式提示输入密码**——在 CI 上就是一个永远等不到输入的构建。给密钥设密码让本地与 CI 走同一条路径。
 
 > **私钥丢了就无法再发布可用的更新**：已装用户只接受用这把私钥签名的安装包，换新密钥必须让用户手动重装一次。请把 `moseek-updater.key` 与口令一起备份到安全的地方。
+
+### 1b. 轮换过密钥之后（2026-10-20 那次）
+
+- 旧密钥对留在 `~/.tauri/moseek-updater.key.old` / `.pub.old` 和 `~/.tauri/backup-<时间戳>/`，**确认新流程跑通后请删除**，别让它继续躺在磁盘上。
+- 在 GitHub Secrets 里把两个值都换成新的；旧的 Secret 值不会自动失效，必须手动覆盖。
+- `tauri.conf.json` 里的 `pubkey` 已同步为新公钥。**它必须与 Build 用的私钥成对**，否则更新装不上。
+- 已安装的旧版本只认旧公钥，所以它们会收到「无法验证更新」。要让它们迁移，只能在下一个版本里同时接受两把钥匙（updater 插件不支持），或者让用户手动重装一次。这一次我们接受手动重装。
 
 ### 2. 确认仓库地址
 

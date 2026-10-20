@@ -40,7 +40,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEU1NEM0NEM3NjA4RDI3NzUKUldSMUo0MWd4MFJNNWRKVXBSWUJ2L2JtRUQ4akpYb2RMVkVjaGZxaWhZcVVsVkVGV2p5S3RCeHAK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY3QzE5MDUxMzMyNUI2NDQKUldSRXRpVXpVWkRCWjB4QUlpUzY0dnNIb1QwRU1ld2RPSzZ2MndlaFVkbDhIbU8yUFYwRWtzVzMK",
       "endpoints": [
         "https://github.com/aeroray/Moseek/releases/latest/download/latest.json"
       ],
