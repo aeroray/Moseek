@@ -405,6 +405,27 @@ export async function probeMediaContainer(
 }
 
 /**
+ * Resolves the address a native `<video>` element is allowed to load.
+ *
+ * **A native element fetches on its own, so it is the one media path that does not pass through the
+ * Tauri loader.** The HLS and FLV pipelines hand every manifest and fragment to
+ * `fetchMediaResource`/`streamMediaResource`, where the URL policy, the redirect rules and the DNS
+ * pinning all apply. An `mp4` assigned straight to `video.src` skips all of it: the webview resolves
+ * the host itself, follows the host's own redirect chain, and an imported document could therefore
+ * point the element at a loopback or private address the policy exists to refuse.
+ *
+ * The Rust command walks that chain with the same rules and answers with the address that survived,
+ * so the element is only ever given a URL the gate has already approved. It rejects when the address
+ * is refused, which the caller reports rather than playing.
+ *
+ * Resolves to `null` outside the desktop runtime, where no gate is registered. Callers must treat
+ * that as "cannot verify here" rather than as approval — see the native branch in `media-player`.
+ */
+export async function resolveMediaElementUrl(url: string) {
+  return invokeCommand<string>("resolve_media_element_url", { url });
+}
+
+/**
  * Streams a live media response as it arrives, instead of buffering it to completion.
  *
  * A live body never ends, so `fetchMediaResource` cannot serve one: reqwest applies its timeout to

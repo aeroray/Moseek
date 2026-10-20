@@ -294,6 +294,72 @@ describe("PlayerView composition", () => {
     expect(screen.getByRole("button", { name: "重试" })).toBeInTheDocument();
   });
 
+  it("re-resolves the address when 重试 is pressed, and settles once it succeeds", async () => {
+    // The reported dead end: pressing 重试 bumped a token that only fed the player's `key`, while
+    // the player was not even mounted — `canRenderPlayer` needs `resolvedPlayback`, which the
+    // failed attempt had cleared. The token was absent from the resolve effect's dependency list,
+    // so nothing re-ran, the error branch had already been replaced by the loading branch, and the
+    // page sat on "正在校验播放地址…" until the user left and re-opened the work.
+    //
+    // Asserting the button *exists* (the test above) is what let that through. This drives it.
+    resolvePlayback.mockRejectedValueOnce(new Error("上游拒绝访问当前地址"));
+    renderPlayer();
+
+    expect(await screen.findByText("无法播放当前内容")).toBeInTheDocument();
+    expect(resolvePlayback).toHaveBeenCalledTimes(1);
+
+    // The second attempt answers normally, which is what "retry worked" looks like.
+    resolvePlayback.mockImplementation(async (url: string) => ({
+      url,
+      mediaKind: "hls",
+      adapterId: "test",
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    // The failure must give way rather than turn into a spinner that never resolves.
+    await waitFor(() => {
+      expect(screen.queryByText("无法播放当前内容")).not.toBeInTheDocument();
+    });
+    expect(resolvePlayback).toHaveBeenCalledTimes(2);
+    // And the page reached the player, not the endless "正在校验播放地址…" placeholder.
+    expect(await screen.findByTestId("media-player")).toBeInTheDocument();
+    expect(
+      screen.queryByText("正在校验播放地址…"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows the loading state, not a stuck spinner, while a retry is in flight", async () => {
+    // A retry that is genuinely still resolving has to say so — the defect was not that the
+    // loading state appeared, but that it never left. Holding the second attempt open proves the
+    // state is driven by the request rather than by the click.
+    resolvePlayback.mockRejectedValueOnce(new Error("上游拒绝访问当前地址"));
+    renderPlayer();
+    expect(await screen.findByText("无法播放当前内容")).toBeInTheDocument();
+
+    let release!: (value: unknown) => void;
+    resolvePlayback.mockReturnValue(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+
+    expect(await screen.findByText("正在校验播放地址…")).toBeInTheDocument();
+
+    await act(async () => {
+      release({
+        url: "https://cdn.example/1.m3u8",
+        mediaKind: "hls",
+        adapterId: "test",
+      });
+    });
+    await waitFor(() => {
+      expect(
+        screen.queryByText("正在校验播放地址…"),
+      ).not.toBeInTheDocument();
+    });
+  });
+
   it("shows the backend's own reason when a Tauri command rejects with a string", async () => {
     // A Tauri command returning `Err(String)` rejects its JS promise with a plain string, not an
     // Error. `error instanceof Error` is therefore false for every backend failure, and the old

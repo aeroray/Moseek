@@ -1,3 +1,5 @@
+import JSON5 from "json5";
+
 import { parseConfigText, pruneUnsupportedConfigText } from "@/features/config/config-parser";
 import type { ParseIssue, ParseResult } from "@/features/config/config-parser";
 import { sourceIdentity } from "@/features/config/config-merge";
@@ -248,6 +250,61 @@ export const IMPORT_KIND_LABELS: Record<ImportCandidate["kind"], string> = {
 };
 
 /**
+ * The identity an entry states in the file, or `""` when it states none.
+ *
+ * A key is read from the entry itself and nowhere else. The parser falls back to `id` and then to a
+ * positional name, but a positional name is not an identity the user can deselect: it changes when a
+ * neighbouring entry is removed. `id` is accepted for `parses` only, because that is the one
+ * collection whose entries legitimately identify themselves that way — `normalizeParseServices`
+ * reads `key`, then `id`, and this reads the same pair.
+ */
+function statedKey(entry: unknown, allowId: boolean): string {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return "";
+  const record = entry as Record<string, unknown>;
+  if (typeof record.key === "string" && record.key) return record.key;
+  if (allowId && typeof record.id === "string" && record.id) return record.id;
+  return "";
+}
+
+/**
+ * Marks which raw entries to keep, matched to the preview's rows **by position**.
+ *
+ * **Position is the identity the old code lacked, and it is the only one that works.** The preview's
+ * rows carry the parser's keys, which have already been de-duplicated (`ensureUniqueSourceKeys`
+ * renames a repeat: two `Bili` sites list as `Bili` and `Bili-2`), while the file states the same key
+ * twice. Matching the two vocabularies by name cannot say *which* duplicate the user unticked — the
+ * suffixed name matches no raw entry at all, and the plain name matches both, so unticking the second
+ * row deleted nothing and unticking the first deleted the row that was still ticked. Collapsing rows
+ * to a per-key count has the same defect for the same reason: the count says how many, never which.
+ *
+ * A count was tried and rejected here: with `{Bili: 1, "Bili-2": 1}` deselected it consumes the first
+ * raw `Bili` and leaves the second, which is one entry short of what the user asked for.
+ *
+ * Positions line up because both sides are built by mapping over the same arrays: the candidates map
+ * over `parsed.sources` (sites then data, then lives) and `parsed.parseServices`, and the parser maps
+ * one raw entry to one record without reordering or dropping any.
+ *
+ * A length mismatch means the candidates do not describe this document — a caller passing the wrong
+ * pair — so every entry is kept. That is the same direction the `catch` above takes: an import that
+ * keeps more than asked is better than one that deletes rows nobody chose.
+ */
+function keptByPosition(
+  raw: unknown[],
+  candidatesForKind: ImportCandidate[],
+  selectedIds: ReadonlySet<string>,
+  allowId: boolean,
+): boolean[] {
+  if (raw.length !== candidatesForKind.length) return raw.map(() => true);
+  return raw.map((entry, index) => {
+    if (selectedIds.has(candidatesForKind[index].id)) return true;
+    // **An entry that states no identity is kept.** The parser numbered it from its position, and that
+    // number is not something the user deselected by name — this is the rule the key-matching version
+    // documented, and it still holds for the one case it protected.
+    return statedKey(entry, allowId) === "";
+  });
+}
+
+/**
  * Removes the entries the user did not select, keeping the file's other fields intact.
  *
  * **Works on the raw object, not on the parsed model.** A configuration carries fields Moseek does not
@@ -268,53 +325,57 @@ export function keepSelectedEntries(
 
   let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(configText) as Record<string, unknown>;
+    // **JSON5, matching what the preview and the import parsed it with.**
+    //
+    // This used `JSON.parse`, and the mismatch was silent in the worst way: `buildImportPreview`
+    // parses with JSON5 (as does `parseConfigText`), so a configuration carrying a `//` comment or a
+    // trailing comma — which is exactly the shape published configurations have, and the reason
+    // JSON5 is used at all — previewed normally with every row shown and every row selectable. Then
+    // this function failed to parse the same text, hit the catch below, and returned it untouched:
+    // the user unticked what they did not want, pressed 导入, and got all of it anyway.
+    //
+    // Falling through to `configText` on a parse failure is still the right shape for a text this
+    // function genuinely cannot read, but it must not be reachable for a text the preview accepted.
+    parsed = JSON5.parse(configText) as Record<string, unknown>;
   } catch {
-    // Already validated by the preview, so this cannot normally happen. Returning the text untouched
-    // is the safe direction: an import that keeps more than asked is better than one that fails.
+    // Returning the text untouched is the safe direction: an import that keeps more than asked is
+    // better than one that fails. The preview has already accepted this text, so reaching here means
+    // the two disagree — keeping everything is the conservative outcome, and the mismatch would be
+    // visible as rows the user did not want rather than sources silently missing.
     return configText;
   }
 
-  const deselected = candidates.filter((candidate) => !selectedIds.has(candidate.id));
-  const keysToDrop = (kind: ImportCandidate["kind"]) =>
-    new Set(deselected.filter((candidate) => candidate.kind === kind).map((c) => c.key));
+  const ofKind = (kind: ImportCandidate["kind"]) =>
+    candidates.filter((candidate) => candidate.kind === kind);
 
-  const dropSiteKeys = keysToDrop("site");
-  const dropLiveKeys = keysToDrop("live");
-  const dropParserKeys = keysToDrop("parser");
-
-  for (const section of ["sites", "data"]) {
-    const list = parsed[section];
-    if (!Array.isArray(list)) continue;
-    // Matched on the entry's own `key`, which is what the preview displayed. An entry with no key is
-    // kept: it was numbered by the parser from its position, so there is no stable identity to match
-    // and dropping the wrong entry is worse than keeping one the user unticked.
-    parsed[section] = list.filter((entry) => {
-      if (!entry || typeof entry !== "object") return true;
-      const key = (entry as Record<string, unknown>).key;
-      return typeof key !== "string" || !dropSiteKeys.has(key);
-    });
+  // `sites` and Kitty's `data` are one collection spelled two ways, and the parser concatenates them
+  // in that order (`[...sites, ...data]`) before building the candidates. The joined list is therefore
+  // the sequence the site rows correspond to; the halves are split back afterwards so the document
+  // keeps its own dialect.
+  const sitesRaw = Array.isArray(parsed.sites) ? (parsed.sites as unknown[]) : null;
+  const dataRaw = Array.isArray(parsed.data) ? (parsed.data as unknown[]) : null;
+  if (sitesRaw || dataRaw) {
+    const joined = [...(sitesRaw ?? []), ...(dataRaw ?? [])];
+    const keep = keptByPosition(joined, ofKind("site"), selectedIds, false);
+    if (sitesRaw) parsed.sites = sitesRaw.filter((_, index) => keep[index]);
+    if (dataRaw) {
+      parsed.data = dataRaw.filter(
+        (_, index) => keep[(sitesRaw?.length ?? 0) + index],
+      );
+    }
   }
 
   if (Array.isArray(parsed.lives)) {
-    parsed.lives = parsed.lives.filter((entry) => {
-      if (!entry || typeof entry !== "object") return true;
-      const key = (entry as Record<string, unknown>).key;
-      return typeof key !== "string" || !dropLiveKeys.has(key);
-    });
+    const livesRaw = parsed.lives as unknown[];
+    const keep = keptByPosition(livesRaw, ofKind("live"), selectedIds, false);
+    parsed.lives = livesRaw.filter((_, index) => keep[index]);
   }
 
   if (Array.isArray(parsed.parses)) {
-    parsed.parses = (parsed.parses as unknown[]).filter((entry) => {
-      // **Only an entry that states its own key can be matched, and one that does not is kept.**
-      // The preview numbers a keyless entry by position, but that number is not an identity: it changes
-      // when a neighbouring entry is removed, so matching on it would delete a row the user never
-      // deselected by name. `sites` and `lives` are treated the same way, and for the same reason.
-      if (!entry || typeof entry !== "object") return true;
-      const record = entry as Record<string, unknown>;
-      const stated = typeof record.key === "string" && record.key ? record.key : record.id;
-      return typeof stated !== "string" || !dropParserKeys.has(stated);
-    });
+    const parsesRaw = parsed.parses as unknown[];
+    // `id` is a parse service's other way of naming itself, so it counts as a stated identity here.
+    const keep = keptByPosition(parsesRaw, ofKind("parser"), selectedIds, true);
+    parsed.parses = parsesRaw.filter((_, index) => keep[index]);
   }
 
   return JSON.stringify(parsed, null, 2);

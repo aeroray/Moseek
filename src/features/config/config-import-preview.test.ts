@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import JSON5 from "json5";
 
 import {
   buildImportPreview,
@@ -246,6 +247,34 @@ describe("keepSelectedEntries", () => {
     expect(parsed.parses).toHaveLength(0);
   });
 
+  it("drops unticked entries from a JSON5 document, not just a strict-JSON one", () => {
+    // **The silent mismatch this pins.** The preview and `parseConfigText` both read JSON5, because
+    // published configurations carry `//` comments and trailing commas. This filter used `JSON.parse`,
+    // so on exactly those documents it failed to parse, hit its "return the text untouched" fallback,
+    // and imported everything — the user's unticking had no effect at all, with no error to explain it.
+    const json5Config = `{
+      // the author's own comment
+      "sites": [
+        {"key": "留", "name": "保留", "api": "https://keep.example/api", "type": 1},
+        {"key": "删", "name": "删掉", "api": "https://drop.example/api", "type": 1},
+      ],
+    }`;
+    const json5Preview = buildImportPreview(json5Config);
+    expect(json5Preview.ok, "the preview must read JSON5").toBe(true);
+
+    const keepOnly = new Set(
+      json5Preview.candidates.filter((c) => c.key === "留").map((c) => c.id),
+    );
+    const kept = keepSelectedEntries(
+      json5Preview.text,
+      json5Preview.candidates,
+      keepOnly,
+    );
+    const parsed = JSON5.parse(kept) as { sites: { key: string }[] };
+
+    expect(parsed.sites.map((s) => s.key)).toEqual(["留"]);
+  });
+
   it("keeps an entry whose identity the file does not state", () => {
     // A parser entry with no `key` is numbered by the parser from its position. There is no stable
     // identity to match against, and dropping the wrong entry is worse than keeping one unticked.
@@ -256,5 +285,124 @@ describe("keepSelectedEntries", () => {
 
     // The entry survives: the alternative is deleting something the user never deselected by name.
     expect(parsed.parses).toHaveLength(1);
+  });
+});
+
+/**
+ * Unticking one of two entries that share a `key`.
+ *
+ * **The defect these lock.** The preview's rows carry the *parser's* keys, which are de-duplicated —
+ * a file with two `Bili` sites lists them as `Bili` and `Bili-2` (`ensureUniqueSourceKeys`). But
+ * `keepSelectedEntries` matched the **raw** entries by `key`, and no raw entry is called `Bili-2`.
+ * So unticking the second row removed nothing, and unticking the *first* row removed **both** — the
+ * row still ticked, the one the user wanted, was silently dropped while the success message reported
+ * the merged count.
+ *
+ * The fix is a per-key quota: count how many rows of each kind were unticked under a key, then walk
+ * the file in order and drop the first N entries carrying that key. Order is what makes the quota
+ * land on the row the user actually unticked.
+ */
+describe("keepSelectedEntries with keys the parser de-duplicated", () => {
+  /** Two sites that both state `Bili`, which the parser renames to `Bili` and `Bili-2`. */
+  const SHARED_KEY_CONFIG = JSON.stringify({
+    sites: [
+      {
+        key: "Bili",
+        name: "哔哩①",
+        type: 1,
+        api: "https://bili-one.example/api.php/provide/vod",
+      },
+      {
+        key: "Bili",
+        name: "哔哩②",
+        type: 1,
+        api: "https://bili-two.example/api.php/provide/vod",
+      },
+    ],
+  });
+
+  function siteNames(text: string) {
+    return (JSON.parse(text) as { sites: { name: string }[] }).sites.map(
+      (site) => site.name,
+    );
+  }
+
+  it("drops only the row that was unticked when both rows share one key", () => {
+    // Untick the FIRST row. The second is still ticked, so it has to survive: this is the assertion
+    // that fails when removal matches on the raw key, because that removes both.
+    const preview = buildImportPreview(SHARED_KEY_CONFIG);
+    expect(preview.candidates.map((c) => c.key)).toEqual(["Bili", "Bili-2"]);
+
+    const keepSecond = new Set([preview.candidates[1].id]);
+    const kept = keepSelectedEntries(
+      preview.text,
+      preview.candidates,
+      keepSecond,
+    );
+
+    expect(siteNames(kept)).toEqual(["哔哩②"]);
+  });
+
+  it("drops nothing extra when the second row is the one unticked", () => {
+    // Untick the SECOND row. Its parser key is `Bili-2`, which no raw entry carries, so matching on
+    // the raw key removes nothing at all — this is the other half of the same defect.
+    const preview = buildImportPreview(SHARED_KEY_CONFIG);
+
+    const keepFirst = new Set([preview.candidates[0].id]);
+    const kept = keepSelectedEntries(
+      preview.text,
+      preview.candidates,
+      keepFirst,
+    );
+
+    expect(siteNames(kept)).toEqual(["哔哩①"]);
+  });
+
+  it("removes both when both rows sharing a key are unticked", () => {
+    // The quota has to be able to reach 2, or "untick everything" would leave a source behind.
+    const preview = buildImportPreview(SHARED_KEY_CONFIG);
+
+    const kept = keepSelectedEntries(preview.text, preview.candidates, new Set());
+    const parsed = JSON.parse(kept) as { sites: unknown[] };
+
+    expect(parsed.sites).toHaveLength(0);
+  });
+
+  it("applies the same quota to lives", () => {
+    // `lives` shares the parser and the defect. A key collision there is just as ordinary: a playlist
+    // published twice under the same name.
+    const text = JSON.stringify({
+      lives: [
+        { key: "L", name: "直播①", url: "https://live.example/a.m3u" },
+        { key: "L", name: "直播②", url: "https://live.example/b.m3u" },
+      ],
+    });
+    const preview = buildImportPreview(text);
+    expect(preview.candidates.map((c) => c.key)).toEqual(["L", "L-2"]);
+
+    const keepSecond = new Set([preview.candidates[1].id]);
+    const kept = keepSelectedEntries(text, preview.candidates, keepSecond);
+    const parsed = JSON.parse(kept) as { lives: { name: string }[] };
+
+    expect(parsed.lives.map((live) => live.name)).toEqual(["直播②"]);
+  });
+
+  it("applies the same quota to parses", () => {
+    // Parses are the collection where a repeated key is most likely, because a published list copies
+    // the same `key` for services that differ only by address.
+    const text = JSON.stringify({
+      parses: [
+        { key: "P", name: "解析①", type: 1, url: "https://p1.example/?url=" },
+        { key: "P", name: "解析②", type: 1, url: "https://p2.example/?url=" },
+      ],
+    });
+    const preview = buildImportPreview(text);
+    expect(preview.candidates.map((c) => c.key)).toEqual(["P", "P"]);
+
+    const keepSecond = new Set([preview.candidates[1].id]);
+    const kept = keepSelectedEntries(text, preview.candidates, keepSecond);
+    const parsed = JSON.parse(kept) as { parses: { name: string }[] };
+
+    expect(parsed.parses.map((service) => service.name)).toEqual(["解析②"]);
   });
 });

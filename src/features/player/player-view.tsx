@@ -207,7 +207,7 @@ export function PlayerView({
     return () => {
       cancelled = true;
     };
-  }, [episodeUrl, episodeId, normalizedConfig, source.key]);
+  }, [episodeUrl, episodeId, normalizedConfig, retryToken, source.key]);
 
   const selectEpisode = (line: VodPlayLine, episode: VodEpisode) => {
     setActiveLineId(line.id);

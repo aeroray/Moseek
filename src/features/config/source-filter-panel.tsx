@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { RotateCcw, SlidersHorizontal, X } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -88,7 +88,18 @@ export function SourceFilterFacets({
   value: SourceFilterState;
   onChange: (next: SourceFilterState) => void;
 }) {
-  const counts = facetCounts(sources, value);
+  /**
+   * How many sources each choice would leave.
+   *
+   * **Memoised explicitly because React Compiler is not enabled here.** `facetCounts` runs four full
+   * passes over the source list (one per facet group, each filtering the whole array), and this
+   * component re-renders on every keystroke in the search box and on every batch of test results —
+   * a batch replaces `sources` 16 times while it runs. Without the memo, a 355-source configuration
+   * pays 4 × 355 predicate evaluations per render for a result that only changes when `sources` or
+   * the filter does. The build has no compiler pass to hoist this, so the dependency list is the
+   * whole optimisation.
+   */
+  const counts = useMemo(() => facetCounts(sources, value), [sources, value]);
   const unfiltered = isFilterUnfiltered(value);
 
   // Every adapter the current list actually contains, most-used first, so the ones a user is likely

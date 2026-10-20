@@ -21,6 +21,7 @@ import {
   cancelMediaRequest,
   isTauriRuntime,
   probeMediaContainer,
+  resolveMediaElementUrl,
   streamMediaResource,
   type MediaStreamMeta,
 } from "@/lib/tauri";
@@ -1015,14 +1016,11 @@ export function MediaPlayer({
       }
       player.on("ready", () => {
         playerReadyRef.current = true;
-        const resume = resumeRef.current;
-        if (
-          resume > 5 &&
-          Number.isFinite(player.duration) &&
-          player.duration > resume
-        ) {
-          player.currentTime = resume;
-        }
+        // The resume seek is deliberately *not* here. This event fires when Plyr has finished
+        // building its DOM, which happens before a single byte of media is fetched — at that moment
+        // `player.duration` is 0 (Plyr maps both NaN and Infinity to 0), so any `currentTime`
+        // assignment is discarded by Plyr's own setter, which returns early while duration is
+        // falsy. That is why "接着看" never resumed. `applyResume` below waits for metadata.
         pipelineEventsRef.current?.onReady();
       });
       player.on("play", () => pipelineEventsRef.current?.onPlay());
@@ -1260,6 +1258,60 @@ export function MediaPlayer({
     };
     video.addEventListener("canplay", announcePlayable);
     video.addEventListener("loadeddata", announcePlayable);
+
+    /**
+     * Applies the saved position, once, at the first moment the element can actually seek.
+     *
+     * **Why this is here and not in Plyr's `ready` handler.** `ready` fires at the end of Plyr's
+     * `ui.build`, before any media is fetched, and Plyr's `duration` getter collapses both `NaN`
+     * (no metadata) and `Infinity` (a MediaSource live window) to `0`. A seek gated on
+     * `player.duration > resume` could therefore never run, and Plyr's `currentTime` setter returns
+     * early while `!duration` anyway — so "接着看" was silently inert for every episode. Seeking the
+     * element directly at `loadedmetadata`, when the real duration is known, is the earliest point
+     * the position can land.
+     *
+     * The position is clamped to the duration when it is finite: a saved position past the end is
+     * reachable (the episode was swapped for a shorter one, or the source re-cut the file) and an
+     * unclamped seek would throw or leave the element at the end showing a black frame. A live
+     * window reports `Infinity`, where there is no duration to clamp against and the saved position
+     * is still the intended target — for live the element's own window bounds the seek.
+     *
+     * `canplay` is listened to as well as `loadedmetadata` because a seek issued at metadata can be
+     * refused if the target range is not yet buffered; the flag is only set once the assignment
+     * actually went through, so a refused attempt is retried on the next event rather than lost.
+     */
+    let resumeApplied = false;
+    const applyResume = () => {
+      if (resumeApplied || disposed) return;
+      const resume = resumeRef.current;
+      // No position to restore. The flag is deliberately *not* set here: `resumeRef` is refreshed by
+      // an effect, so a saved position that arrives after mount (the store hydrating later than the
+      // element's first `canplay`) would otherwise be ignored for the life of this pipeline.
+      if (!(resume > 5)) return;
+      // The element has no duration and cannot seek before metadata; a later event will bring us back.
+      if (video.readyState < video.HAVE_METADATA) return;
+      const duration = video.duration;
+      const target =
+        Number.isFinite(duration) && duration > 0
+          ? Math.min(resume, duration)
+          : resume;
+      try {
+        video.currentTime = target;
+        resumeApplied = true;
+        recorder.push(
+          "应用续播位置",
+          `${Math.round(target)} 秒 · 时长 ${
+            Number.isFinite(duration) ? Math.round(duration) : "未知"
+          } 秒`,
+        );
+        scheduleDiagnosticFlush(true);
+      } catch {
+        // An unbuffered or not-yet-seekable range. Leaving `resumeApplied` false lets the next
+        // `canplay` retry instead of dropping the saved position silently.
+      }
+    };
+    video.addEventListener("loadedmetadata", applyResume);
+    video.addEventListener("canplay", applyResume);
 
     // `crossOrigin` is deliberately left unset. Setting it makes the element demand CORS
     // headers from the media host, which can only break the native path (a live mp4 or a VOD
@@ -1943,21 +1995,68 @@ export function MediaPlayer({
       );
     } else {
       pipelineMode = "native";
-      loadSourceRef.current = (source) => {
+      /**
+       * The only place this pipeline ever assigns `video.src`.
+       *
+       * **A native element fetches by itself, so it is the one path that does not go through the
+       * Tauri loader.** hls.js and mpegts.js are handed `TauriMediaLoader`/`TauriFlvLoader`, which
+       * route every manifest and fragment through `fetchMediaResource`/`streamMediaResource` and
+       * therefore through the Rust URL policy (public HTTP/HTTPS only, redirects re-checked, DNS
+       * pinned). Assigning `source.url` here directly would let the webview resolve and follow the
+       * address with none of that: an imported document could point the element at a loopback or
+       * private address, and the page would load it while every other media path refused it.
+       *
+       * `resolveMediaElementUrl` runs the same walk on the Rust side and answers with the address
+       * that survived. It is awaited before the assignment, so a refused address never reaches the
+       * element at all — the failure is reported instead, which is the difference between "the source
+       * is broken" and "this address was denied".
+       */
+      let nativeLoadVersion = 0;
+      const loadNativeSource = (source: MediaSourceState) => {
         if (isHlsSource(source) || isFlvSource(source)) return;
         setIsBuffering(false);
         setHasFailed(false);
         setVideoPoster(source);
         recorder.push("原生装载地址", truncateForDiagnostics(source.url));
-        video.src = source.url;
-        video.load();
+        const version = (nativeLoadVersion += 1);
+        void resolveMediaElementUrl(source.url)
+          .then((resolved) => {
+            // A newer load supersedes this one: the user can switch channels or episodes while the
+            // gate is walking redirects, and applying the older answer afterwards would play the
+            // address they just left.
+            if (disposed || version !== nativeLoadVersion) return;
+            if (!resolved) {
+              // The command is not registered (browser preview, or a build that predates it). There
+              // is no gate to consult and no policy to apply, so the element is left untouched
+              // rather than being handed an unverified address.
+              report(
+                "error",
+                "当前运行环境无法校验媒体地址，已拒绝直接播放。",
+              );
+              return;
+            }
+            recorder.push("原生地址已通过安全检查", truncateForDiagnostics(resolved));
+            video.src = resolved;
+            video.load();
+          })
+          .catch(() => {
+            if (disposed || version !== nativeLoadVersion) return;
+            recorder.push("原生地址被拒绝", truncateForDiagnostics(source.url));
+            // The backend's own reason is deliberately not shown: it names the rule that matched (a
+            // range, a redirect hop), which describes our policy rather than the user's source. The
+            // diagnostic ring keeps it for anyone reading 播放诊断.
+            report("error", "媒体地址未通过安全检查，已拒绝直接播放。");
+          });
       };
+      loadSourceRef.current = loadNativeSource;
+      // The retry path is the same path. Keeping a second direct assignment here is exactly how the
+      // gate would be bypassed on the second attempt — the user presses 重试 and the element loads
+      // the address the first attempt refused.
       retryRef.current = () => {
         setHasFailed(false);
         recorder.push("用户重试", "重新装载当前地址");
         setVideoPoster(sourceRef.current);
-        video.src = sourceRef.current.url;
-        video.load();
+        loadNativeSource(sourceRef.current);
       };
       scheduleBoot(() => {
         ensurePlayer();
@@ -1979,6 +2078,8 @@ export function MediaPlayer({
       if (diagnosticTimer !== null) clearTimeout(diagnosticTimer);
       video.removeEventListener("canplay", announcePlayable);
       video.removeEventListener("loadeddata", announcePlayable);
+      video.removeEventListener("loadedmetadata", applyResume);
+      video.removeEventListener("canplay", applyResume);
       hlsRef.current?.destroy();
       hlsRef.current = null;
       // A live FLV response never ends on its own, so this destroy is what actually stops the
