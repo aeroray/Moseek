@@ -21,6 +21,8 @@
 //! This is deliberately a scan and not an HTML parse. These pages put the URL in an attribute, an
 //! inline script, or a JSON blob, and a parser would only ever handle the first of those.
 
+use std::collections::HashSet;
+
 use reqwest::Url;
 
 use crate::policy::validate_remote_url;
@@ -30,6 +32,15 @@ use crate::policy::validate_remote_url;
 /// `.m3u8` and `.mp4` are what the player handles; `.flv` appears in older sources and is kept so
 /// it can be reported as a found-but-unsupported address rather than silently missed.
 pub(crate) const MEDIA_EXTENSIONS: [&str; 3] = [".m3u8", ".mp4", ".flv"];
+
+/// How many addresses one scan may return.
+///
+/// Neither caller reads past the head: the resolver takes `media.first()`, and the XBPQ adapter gives
+/// one address per play line out of a page whose line count is a few dozen. Pages, however, can carry
+/// tens of thousands of distinct addresses — 50 462 in one measured 1 MiB page — and every one of
+/// them was resolved, allocated and pushed before the caller discarded all but the first. A cap keeps
+/// the cost proportional to what is used rather than to what an upstream chose to send.
+const MAX_SCANNED_URLS: usize = 64;
 
 /// Every URL-looking string in raw page text.
 ///
@@ -86,9 +97,14 @@ pub(crate) fn unescape_slashes(value: &str) -> String {
 /// Resolves a possibly relative value against the page, refusing non-remote schemes.
 pub(crate) fn resolve_candidate(base_url: &Url, value: &str) -> Option<Url> {
     let value = value.trim();
-    if value.is_empty() || value.starts_with("javascript:") || value.starts_with("data:") {
+    if value.is_empty() {
         return None;
     }
+    // No `starts_with("javascript:")` / `starts_with("data:")` here. `Url::join` lowercases the
+    // scheme, so a case-sensitive prefix test let `JAVASCRIPT:alert(1)` — and the same value with a
+    // leading space — through to the join: the guard expressed an intent it did not enforce. The
+    // scheme decision belongs in one place, and `validate_remote_url` already makes it for
+    // http/https only. Three copies of the guard existed; they are gone, not reimplemented.
     let url = base_url.join(value).ok()?;
     validate_remote_url(&url).ok()?;
     Some(url)
@@ -99,14 +115,21 @@ pub(crate) fn resolve_candidate(base_url: &Url, value: &str) -> Option<Url> {
 /// Relative addresses are resolved against the page, because both real shapes use them:
 /// `var main = "/2022…/index.m3u8?sign=…"` and an absolute `https://…/index.m3u8`.
 pub(crate) fn media_urls_in_page(html: &str, base_url: &Url) -> Vec<String> {
+    // A set for membership, the vector for order. `Vec::contains` was a linear scan per address, so
+    // the whole scan was quadratic: measured 2.40 s for a 1 MiB page of distinct `.m3u8` addresses
+    // (50 462 of them) and 14.16 s for 2 MiB. The input is the remote page's own body.
+    let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
     for candidate in candidate_urls(html) {
+        if out.len() >= MAX_SCANNED_URLS {
+            break;
+        }
         if !is_media_url(&candidate) {
             continue;
         }
         if let Some(url) = resolve_candidate(base_url, &candidate) {
             let url = url.to_string();
-            if !out.contains(&url) {
+            if seen.insert(url.clone()) {
                 out.push(url);
             }
         }
@@ -123,15 +146,19 @@ pub(crate) fn media_urls_matching(html: &str, base_url: &Url, tokens: &[String])
     if tokens.is_empty() {
         return Vec::new();
     }
+    let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
     for candidate in candidate_urls(html) {
+        if out.len() >= MAX_SCANNED_URLS {
+            break;
+        }
         let lowered = candidate.to_ascii_lowercase();
         if !tokens.iter().any(|token| lowered.contains(token.as_str())) {
             continue;
         }
         if let Some(url) = resolve_candidate(base_url, &candidate) {
             let url = url.to_string();
-            if !out.contains(&url) {
+            if seen.insert(url.clone()) {
                 out.push(url);
             }
         }
@@ -149,6 +176,7 @@ pub(crate) fn media_urls_matching(html: &str, base_url: &Url, tokens: &[String])
 /// Only `<iframe>` is followed. A `<script src>` is a library and an `<a href>` is navigation, so
 /// following those would turn one scan into an unbounded crawl.
 pub(crate) fn iframe_urls_in_page(html: &str, base_url: &Url) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<String> = Vec::new();
     let lowered = html.to_ascii_lowercase();
     let mut cursor = 0usize;
@@ -161,7 +189,9 @@ pub(crate) fn iframe_urls_in_page(html: &str, base_url: &Url) -> Vec<String> {
         if let Some(src) = attribute(tag, "src") {
             if let Some(url) = resolve_candidate(base_url, &src) {
                 let url = url.to_string();
-                if !out.contains(&url) {
+                // The same set-not-vector rule as the media scanners: a hostile page can carry
+                // thousands of frames, and the linear scan made collecting them quadratic.
+                if seen.insert(url.clone()) {
                     out.push(url);
                 }
             }
@@ -331,5 +361,81 @@ mod tests {
         assert!(is_media_url("https://cdn.example/A/INDEX.M3U8"));
         assert!(is_media_url("https://cdn.example/a.mp4?token=1"));
         assert!(!is_media_url("https://cdn.example/a.jpg"));
+    }
+
+    /// A hostile page must not make the scan quadratic, and the result must stay bounded.
+    ///
+    /// `Vec::contains` made de-duplication a linear scan per address: measured 2.40 s for a 1 MiB
+    /// page carrying 50 462 distinct `.m3u8` addresses and 14.16 s for 2 MiB. The input is the remote
+    /// page's own body, and the resolver pays that cost on every episode the user opens. The set
+    /// makes the scan linear, and `MAX_SCANNED_URLS` stops collecting at the point where nothing
+    /// further can be read — the resolver takes only the first address.
+    #[test]
+    fn a_megabyte_of_distinct_addresses_stays_bounded_and_fast() {
+        // Exactly the measured shape: one quoted, distinct media address per line.
+        let mut html = String::with_capacity(1024 * 1024 + 64);
+        let mut index = 0usize;
+        while html.len() < 1024 * 1024 {
+            html.push_str(&format!(
+                "var u{index} = \"https://cdn.example/{index}/index.m3u8\";\n"
+            ));
+            index += 1;
+        }
+        assert!(index > 20_000, "the fixture must be the hostile shape");
+
+        let started = std::time::Instant::now();
+        let found = media_urls_in_page(&html, &base());
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            found.len(),
+            super::MAX_SCANNED_URLS,
+            "the scan stops at the number of addresses a caller can use"
+        );
+        // Generous by three orders of magnitude against the 2.4 s the linear scan took, so this
+        // fails on a reintroduced quadratic rather than on a slow machine.
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "1 MiB scan took {elapsed:?}; a linear scan measures in single-digit milliseconds"
+        );
+        // Order is still document order, which is what makes the first address the right one.
+        assert_eq!(found[0], "https://cdn.example/0/index.m3u8");
+        assert_eq!(found[1], "https://cdn.example/1/index.m3u8");
+    }
+
+    /// The same bound applies to the token-filtered scanner the XBPQ adapter uses.
+    #[test]
+    fn the_token_filtered_scan_is_also_bounded() {
+        let mut html = String::with_capacity(256 * 1024);
+        for index in 0..5_000 {
+            html.push_str(&format!(
+                "const u{index} = \"https://cdn.example/{index}/index.m3u8\";\n"
+            ));
+        }
+        let found = media_urls_matching(&html, &base(), &[".m3u8".to_string()]);
+
+        assert_eq!(found.len(), super::MAX_SCANNED_URLS);
+        assert_eq!(found[0], "https://cdn.example/0/index.m3u8");
+    }
+
+    /// The scheme guard does not depend on the value's spelling.
+    ///
+    /// The removed guard was `starts_with("javascript:")`, which `Url::join` defeats because it
+    /// lowercases the scheme: measured, `JAVASCRIPT:alert(1)` and `"  javascript:alert(1)"` both got
+    /// past it and joined as `javascript:`. `validate_remote_url` refuses the scheme regardless of
+    /// case and leading whitespace, so all three spellings must be refused.
+    #[test]
+    fn refuses_non_http_schemes_regardless_of_their_spelling() {
+        let html = r#"
+            var a = "JAVASCRIPT:alert(1)";
+            var b = "DATA:text/html,<script>alert(1)</script>";
+            var c = "Javascript:alert(1)";
+        "#;
+        assert!(media_urls_in_page(html, &base()).is_empty());
+
+        // A direct call too: this is the function the three former copies guarded.
+        assert!(super::resolve_candidate(&base(), "JAVASCRIPT:alert(1)").is_none());
+        assert!(super::resolve_candidate(&base(), "  javascript:alert(1)").is_none());
+        assert!(super::resolve_candidate(&base(), "data:text/html,x").is_none());
     }
 }

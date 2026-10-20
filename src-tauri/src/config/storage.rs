@@ -280,19 +280,26 @@ pub(super) fn set_config_source_base_url(
             source.epg = Some(resolve_configured_url(epg, &base_url)?);
         }
         if source.source_type == "live" && is_http_url(&source.api) {
-            source.capability = "supported".to_string();
-            source.capability_note =
-                "支持通过 Rust 网络层解析 M3U、TXT 或 JSON 直播频道。".to_string();
+            // **Only the fields the address change actually invalidates are touched.**
+            //
+            // This block used to rewrite `capability` from a URL-shape check, set
+            // `enabled = source.status`, and clear every probe result. All three were wrong:
+            //
+            //   - `capability` is derived when the record is read (`SiteAdapterKind::ensure_executable`),
+            //     never stored — decision MC-DEC-20261008-3b9c0ef4. Writing it here is exactly the drift
+            //     that decision exists to prevent, and it stamped "supported" on a loopback address
+            //     (`http://127.0.0.1:…`) that `validate_remote_url` will refuse forever.
+            //   - `enabled` is user intent. `status` is the author's field from the imported file, so
+            //     `enabled = status` silently switched back on every source the user had turned off.
+            //     The sibling `set_source_test_in_connection` documents this rule at length; a URL
+            //     repair is even less entitled to override it than a passing test would be.
+            //   - the probe history is what the user just paid for by testing. An address fix changes
+            //     the address, not the evidence they collected about the old one.
+            //
+            // What genuinely changes is that the address is now absolute and fetchable, so the two
+            // capability flags the parser derives from address shape are refreshed.
             source.searchable = true;
             source.filterable = true;
-            source.enabled = source.status;
-            source.test_status = None;
-            source.test_message = None;
-            source.tested_at = None;
-            source.test_item_count = None;
-            source.test_category_count = None;
-            source.test_duration_ms = None;
-            source.test_operations = Vec::new();
         }
     }
     let sources_json = serialize_sources(&sources)?;
@@ -326,19 +333,13 @@ pub(super) fn replace_known_live_source_urls(
         };
         source.api = url.clone();
         if source.source_type == "live" {
-            source.capability = "supported".to_string();
-            source.capability_note =
-                "已自动恢复为公开兼容直播列表；请通过连接测试确认当前频道可用性。".to_string();
+            // Same rule as `set_config_source_base_url` above: this recovery replaces a dead address
+            // with a live one, which is a change of address and nothing else. `capability` is derived
+            // at read time (MC-DEC-20261008-3b9c0ef4), `enabled` is user intent and must not be
+            // re-derived from the author's `status` field, and the probe history describes the source
+            // the user tested rather than a URL this pass invented.
             source.searchable = true;
             source.filterable = true;
-            source.enabled = source.status;
-            source.test_status = None;
-            source.test_message = None;
-            source.tested_at = None;
-            source.test_item_count = None;
-            source.test_category_count = None;
-            source.test_duration_ms = None;
-            source.test_operations = Vec::new();
         }
         changed = true;
     }
@@ -632,14 +633,21 @@ pub(super) fn remove_sources_in_connection(
         .filter(|url| matches!(url.scheme(), "http" | "https"));
 
     let sources_json = serialize_sources(&sources)?;
+    // Both texts are converted before the transaction is opened, and either one failing aborts the
+    // whole removal. The two `?`s below are the fix for a deletion that reported success while only
+    // half of it landed: see `remove_sources_from_config`.
     let normalized_config = remove_sources_from_config(
         &document.normalized_config,
         base_url.as_ref(),
         &removed,
         &sources,
-    );
-    let raw_config =
-        remove_sources_from_config(&document.raw_config, base_url.as_ref(), &removed, &sources);
+    )?;
+    let raw_config = remove_sources_from_config(
+        &document.raw_config,
+        base_url.as_ref(),
+        &removed,
+        &sources,
+    )?;
     // `source_count` is derived from `sources_json` when the document is read, so only the live
     // tally is stored alongside it.
     let live_count = sources
@@ -836,19 +844,29 @@ fn entry_label(item: &Value) -> String {
 /// own configuration held eleven such live entries — and it runs only when the list is shown to
 /// describe this same text, so an unrelated text is never pruned.
 ///
-/// Returns the input unchanged when it is not parseable, so an unparseable configuration is never
-/// silently emptied by a removal.
+/// Returns an error when the text is not strict JSON, rather than the input unchanged.
+///
+/// **This must fail loudly, and it is the one place among the `remove_from_*` helpers that does.**
+/// The import path accepts JSON5 (comments, trailing commas) and stores the author's text verbatim,
+/// so a stored `raw_config` is routinely not parseable by `serde_json`. Returning it unchanged here
+/// — which is what this function used to do — let `remove_sources_in_connection` commit the pruned
+/// source list alongside an untouched raw text and still return `Ok`: the row vanished from the UI,
+/// stayed in the file, and came back on the next import. A deletion that cannot be applied to every
+/// one of the document's three representations must not be reported as applied to one of them.
 fn remove_sources_from_config(
     config_text: &str,
     base_url: Option<&Url>,
     removed: &[SourceRecord],
     remaining: &[SourceRecord],
-) -> String {
-    let Ok(mut value) = serde_json::from_str::<Value>(config_text) else {
-        return config_text.to_string();
-    };
+) -> Result<String, String> {
+    let mut value: Value = serde_json::from_str(config_text).map_err(|error| {
+        format!(
+            "原始配置不是可改写的 JSON，无法在保持原文的前提下删除这个源：{error}。\
+             这份配置可能含有注释或尾逗号；请先在配置中心用「格式化」把它转成标准 JSON。"
+        )
+    })?;
     let Some(object) = value.as_object_mut() else {
-        return config_text.to_string();
+        return Err("原始配置的顶层不是对象，无法删除其中的源。".to_string());
     };
 
     for (section, is_live) in [("sites", false), ("lives", true)] {
@@ -1017,7 +1035,7 @@ fn remove_sources_from_config(
         });
     }
 
-    serde_json::to_string_pretty(&value).unwrap_or_else(|_| config_text.to_string())
+    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| config_text.to_string()))
 }
 
 pub(super) fn set_source_enabled_in_connection(
@@ -1467,7 +1485,8 @@ mod tests {
             // The other entry is what SURVIVES, so it has to be in `remaining` — that list is what the
             // prune treats as "still wanted", and an empty one would legitimately prune everything.
             let remaining = vec![record("other", "别删的", "https://example.com/api")];
-            let out = remove_sources_from_config(&text, None, &removed, &remaining);
+            let out = remove_sources_from_config(&text, None, &removed, &remaining)
+                .expect("a strict-JSON fixture must convert");
             let parsed: Value = serde_json::from_str(&out).unwrap();
             let keys: Vec<&str> = parsed["sites"]
                 .as_array()
@@ -1500,7 +1519,8 @@ mod tests {
             // A record whose address is empty, which would compare equal to the address-less entry.
             let removed = vec![record("does-not-exist", "无地址", "")];
             let remaining: Vec<SourceRecord> = Vec::new();
-            let out = remove_sources_from_config(&text, None, &removed, &remaining);
+            let out = remove_sources_from_config(&text, None, &removed, &remaining)
+                .expect("a strict-JSON fixture must convert");
             let parsed: Value = serde_json::from_str(&out).unwrap();
 
             assert_eq!(
@@ -1525,7 +1545,8 @@ mod tests {
             // A single removal whose identity matches nothing in the text at all.
             let removed = vec![record("z", "丙", "https://z.example/api")];
             let remaining = vec![record("q", "丁", "https://q.example/api")];
-            let out = remove_sources_from_config(&text, None, &removed, &remaining);
+            let out = remove_sources_from_config(&text, None, &removed, &remaining)
+                .expect("a strict-JSON fixture must convert");
             let parsed: Value = serde_json::from_str(&out).unwrap();
 
             assert_eq!(
@@ -1545,12 +1566,63 @@ mod tests {
 
             let removed = vec![record("b", "甲", "https://a.example/API")];
             let remaining: Vec<SourceRecord> = Vec::new();
-            let out = remove_sources_from_config(&text, None, &removed, &remaining);
+            let out = remove_sources_from_config(&text, None, &removed, &remaining)
+                .expect("a strict-JSON fixture must convert");
             let parsed: Value = serde_json::from_str(&out).unwrap();
 
             assert!(
                 parsed["sites"].as_array().unwrap().is_empty(),
                 "case and a trailing slash must not make one address look like two"
+            );
+        }
+
+        /// A JSON5 document must abort the removal, not half-apply it.
+        ///
+        /// The reported defect: the import path stores the author's text verbatim, so a configuration
+        /// with a `//` comment is ordinary. `serde_json` cannot read it, and this function used to
+        /// return the text unchanged while its caller committed the pruned source list anyway — the
+        /// row disappeared from the UI, stayed in the file, and returned on the next import. Refusing
+        /// is the only honest outcome; the caller must not be told a deletion happened.
+        #[test]
+        fn a_json5_document_with_comments_is_refused_rather_than_half_applied() {
+            let text = "{\n  // the author's own note\n  \"sites\": [{\"key\":\"a\",\"name\":\"甲\",\"api\":\"https://a/x\"}],\n}";
+            let removed = vec![record("a", "甲", "https://a/x")];
+            let remaining: Vec<SourceRecord> = Vec::new();
+
+            let error = remove_sources_from_config(text, None, &removed, &remaining)
+                .expect_err("a non-strict-JSON document must not be silently returned");
+            // The message has to name the real cause, because the user's next question is "why not".
+            assert!(
+                error.contains("JSON") || error.contains("注释"),
+                "the refusal must explain itself, got: {error}"
+            );
+        }
+
+        /// The commit path itself must not write when either text refuses to convert.
+        ///
+        /// The previous test proves the helper refuses; this one proves nothing is persisted. That is
+        /// the half that actually reached the user, and it is the one a future refactor is most likely
+        /// to reintroduce by reordering the transaction and the conversion.
+        #[test]
+        fn a_removal_that_cannot_rewrite_both_texts_writes_nothing() {
+            let mut connection = Connection::open_in_memory().unwrap();
+            create_test_schema(&connection);
+            // A raw text the author wrote with a comment, beside a source list that holds two rows.
+            let raw = "{\n  // comment\n  \"sites\": [{\"key\":\"a\",\"name\":\"甲\",\"api\":\"https://a/x\"}]\n}";
+            let id = insert_document_with_sources(&connection, "含注释", raw, &["a", "b"], None);
+
+            let result = remove_sources_in_connection(&mut connection, id, &["a".to_string()]);
+
+            assert!(result.is_err(), "the removal must fail, not partially apply");
+            let reloaded = load_config_document(&connection, id).unwrap().unwrap();
+            assert_eq!(
+                reloaded.sources.len(),
+                2,
+                "a failed removal must leave the source list untouched"
+            );
+            assert_eq!(
+                reloaded.raw_config, raw,
+                "and must leave the raw text untouched"
             );
         }
     }
@@ -2080,7 +2152,18 @@ mod tests {
             updated.sources[0].api,
             "https://example.com/config/libs/tv/tvlive.txt"
         );
-        assert_eq!(updated.sources[0].capability, "supported");
+        // **The address moves; the verdict about the source does not.**
+        //
+        // This assertion used to require `capability == "supported"`, i.e. it pinned the very
+        // overwrite that decision MC-DEC-20261008-3b9c0ef4 forbids: `capability` is derived from the
+        // record when it is read, never written from a URL shape. Resolving a base URL changes where
+        // the playlist lives, not whether the parser can execute it — and `needs-adapter` is what the
+        // parser concluded about this record. Rewriting it here would relabel a source the parser
+        // refuses and hide that from the UI.
+        assert_eq!(
+            updated.sources[0].capability, "needs-adapter",
+            "a base-URL repair must not overwrite the parser's classification"
+        );
         assert_eq!(
             updated.source_base_url.as_deref(),
             Some("https://example.com/config/config.json")
@@ -2088,6 +2171,56 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&updated.normalized_config).unwrap()["lives"][0]["api"],
             "https://example.com/config/libs/tv/tvlive.txt"
+        );
+    }
+
+    /// Repairing a base URL must not switch a source back on, nor erase what testing it cost the user.
+    ///
+    /// `enabled` is the user's intent; `status` is the author's field in the imported file. The repair
+    /// used to write `enabled = status`, so entering the one address the alert box asks for silently
+    /// re-enabled every source the user had switched off — contradicting the rule
+    /// `set_source_test_in_connection` spells out. It also cleared every `test_*` field, throwing away
+    /// the probe history the UI displays.
+    #[test]
+    fn a_base_url_repair_leaves_user_choice_and_probe_history_alone() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        create_test_schema(&connection);
+        let mut source = test_live_source();
+        source.api = "./libs/tv/tvlive.txt".to_string();
+        source.enabled = false; // the user switched it off
+        source.status = true; // but the author's file says it is fine
+        source.test_status = Some("failed".to_string());
+        source.test_message = Some("上次测试失败".to_string());
+        source.tested_at = Some("昨天".to_string());
+        let sources_json = serialize_sources(&[source]).unwrap();
+        connection
+            .execute(
+                "INSERT INTO config_documents (name, raw_config, normalized_config, sources_json, live_count) VALUES (?1, ?2, ?3, ?4, 1)",
+                params!["直播基址配置", "{}", "{}", sources_json],
+            )
+            .unwrap();
+        let document_id = connection.last_insert_rowid();
+
+        let updated = set_config_source_base_url(
+            &mut connection,
+            document_id,
+            "https://example.com/config/config.json",
+        )
+        .unwrap();
+
+        let repaired = &updated.sources[0];
+        assert_eq!(
+            repaired.api, "https://example.com/config/libs/tv/tvlive.txt",
+            "the address is what the repair is for"
+        );
+        assert!(
+            !repaired.enabled,
+            "a base-URL repair must not re-enable a source the user turned off"
+        );
+        assert_eq!(
+            repaired.test_status.as_deref(),
+            Some("failed"),
+            "the probe history must survive an address fix"
         );
     }
 
@@ -2219,9 +2352,18 @@ mod tests {
     }
 
     #[test]
-    fn removing_sources_leaves_unparseable_raw_config_untouched() {
-        // The raw text is whatever the user imported. If it cannot be parsed, a removal must not
-        // replace it with an empty object — that would destroy their configuration.
+    fn removing_sources_refuses_a_raw_config_it_cannot_rewrite() {
+        // The raw text is whatever the user imported, and it is allowed to be JSON5 (comments,
+        // trailing commas) because the import path stores it verbatim. A removal cannot rewrite
+        // that text with `serde_json`, and the two possible outcomes are NOT equivalent:
+        //
+        //   - replace it with an empty object  → destroys their configuration;
+        //   - return it unchanged and commit   → the row vanishes from the list while the file
+        //                                        keeps it, so it returns on the next import.
+        //
+        // This test used to pin the second one, which is the reported "删了又回来" defect. The
+        // contract is now: refuse the whole removal and change nothing. See
+        // `remove_sources_from_config` and `a_removal_that_cannot_rewrite_both_texts_writes_nothing`.
         let mut connection = Connection::open_in_memory().unwrap();
         create_test_schema(&connection);
         let document_id = insert_document_with_sources(
@@ -2232,11 +2374,21 @@ mod tests {
             None,
         );
 
-        let updated =
-            remove_sources_in_connection(&mut connection, document_id, &["a".to_string()]).unwrap();
+        let result = remove_sources_in_connection(&mut connection, document_id, &["a".to_string()]);
 
-        assert_eq!(updated.raw_config, "not json at all");
-        assert_eq!(updated.sources.len(), 1);
+        assert!(
+            result.is_err(),
+            "a removal that cannot rewrite the raw text must fail instead of half-applying"
+        );
+        let unchanged = load_config_document(&connection, document_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.raw_config, "not json at all");
+        assert_eq!(
+            unchanged.sources.len(),
+            2,
+            "the source list must not be pruned when the text could not be"
+        );
     }
 
     #[test]

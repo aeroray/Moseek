@@ -360,11 +360,11 @@ async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, Str
                 duration_ms: 0,
             });
 
-            // The first item's full record, kept rather than discarded: the playback probe below
+            // The first item's full record, kept rather than discarded: the address check below
             // needs play addresses, and the slim listing this source test lists with may not carry
-            // any. Before the listing and the detail shape were split, the probe silently depended
-            // on the cover retry having succeeded, so a slow host could turn "playback" into
-            // "empty" for a source that plays perfectly well.
+            // any. Before the listing and the detail shape were split, the check silently depended
+            // on the cover retry having succeeded, so a slow host could report no address for a
+            // source that plays perfectly well.
             let probed_detail: Option<VodItem> = if let Some(item) = catalog.items.first() {
                 let detail_started = Instant::now();
                 let outcome = get_detail(source.clone(), item.id.clone()).await;
@@ -404,42 +404,24 @@ async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, Str
             // real `采集集合` extension is one — every row has `vod_play_from` and no
             // `vod_play_url`), and the listing's own lines are only a fallback for sources whose
             // listing does carry them.
-            let playback_operation = probed_detail
-                .iter()
-                .flat_map(|item| item.play_lines.iter())
-                .flat_map(|line| line.episodes.iter())
-                .chain(
-                    catalog
-                        .items
-                        .iter()
-                        .flat_map(|item| item.play_lines.iter())
-                        .flat_map(|line| line.episodes.iter()),
-                )
-                .next()
-                .map(|episode| {
-                    let status = reqwest::Url::parse(&episode.url)
-                        .ok()
-                        .filter(|url| validate_remote_url(url).is_ok())
-                        .map(|_| "passed")
-                        .unwrap_or("failed");
-                    SourceOperationResult {
-                        operation: "playback".to_string(),
-                        status: status.to_string(),
-                        message: if status == "passed" {
-                            "已识别出可通过媒体安全策略的播放地址。".to_string()
-                        } else {
-                            "播放地址未通过 HTTP/HTTPS 安全策略。".to_string()
-                        },
-                        duration_ms: 0,
-                    }
-                })
-                .unwrap_or_else(|| SourceOperationResult {
-                    operation: "playback".to_string(),
-                    status: "empty".to_string(),
-                    message: "首批影视内容没有可识别的播放地址。".to_string(),
-                    duration_ms: 0,
-                });
-            operations.push(playback_operation);
+            //
+            // The operation is named for what it checks rather than for what the user hopes it
+            // checks — see [`playback_address_operation`].
+            operations.push(playback_address_operation(
+                probed_detail
+                    .iter()
+                    .flat_map(|item| item.play_lines.iter())
+                    .flat_map(|line| line.episodes.iter())
+                    .chain(
+                        catalog
+                            .items
+                            .iter()
+                            .flat_map(|item| item.play_lines.iter())
+                            .flat_map(|line| line.episodes.iter()),
+                    )
+                    .next()
+                    .map(|episode| episode.url.as_str()),
+            ));
             operations.push(SourceOperationResult {
                 operation: "search".to_string(),
                 status: if source.searchable {
@@ -486,6 +468,39 @@ async fn test_source_inner(source: SourceRecord) -> Result<SourceTestResult, Str
                 }],
             })
         }
+    }
+}
+
+/// The source-test operation that reports whether a play address passes the media policy.
+///
+/// **Named `playbackAddress`, not `playback`, and that is the whole point.** It never contacts the
+/// address: `validate_remote_url` is a scheme and host-literal check that resolves no name and opens
+/// no socket, and every address it is handed already passed the same check in `parse_episodes` — so
+/// `failed` is effectively unreachable and `passed` says only that the string is a plausible HTTP
+/// media address. The live adapter gives the name `playback` to a probe that really fetches the
+/// manifest, and a user comparing the two was comparing a string check with a network request. The
+/// message states the limit in the same words the operation name implies.
+fn playback_address_operation(play_url: Option<&str>) -> SourceOperationResult {
+    let Some(play_url) = play_url else {
+        return SourceOperationResult {
+            operation: "playbackAddress".to_string(),
+            status: "empty".to_string(),
+            message: "首批影视内容没有可识别的播放地址。".to_string(),
+            duration_ms: 0,
+        };
+    };
+    let passed = reqwest::Url::parse(play_url)
+        .ok()
+        .is_some_and(|url| validate_remote_url(&url).is_ok());
+    SourceOperationResult {
+        operation: "playbackAddress".to_string(),
+        status: if passed { "passed" } else { "failed" }.to_string(),
+        message: if passed {
+            "播放地址已通过媒体安全策略（未请求该地址，是否可播放需实际打开确认）。".to_string()
+        } else {
+            "播放地址未通过 HTTP/HTTPS 安全策略。".to_string()
+        },
+        duration_ms: 0,
     }
 }
 
@@ -673,9 +688,20 @@ fn append_scalar_params(params: &mut Vec<(String, String)>, values: &Map<String,
     }
 }
 
+/// Parses a TVBox/MacCMS XML payload into the same JSON shape a JSON source returns.
+///
+/// `trim_text` is deliberately **off**. quick-xml 0.39+ emits an entity reference as its own
+/// `Event::GeneralRef`, which splits one text run into `Text`, `GeneralRef`, `Text`; trimming each
+/// fragment separately ate the spaces on both sides of every entity, so `Tom &amp; Jerry` came out
+/// as `Tom&Jerry`. The whitespace that is left in a value is trimmed where the value is read
+/// (`value_text` trims every string field), and text between elements is dropped because no field
+/// is open — so nothing downstream sees the difference.
 fn parse_xml_payload(text: &str) -> Result<Value, String> {
     let mut reader = Reader::from_str(text);
-    reader.config_mut().trim_text(true);
+    // Real CMS XML is not always well formed. An unescaped `&` — which MacCMS deployments emit —
+    // was `IllFormedError::UnclosedReference`, and that failed the whole catalog request at the
+    // error arm below, not just the field containing it. With this set, a bare `&` is a character.
+    reader.config_mut().allow_dangling_amp = true;
     let mut buffer = Vec::new();
     let mut items = Vec::new();
     let mut categories = Vec::new();
@@ -707,12 +733,27 @@ fn parse_xml_payload(text: &str) -> Result<Value, String> {
                 }
             }
             Ok(Event::Text(event)) => {
-                let decoded = event
+                // No `quick_xml::escape::unescape` here: the reader emits every reference as its
+                // own `GeneralRef` event, so a `&` left in a text event is always a dangling one
+                // (accepted above) and unescaping it would fail with `UnterminatedEntity` — which
+                // used to turn one stray ampersand into a failed request.
+                let value = event
                     .decode()
-                    .map_err(|error| format!("CMS XML 文本解码失败：{error}"))?;
-                let value = quick_xml::escape::unescape(decoded.as_ref())
-                    .map_err(|error| format!("CMS XML 文本实体解析失败：{error}"))?
+                    .map_err(|error| format!("CMS XML 文本解码失败：{error}"))?
                     .into_owned();
+                store_xml_value(
+                    &mut current_item,
+                    &mut current_category,
+                    current_field.as_deref(),
+                    value,
+                );
+            }
+            // quick-xml 0.39+ reports `&amp;` (and every other reference) as its own event rather
+            // than escaping it inside the surrounding text. Ignoring it — which the `_ => {}` arm
+            // used to do — silently deleted the character *and*, because a value then arrived in
+            // several events, kept only the last fragment: `<name>A&amp;B</name>` became "B".
+            Ok(Event::GeneralRef(event)) => {
+                let value = xml_reference_value(&event)?;
                 store_xml_value(
                     &mut current_item,
                     &mut current_category,
@@ -762,6 +803,29 @@ fn parse_xml_payload(text: &str) -> Result<Value, String> {
     Ok(Value::Object(payload))
 }
 
+/// The text one entity or character reference contributes to the field being read.
+///
+/// `&amp;` → `&`, `&#65;` → `A`, `&#x41;` → `A`. A reference the XML specification does not define
+/// is kept literally (`&foo;`) rather than dropped: a CMS that emits its own entity is telling the
+/// user something, and showing the name is recoverable while silently deleting it is not.
+fn xml_reference_value(event: &quick_xml::events::BytesRef<'_>) -> Result<String, String> {
+    match event
+        .resolve_char_ref()
+        .map_err(|error| format!("CMS XML 字符引用解析失败：{error}"))?
+    {
+        Some(character) => Ok(character.to_string()),
+        None => {
+            let name = event
+                .decode()
+                .map_err(|error| format!("CMS XML 实体名解码失败：{error}"))?;
+            Ok(match quick_xml::escape::resolve_predefined_entity(name.as_ref()) {
+                Some(resolved) => resolved.to_string(),
+                None => format!("&{name};"),
+            })
+        }
+    }
+}
+
 fn store_xml_value(
     current_item: &mut Option<Map<String, Value>>,
     current_category: &mut Option<Map<String, Value>>,
@@ -772,10 +836,22 @@ fn store_xml_value(
         return;
     };
     if let Some(item) = current_item.as_mut() {
-        item.insert(field.to_string(), Value::String(value));
+        // Append rather than insert. One field can arrive as several events now — `Text`,
+        // `GeneralRef`, `Text` for `Tom &amp; Jerry` — and `insert` kept only the last fragment,
+        // so the stored value was the string after the final entity.
+        append_xml_field(item, field, &value);
     } else if let Some(category) = current_category.as_mut() {
         if field == "name" || field == "type_name" || field == "title" {
-            category.insert("name".to_string(), Value::String(value));
+            append_xml_field(category, "name", &value);
+        }
+    }
+}
+
+fn append_xml_field(object: &mut Map<String, Value>, field: &str, value: &str) {
+    match object.get_mut(field) {
+        Some(Value::String(existing)) => existing.push_str(value),
+        _ => {
+            object.insert(field.to_string(), Value::String(value.to_string()));
         }
     }
 }
@@ -788,7 +864,72 @@ fn xml_attribute(event: &quick_xml::events::BytesStart<'_>, key: &[u8]) -> Optio
         .and_then(|attribute| String::from_utf8(attribute.value.into_owned()).ok())
 }
 
+/// The largest page count the pager will believe.
+///
+/// `total` and `pagecount` are fields of the response body, so a source can claim any number it
+/// likes. The old expression narrowed them with `as u32`, which *wraps* rather than refuses — a
+/// `"total": 1e18` with a page size of 20 became 4 294 967 295 pages, and the library rendered
+/// `第 1 / 4294967295 页` with 下一页 enabled indefinitely, each click a fresh request to a third
+/// party. Ten thousand pages is already far past any real catalogue (a 200 000-work source at 20 a
+/// page is 10 000), so the bound costs nothing and ends the walk.
+const MAX_CATALOG_PAGES: u32 = 10_000;
+
+/// The number of pages a total implies, clamped to what the UI can act on.
+///
+/// Integer division rather than `f64::ceil`: the float path lost precision above 2^53 and its `as
+/// u32` saturated, which is how a hostile total reached four billion pages. Shared by every family
+/// that computes a page count from a total so the three copies cannot drift.
+pub(crate) fn page_count_from_total(total: u64, page_size: u32) -> u32 {
+    let page_size = u64::from(page_size.max(1));
+    let pages = total.div_ceil(page_size);
+    pages.clamp(1, u64::from(MAX_CATALOG_PAGES)) as u32
+}
+
+/// How many JSON nodes one catalog response may contain.
+///
+/// The byte cap (`CMS_RESPONSE_MAX_BYTES`) is enforced before parsing and is not the whole story: 15
+/// MiB of tiny scalars materialises as ~7.9 million `serde_json::Value` nodes, and at 32 bytes a node
+/// that is ~240 MiB of process memory before `parse_catalog_page` allocates anything of its own. A
+/// catalog page is tens of items, so anything past this is not a page.
+const CATALOG_MAX_JSON_NODES: usize = 200_000;
+
+/// Whether a parsed body stays inside the node budget, consuming the budget as it walks.
+///
+/// Iterative over the container nesting depth rather than recursive, because the depth is attacker
+/// chosen and `serde_json` will happily parse a deeply nested document — a recursive walk would be
+/// the only stack overflow left in this path.
+fn within_json_node_budget(value: &Value) -> bool {
+    let mut budget = CATALOG_MAX_JSON_NODES;
+    let mut pending: Vec<&Value> = vec![value];
+    while let Some(node) = pending.pop() {
+        if budget == 0 {
+            return false;
+        }
+        budget -= 1;
+        match node {
+            Value::Array(items) => pending.extend(items.iter()),
+            Value::Object(map) => pending.extend(map.values()),
+            _ => {}
+        }
+    }
+    true
+}
+
 fn parse_catalog_page(payload: &Value, source_key: &str, page: u32, page_size: u32) -> CatalogPage {
+    // Refuse an oversized tree before walking it. Returning an empty page rather than an error keeps
+    // the source usable and the message honest: the library says it found nothing, which is what a
+    // body that is not a catalog amounts to.
+    if !within_json_node_budget(payload) {
+        return CatalogPage {
+            source_key: source_key.to_string(),
+            items: Vec::new(),
+            categories: Vec::new(),
+            page,
+            page_count: 1,
+            page_size,
+            total: 0,
+        };
+    }
     let list = payload
         .get("list")
         .and_then(Value::as_array)
@@ -819,9 +960,11 @@ fn parse_catalog_page(payload: &Value, source_key: &str, page: u32, page_size: u
     } else {
         value_u64(payload, &["total", "recordcount"]).unwrap_or(items.len() as u64)
     };
-    let page_count = value_u64(payload, &["pagecount", "page_count"])
-        .map(|value| value.max(1) as u32)
-        .unwrap_or_else(|| ((total as f64 / page_size as f64).ceil() as u32).max(1));
+    let page_count = match value_u64(payload, &["pagecount", "page_count"]) {
+        // A claimed count is used, but clamped rather than narrowed: `as u32` wrapped.
+        Some(value) => value.clamp(1, u64::from(MAX_CATALOG_PAGES)) as u32,
+        None => page_count_from_total(total, page_size),
+    };
     CatalogPage {
         source_key: source_key.to_string(),
         items,
@@ -1135,6 +1278,173 @@ mod tests {
     };
     use crate::adapters::SiteAdapterKind;
     use std::time::Instant;
+
+    /// An XML catalog whose fields carry entity references but no CDATA.
+    ///
+    /// **This is the regression test for a data-loss defect, and the fixture is deliberately not
+    /// CDATA.** quick-xml 0.39+ emits `&amp;` as its own `Event::GeneralRef`; the parser handled only
+    /// `Start`/`Text`/`CData`/`End` and dropped the rest, so the value kept only the fragment after
+    /// the last reference — measured, `<name>A&amp;B</name>` was read as "B". CDATA hides the bug
+    /// completely (its content is one text event with no references), which is why the older XML test
+    /// above could not catch it.
+    #[test]
+    fn keeps_entity_references_in_xml_fields() {
+        let payload = parse_xml_payload(
+            r#"<rss><list recordcount="1" pagecount="1"><video><id>demo-2</id><name>Tom &amp; Jerry</name><actor>甲 &amp; 乙,丙</actor><pic>https://example.com/p.jpg?x=1&amp;y=2</pic></video></list></rss>"#,
+        )
+        .unwrap();
+        let page = parse_catalog_page(&payload, "xml-source", 1, 20);
+
+        assert_eq!(
+            page.items[0].name, "Tom & Jerry",
+            "the text before the reference must not be lost"
+        );
+        assert_eq!(
+            page.items[0].actors,
+            vec!["甲 & 乙".to_string(), "丙".to_string()],
+            "an entity inside a comma-separated list must not split the wrong entry"
+        );
+        assert_eq!(page.items[0].poster, "https://example.com/p.jpg?x=1&y=2");
+    }
+
+    /// Numeric references resolve to their character, and an undefined entity survives literally.
+    ///
+    /// `&lt;`/`&gt;` would be decoded as markup by a per-fragment `unescape`, so the fixture uses a
+    /// character reference and an unknown name — the two cases where "keep the text" and "keep the
+    /// meaning" are visibly different.
+    #[test]
+    fn resolves_character_references_and_keeps_unknown_entities() {
+        let payload = parse_xml_payload(
+            r#"<rss><list><video><id>demo-3</id><name>第&#19968;集 &foo; 完</name></video></list></rss>"#,
+        )
+        .unwrap();
+        let page = parse_catalog_page(&payload, "xml-source", 1, 20);
+
+        assert_eq!(page.items[0].name, "第一集 &foo; 完");
+    }
+
+    /// A field split around a reference must not lose its whitespace.
+    ///
+    /// `trim_text(true)` used to trim each fragment separately, so the two spaces around `&amp;`
+    /// disappeared even once the reference itself was handled — producing `Tom&Jerry`.
+    #[test]
+    fn preserves_spacing_around_an_entity() {
+        let payload = parse_xml_payload(
+            r#"<rss><list><video><id>demo-4</id><name>Tom &amp; Jerry</name></video></list></rss>"#,
+        )
+        .unwrap();
+        let page = parse_catalog_page(&payload, "xml-source", 1, 20);
+
+        assert_eq!(page.items[0].name, "Tom & Jerry");
+    }
+
+    /// A bare (unescaped) ampersand costs that field, not the whole request.
+    ///
+    /// MacCMS-style XML is not reliably well formed, and quick-xml 0.41 makes a dangling `&` an
+    /// `IllFormedError::UnclosedReference` that aborted the parse at the error arm — so one stray
+    /// character anywhere in a catalog emptied the entire library.
+    #[test]
+    fn a_bare_ampersand_does_not_fail_the_whole_document() {
+        let payload = parse_xml_payload(
+            r#"<rss><list><video><id>demo-5</id><name>AT&T 宽频</name></video><video><id>demo-6</id><name>正常条目</name></video></list></rss>"#,
+        )
+        .expect("a dangling ampersand must not fail the document");
+        let page = parse_catalog_page(&payload, "xml-source", 1, 20);
+
+        assert_eq!(page.items.len(), 2, "both works must survive");
+        assert!(
+            page.items[0].name.contains("AT&T"),
+            "the tolerated ampersand stays as text, got {:?}",
+            page.items[0].name
+        );
+        assert_eq!(page.items[1].name, "正常条目");
+    }
+
+    /// A source can claim any page count it likes; the pager reads it and enables 下一页 until the
+    /// claim is exhausted.
+    ///
+    /// `total` and `pagecount` come from the response body. The old code narrowed them with `as u32`,
+    /// which wraps instead of refusing: `"total": 1e18` at 20 a page produced 4 294 967 295 pages —
+    /// the number the UI rendered literally — and every click was a fresh request to a third party.
+    #[test]
+    fn clamps_an_attacker_controlled_page_count() {
+        let huge = parse_catalog_page(
+            &json!({ "list": [], "pagecount": u64::MAX }),
+            "source",
+            1,
+            20,
+        );
+        assert_eq!(huge.page_count, 10_000, "a claimed page count is clamped");
+
+        // No `pagecount`, so it is derived from `total` — which is equally attacker-controlled.
+        let derived = parse_catalog_page(
+            &json!({ "list": [], "total": 1e18 as u64 }),
+            "source",
+            1,
+            20,
+        );
+        assert_eq!(derived.page_count, 10_000);
+
+        // A zero page count is one page, not zero: an empty result still renders page 1.
+        let empty = parse_catalog_page(&json!({ "list": [], "total": 0 }), "source", 1, 20);
+        assert_eq!(empty.page_count, 1);
+    }
+
+    /// The derived count is integer division: `div_ceil`, not an `f64` round trip.
+    ///
+    /// `total as f64` loses precision above 2^53, and `as u32` saturates at `u32::MAX` once the
+    /// quotient is above it. The cases below are the ones a float path gets visibly wrong.
+    #[test]
+    fn derives_the_page_count_without_a_float_round_trip() {
+        // 21 works at 20 a page is 2 pages, and the last page holds one item.
+        let page = parse_catalog_page(&json!({ "list": [], "total": 21 }), "source", 1, 20);
+        assert_eq!(page.page_count, 2);
+
+        // An exact multiple must not add a spurious empty page.
+        let exact = parse_catalog_page(&json!({ "list": [], "total": 40 }), "source", 1, 20);
+        assert_eq!(exact.page_count, 2);
+
+        // A page size that arrives as 0 — `page_size` is clamped by the caller, so this is the
+        // helper's own guard: no division by zero, and the total is read one item per page.
+        assert_eq!(super::page_count_from_total(5, 0), 5);
+        assert_eq!(super::page_count_from_total(0, 0), 1);
+    }
+
+    /// A response that is a tree of millions of nodes must not be walked.
+    ///
+    /// The byte cap is enforced before parsing, but 15 MiB of tiny scalars materialises as roughly
+    /// 7.9 million `serde_json::Value` nodes (~240 MiB) and `parse_catalog_page` then walked all of
+    /// them. The budget refuses the shape, and the page comes back honestly empty.
+    #[test]
+    fn refuses_a_json_tree_that_is_not_a_catalog_page() {
+        // 200 001 nodes of padding inside a would-be item, under the byte cap.
+        let filler = vec![serde_json::Value::Null; 200_000];
+        let page = parse_catalog_page(
+            &json!({
+                "total": 1,
+                "list": [{ "vod_id": "1", "vod_name": "甲", "filler": filler }]
+            }),
+            "source",
+            1,
+            20,
+        );
+
+        assert!(page.items.is_empty(), "the oversized tree must not be walked");
+        assert_eq!(page.page_count, 1);
+        assert_eq!(page.total, 0);
+
+        // An ordinary page is unaffected: the budget is far above a real one.
+        let ordinary = parse_catalog_page(
+            &json!({
+                "total": 1,
+                "list": [{ "vod_id": "1", "vod_name": "甲", "vod_play_url": "第1集$https://a.m3u8" }]
+            }),
+            "source",
+            1,
+            20,
+        );
+        assert_eq!(ordinary.items.len(), 1);
+    }
 
     #[test]
     fn parses_tvbox_xml_items_categories_and_cdata() {

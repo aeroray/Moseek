@@ -248,7 +248,10 @@ fn parse_catalog(
         items,
         categories: Vec::new(),
         page,
-        page_count: ((total as f64 / page_size as f64).ceil() as u32).max(1),
+        // The total comes from the page's own markup, so it is as attacker-controlled as a JSON
+        // field: the `f64` round trip and `as u32` narrowing here were the same defect as
+        // `cms::parse_catalog_page` had. One helper computes every family's page count.
+        page_count: crate::cms::page_count_from_total(total, page_size),
         page_size,
         total,
     })
@@ -381,9 +384,10 @@ fn parse_selector(value: &str) -> Result<Selector, String> {
 }
 
 fn resolve_link(base_url: &reqwest::Url, value: &str) -> Option<reqwest::Url> {
-    if value.starts_with("javascript:") || value.starts_with("data:") {
-        return None;
-    }
+    // No `starts_with("javascript:")` / `starts_with("data:")` here any more. `Url::join` lowercases
+    // the scheme, so a case-sensitive prefix test let `JAVASCRIPT:alert(1)` (and the same value with
+    // a leading space) through to the join — it stated a rule it did not enforce. The scheme decision
+    // belongs in one place: `validate_remote_url` accepts http/https only.
     let url = base_url.join(value).ok()?;
     validate_remote_url(&url).ok()?;
     Some(url)
@@ -555,5 +559,70 @@ mod tests {
             "https://example.com/play/1.m3u8"
         );
         assert_eq!(page.items[0].categories.len(), 2);
+    }
+
+    /// A total scraped from the page is attacker-controlled, and the page count must not wrap.
+    ///
+    /// The markup decides `total`, and the expression here was the same `f64::ceil` then `as u32`
+    /// narrowing that made `cms::parse_catalog_page` render four billion pages for a hostile JSON
+    /// body. A page claiming 10^15 works must yield the clamped count, not a wrapped one.
+    #[test]
+    fn clamps_a_page_count_taken_from_the_pages_own_markup() {
+        let config: HtmlAdapterConfig = serde_json::from_str(
+            r#"{
+              "itemSelector": ".card",
+              "totalSelector": ".count",
+              "fields": { "name": ".title" }
+            }"#,
+        )
+        .unwrap();
+        let page = parse_catalog(
+            r#"<main><span class="count">1000000000000000</span><article class="card"><h2 class="title">影片一</h2></article></main>"#,
+            &"https://example.com/search".parse().unwrap(),
+            &source(),
+            &config,
+            1,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(page.total, 1_000_000_000_000_000);
+        assert_eq!(
+            page.page_count, 10_000,
+            "a hostile total must be clamped, not narrowed with `as u32`"
+        );
+    }
+
+    /// A link whose scheme is not http/https must be dropped whatever its spelling.
+    ///
+    /// The removed guard compared `starts_with("javascript:")`, which `Url::join` defeats because it
+    /// lowercases the scheme — so `JAVASCRIPT:alert(1)` was joined as `javascript:` and only the
+    /// second, independent check stopped it. `validate_remote_url` is now the single decision point.
+    #[test]
+    fn drops_links_whose_scheme_is_not_http() {
+        let config: HtmlAdapterConfig = serde_json::from_str(
+            r#"{
+              "itemSelector": ".card",
+              "fields": {
+                "name": ".title",
+                "playUrl": {"selector": "a.play", "attr": "href"}
+              }
+            }"#,
+        )
+        .unwrap();
+        let page = parse_catalog(
+            r#"<main><article class="card"><h2 class="title">影片一</h2><a class="play" href="JAVASCRIPT:alert(1)">播放</a></article></main>"#,
+            &"https://example.com/search".parse().unwrap(),
+            &source(),
+            &config,
+            1,
+            20,
+        )
+        .unwrap();
+
+        assert!(
+            page.items[0].play_lines.is_empty(),
+            "a javascript: link must never become an episode"
+        );
     }
 }

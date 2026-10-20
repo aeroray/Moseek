@@ -646,11 +646,10 @@ pub(crate) async fn browse_source(
         items,
         categories: categories(&config),
         page,
-        page_count: if total == 0 {
-            1
-        } else {
-            ((total as f64 / page_size.max(1) as f64).ceil() as u32).max(1)
-        },
+        // The count is this page's own item count, so it is not attacker-controlled beyond the page
+        // size — but the expression was a copy of the one in `cms.rs` (`f64::ceil` then `as u32`),
+        // and a shared helper keeps the three families from drifting apart again.
+        page_count: crate::cms::page_count_from_total(total, page_size),
         page_size,
         total,
     })
@@ -1099,9 +1098,12 @@ fn is_episode_link(url: &str) -> bool {
 /// Resolves a possibly relative link against the page, refusing non-remote schemes.
 fn resolve(base_url: &reqwest::Url, value: &str) -> Option<reqwest::Url> {
     let value = value.trim();
-    if value.is_empty() || value.starts_with("javascript:") || value.starts_with("data:") {
+    if value.is_empty() {
         return None;
     }
+    // No case-sensitive `starts_with("javascript:")` guard: `Url::join` lowercases the scheme, so it
+    // did not block `JAVASCRIPT:` and it did not block a leading space either. `validate_remote_url`
+    // is the one place that decides a scheme, and it accepts http/https only.
     let url = base_url.join(value).ok()?;
     validate_remote_url(&url).ok()?;
     Some(url)
@@ -1713,6 +1715,46 @@ mod tests {
 
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0], "https://cdn.example/hls/abc/index.m3u8");
+    }
+
+    /// A link guard must not depend on how the scheme is spelled.
+    ///
+    /// `resolve` used `starts_with("javascript:")`, which is case-sensitive and skips nothing: the
+    /// URL parser lowercases the scheme before joining, so `JAVASCRIPT:alert(1)` — and the same value
+    /// with a leading space — sailed past the guard. `validate_remote_url` is the single place that
+    /// decides a scheme now, and it accepts http/https only.
+    #[test]
+    fn refuses_a_non_http_link_whatever_its_case() {
+        let base: reqwest::Url = "https://example.com/voddetail/1.html".parse().unwrap();
+
+        assert!(super::resolve(&base, "JAVASCRIPT:alert(1)").is_none());
+        assert!(super::resolve(&base, "  javascript:alert(1)").is_none());
+        assert!(super::resolve(&base, "DATA:text/html,x").is_none());
+        // An ordinary relative link is still resolved against the page.
+        assert_eq!(
+            super::resolve(&base, "/vodplay/2-1-1.html")
+                .map(|url| url.to_string())
+                .as_deref(),
+            Some("https://example.com/vodplay/2-1-1.html")
+        );
+    }
+
+    /// A listing's page count comes from this page's own item count, so it must not be narrowed.
+    ///
+    /// The expression was a copy of the `cms.rs` one (`f64::ceil` then `as u32`); the shared helper
+    /// makes all three families compute it the same way, and a page size that never arrives as zero
+    /// is still guarded against division by zero.
+    #[test]
+    fn computes_the_listing_page_count_with_integer_division() {
+        assert_eq!(crate::cms::page_count_from_total(21, 20), 2);
+        assert_eq!(crate::cms::page_count_from_total(40, 20), 2);
+        assert_eq!(crate::cms::page_count_from_total(0, 20), 1);
+        // A hostile total cannot claim more pages than the pager will walk.
+        assert_eq!(
+            crate::cms::page_count_from_total(u64::MAX, 1),
+            10_000,
+            "an attacker-controlled total must be clamped"
+        );
     }
 
     #[test]
